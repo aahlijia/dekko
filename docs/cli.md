@@ -346,8 +346,12 @@ sets by `(file, line)` into three buckets:
 - **dekko-only** — dekko resolved a call grep's literal pattern
   didn't match (an alias, a multi-line call) — informational.
 - **grep-only** — grep found a line dekko's answer missed. Each entry
-  is labeled with a likely cause: a cross-package/qualified call
-  (`pkg.Func(`, `Type::method(`, `Type.method(`), a bare
+  is labeled with a likely cause: a qualified call (`pkg.Func(`,
+  `Type::method(`, `Type.method(`) — which says what the map
+  recorded at that line when it recorded anything: external (with the
+  callee, `external_callee` in `--json`), ambiguous (2+ in-repo
+  candidates, none picked), or nothing at all, the real blind spot —
+  a bare
   import/require statement naming the symbol (`import { X } from
   '...'`, `from x import X`, `const { X } = require('...')`, a Rust
   `use a::{X, Y};` line or one row of a multi-line `use` list — not a
@@ -488,8 +492,8 @@ repo's own `ErrorPage` in another package, `org.other.Tool.m(..)` can't
 be the repo's `Tool.m`, and `new Other.Inner()` can't be `Outer.Inner`;
 the resolver reads the written path the same way. Such a line reads
 `written through another package's or type's qualified name, so it
-names a different type — not a miss`, instead of `cross-package/
-qualified call — known resolver blind spot`.
+names a different type — not a miss`, instead of a qualified-call
+label.
 
 **A site the map attributed to a same-named sibling, since 1.5.9.**
 When two unrelated symbols share a bare name (a 1-arg `errorMessage(e)`

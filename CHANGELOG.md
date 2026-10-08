@@ -9,6 +9,30 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.13] — 2026-10-08
+
+### Fixed
+- **`sanity` no longer calls a comment, a string or an unparsed file a
+  resolver blind spot.** The qualified-call rung ran before the
+  comment, string and unparsed-language rungs, so `// ccr.close() ran
+  first`, `"call x.close() first"` and a README's `conn.close()` all
+  read as calls the resolver might have missed. Those facts now come
+  first; none of those lines ever reaches the resolver.
+- **A qualified call says what the resolver decided.** A grep-only
+  `x.name(..)` row now reads the map at that line: `dekko recorded this
+  call as external` (with the callee as `external_callee`) or `the
+  resolver found 2+ in-repo candidates for a call of this name here and
+  picked none`. Only a call the map has no record of keeps the
+  blind-spot label, reworded to `qualified call the map has no record
+  of` ("cross-package" was wrong for same-package calls). claude-code:
+  1,636 of 1,663 such rows in the top targets were recorded.
+- **`Cursor.fromText(..)` for target `Cursor`** reads `names the class
+  as the receiver of a static member`, not "passed or stored as a
+  value".
+- `sanity --all`'s `aggregate_causes` gains the keys for the recorded
+  external, recorded ambiguous and static-member causes, and the
+  qualified-call key's text changed.
+
 ## [1.8.12] — 2026-10-08
 
 ### Fixed

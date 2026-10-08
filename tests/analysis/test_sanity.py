@@ -211,7 +211,8 @@ def test_classify_miss_near_definition_but_not_comment_shaped() -> None:
     assert cause != sanity.CAUSE_COMMENT_MENTION
 
 
-def test_classify_miss_qualified_call_still_wins_near_definition() -> None:
+def test_classify_miss_comment_quoting_a_call_is_a_comment() -> None:
+    # A comment never reaches the resolver, whatever code it quotes.
     cause = sanity.classify_miss(
         "// e.g. pkg.Helper(3)",
         "Helper",
@@ -221,7 +222,7 @@ def test_classify_miss_qualified_call_still_wins_near_definition() -> None:
         near_own_definition=True,
         looks_like_comment=True,
     )
-    assert cause == sanity.CAUSE_QUALIFIED_CALL
+    assert cause == sanity.CAUSE_COMMENT_MENTION
 
 
 def test_classify_miss_python_docstring_opening_line() -> None:
@@ -437,7 +438,7 @@ def test_sanity_all_matches_reports_clean(
     assert doc["counts"]["matches"] >= 1
 
 
-def test_sanity_detects_qualified_call_miss(
+def test_sanity_labels_a_qualified_call_the_map_sent_external(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
@@ -455,7 +456,7 @@ def test_sanity_detects_qualified_call_miss(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     causes = {row["cause"] for row in doc["grep_only"]}
-    assert sanity.CAUSE_QUALIFIED_CALL in causes
+    assert sanity.CAUSE_RECORDED_EXTERNAL in causes
 
 
 def test_sanity_detects_test_filter_miss(
@@ -3277,16 +3278,20 @@ def test_classify_grep_hits_matches_single_target_path(
 
     index = mapfile.load_map(root)
     assert index is not None
-    own_def_locs = frozenset(
-        (s.path, s.start_line) for s in index.symbols_by_name.get("target", [])
+    query_index = index.without_tests()
+    inputs = sanity._name_inputs(
+        query_index,
+        "target",
+        frozenset(),
+        sanity._ambiguous_spans_by_name(query_index),
     )
     sweep = sanity._run_grep(root, "target")
     causes_from_helper = sanity._classify_grep_hits(
         sweep.hits,
         "target",
         root,
-        own_def_locs=own_def_locs,
         tests_excluded=True,
+        **vars(inputs),
     )
     # _force_no_dekko_hits means every non-own-def hit landed in
     # grep_only above, so the two maps cover exactly the same set.
@@ -4012,8 +4017,8 @@ def test_sanity_group_by_file_rolls_up_grep_only(
     # b.py (2 hits) must sort before c.py (1 hit).
     assert out.index("b.py: 2") < out.index("c.py: 1")
     assert f"{sanity.CAUSE_UNEXPLAINED}   <-- look here" in out
-    assert sanity.CAUSE_QUALIFIED_CALL in out
-    assert f"{sanity.CAUSE_QUALIFIED_CALL}   <-- look here" not in out
+    assert sanity.CAUSE_RECORDED_EXTERNAL in out
+    assert f"{sanity.CAUSE_RECORDED_EXTERNAL}   <-- look here" not in out
 
 
 def test_sanity_group_by_file_omitted_keeps_flat_listing(

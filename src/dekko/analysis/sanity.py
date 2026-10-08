@@ -193,8 +193,31 @@ DEFAULT_REPORT_LIMIT = 200
 
 # --- blind-spot classification -------------------------------------
 
+# A call on a receiver the map has no record of at this line: no edge,
+# no external row, no ambiguous row. The rows the resolver did decide
+# get ``CAUSE_RECORDED_EXTERNAL`` / ``CAUSE_RECORDED_AMBIGUOUS`` instead.
 CAUSE_QUALIFIED_CALL = (
-    "cross-package/qualified call — known resolver blind spot"
+    "qualified call the map has no record of — known resolver blind spot"
+)
+# Tier 1: the map records an external call of the name at this exact
+# line, so the resolver did see the call and placed its receiver
+# outside the repo (``Object.entries``, a local ``Set``'s ``add``). The
+# callee text rides on the row as ``external_callee``.
+CAUSE_RECORDED_EXTERNAL = (
+    "dekko recorded this call as external (see external_callee) — a "
+    "miss only if that receiver is a repo type"
+)
+# The map's ambiguous rows carry no line numbers, so this is keyed by
+# the enclosing caller: the line sits in a function whose call of this
+# name the resolver found 2+ in-repo candidates for.
+CAUSE_RECORDED_AMBIGUOUS = (
+    "the resolver found 2+ in-repo candidates for a call of this name "
+    "here and picked none (see: dekko ambiguous --name <name>)"
+)
+# Every label a qualified call can carry: what a target-level rule may
+# still relabel when it knows the line can't reach the target.
+_QUALIFIED_FAMILY = frozenset(
+    {CAUSE_QUALIFIED_CALL, CAUSE_RECORDED_EXTERNAL, CAUSE_RECORDED_AMBIGUOUS}
 )
 # A call through a field (``this.client.get(..)``), told apart by what
 # the field's declared type says (``receiver_field_state``).
@@ -268,6 +291,13 @@ CAUSE_VALUE_REFERENCE = (
     "passed or stored as a value, not called — dekko has this as a "
     "reference (see: dekko query callers <target>, 'referenced (not "
     "called)')"
+)
+# Tier 1, type targets: the recorded reference is the class written as
+# the receiver of a static member (``Cursor.fromText(..)``). Not a
+# construction, and not the class "passed or stored as a value".
+CAUSE_STATIC_MEMBER_REFERENCE = (
+    "names the class as the receiver of a static member (`Name.member`) "
+    "— dekko records it as a reference to the class, not a call of it"
 )
 # Tier 2: a line-shape match in a language whose spec has no
 # ``reference_query``. The label says it is a shape match and names
@@ -1352,6 +1382,7 @@ def _reset_file_caches() -> None:
     _file_lines.clear()
     _file_states.clear()
     _shadow_decl_lines.clear()
+    _external_callees.clear()
 
 
 def _cached_lines(root: Path, path: str) -> list[str]:
@@ -2512,6 +2543,7 @@ def classify_miss(
             narrower.
         unsupported_language: Whether the hit's file is in a language
             dekko has no parser for (``languages.is_supported``).
+            Checked right after ``not_mapped``, before any call rung.
         tests_excluded: Whether the dekko-side query this hit is being
             compared against excluded test files (``sanity``'s own
             default; see the module docstring).
@@ -2567,10 +2599,12 @@ def classify_miss(
         looks_like_string_mention: Whether a JS/TS, Java or Kotlin
             line names the target only inside string or template text
             (``_js_shapes``, ``_looks_like_jvm_string_mention``).
-            Checked after the type rung.
+            Checked after the comment rungs, before any call rung: a
+            name that is gone once string text is blanked can't be a
+            call.
         is_recorded_read: Whether the map records a property read of
             the name at this JS/TS line and the line has no bare call
-            of it (``_js_shapes``). Checked after the string rung.
+            of it (``_js_shapes``). Checked after the type rungs.
         in_template_text: Whether the JS/TS line starts inside a
             template literal opened above and the name is gone once
             that text is blanked (``_js_line_state``). Checked right
@@ -2594,8 +2628,8 @@ def classify_miss(
             still reads as a comment).
         looks_like_trailing_comment: Whether the name appears only in
             a comment that follows code on the line
-            (``_looks_like_trailing_comment``). Checked after the type
-            rung, before the string rung.
+            (``_looks_like_trailing_comment``). Checked with the other
+            comment rungs, before the string rung and any call rung.
         looks_like_jsx_text: Whether the name sits only in JSX text
             content (``_looks_like_jsx_text``). Checked after the
             string rung.
@@ -2620,12 +2654,24 @@ def classify_miss(
     # would be false there.
     if not_mapped:
         return CAUSE_NOT_MAPPED
-    # Second: a line that starts inside a template literal or a block
-    # comment opened above has no shape of its own to read.
-    if in_template_text:
-        return CAUSE_STRING_MENTION
-    if in_block_comment:
-        return CAUSE_COMMENT_ELSEWHERE
+    # Then every fact about the file or the line that rules out a call
+    # outright, before any rung that guesses at one: a file dekko can't
+    # parse, a comment, string text. None of them ever reaches the
+    # resolver, so "qualified call -- resolver blind spot" was false
+    # for ``// ccr.close() ran first`` and for a README's
+    # ``conn.close()``. Prose quotes code all the time.
+    fact = _line_fact_cause(
+        unsupported_language=unsupported_language,
+        in_template_text=in_template_text,
+        in_block_comment=in_block_comment,
+        looks_like_comment=looks_like_comment,
+        near_own_definition=near_own_definition,
+        in_leading_header_comment=in_leading_header_comment,
+        looks_like_trailing_comment=looks_like_trailing_comment,
+        looks_like_string_mention=looks_like_string_mention,
+    )
+    if fact is not None:
+        return fact
     binding = _FIELD_STATE_CAUSES.get(
         receiver_field_state or ""
     ) or _binding_cause(
@@ -2636,22 +2682,11 @@ def classify_miss(
     )
     if binding is not None:
         return binding
-    # The comment test sits above the type and
-    # string-literal checks. A comment is a comment whatever it quotes
-    # (``# ... "tfrun" commands ...`` used to get the literal label).
-    # It stays below the anchored qualified-call/import checks, which
-    # can't match prose.
-    if looks_like_comment:
-        if near_own_definition or in_leading_header_comment:
-            return CAUSE_COMMENT_MENTION
-        return CAUSE_COMMENT_ELSEWHERE
     non_call = _non_call_cause(
         is_recorded_reference=is_recorded_reference,
         in_type_context=in_type_context,
         looks_like_type_annotation=looks_like_type_annotation,
         looks_like_type_mention=looks_like_type_mention,
-        looks_like_trailing_comment=looks_like_trailing_comment,
-        looks_like_string_mention=looks_like_string_mention,
         looks_like_jsx_text=looks_like_jsx_text,
         is_recorded_read=is_recorded_read,
         looks_like_property_access=looks_like_property_access,
@@ -2665,11 +2700,48 @@ def classify_miss(
     return _classify_miss_remaining(
         bare_name,
         is_test_file=is_test_file,
-        unsupported_language=unsupported_language,
         tests_excluded=tests_excluded,
         looks_like_value_reference=looks_like_value_reference,
         is_known_collision_name=is_known_collision_name,
     )
+
+
+def _line_fact_cause(
+    *,
+    unsupported_language: bool,
+    in_template_text: bool,
+    in_block_comment: bool,
+    looks_like_comment: bool,
+    near_own_definition: bool,
+    in_leading_header_comment: bool,
+    looks_like_trailing_comment: bool,
+    looks_like_string_mention: bool,
+) -> str | None:
+    """``classify_miss``'s rungs that rule a call out from the file or
+    the line alone: an unparsed file, string text, a comment. ``None``
+    when none holds.
+
+    A line that starts inside a template literal or a block comment
+    opened above has no shape of its own to read, so those two go
+    first. A comment is a comment whatever it quotes (``# ... "tfrun"
+    commands ...`` used to get the literal label), so it sits above the
+    string check.
+    """
+    if unsupported_language:
+        return CAUSE_UNSUPPORTED_LANGUAGE
+    if in_template_text:
+        return CAUSE_STRING_MENTION
+    if in_block_comment:
+        return CAUSE_COMMENT_ELSEWHERE
+    if looks_like_comment:
+        if near_own_definition or in_leading_header_comment:
+            return CAUSE_COMMENT_MENTION
+        return CAUSE_COMMENT_ELSEWHERE
+    if looks_like_trailing_comment:
+        return CAUSE_TRAILING_COMMENT
+    if looks_like_string_mention:
+        return CAUSE_STRING_MENTION
+    return None
 
 
 def _binding_cause(
@@ -2701,8 +2773,6 @@ def _non_call_cause(
     in_type_context: bool,
     looks_like_type_annotation: bool,
     looks_like_type_mention: bool,
-    looks_like_trailing_comment: bool,
-    looks_like_string_mention: bool,
     looks_like_jsx_text: bool,
     is_recorded_read: bool,
     looks_like_property_access: bool,
@@ -2722,10 +2792,6 @@ def _non_call_cause(
         return CAUSE_TYPE_ANNOTATION
     if looks_like_type_mention:
         return CAUSE_TYPE_MENTION
-    if looks_like_trailing_comment:
-        return CAUSE_TRAILING_COMMENT
-    if looks_like_string_mention:
-        return CAUSE_STRING_MENTION
     if looks_like_jsx_text:
         return CAUSE_JSX_TEXT
     return _member_shape_cause(
@@ -2762,7 +2828,6 @@ def _classify_miss_remaining(
     bare_name: str,
     *,
     is_test_file: bool,
-    unsupported_language: bool,
     tests_excluded: bool,
     looks_like_value_reference: bool,
     is_known_collision_name: bool = False,
@@ -2774,8 +2839,6 @@ def _classify_miss_remaining(
     documented/tested beyond what ``classify_miss``'s own test suite
     already exercises through the public function.
     """
-    if unsupported_language:
-        return CAUSE_UNSUPPORTED_LANGUAGE
     if looks_like_value_reference:
         return CAUSE_VALUE_REFERENCE_UNRESOLVED
     if tests_excluded and is_test_file:
@@ -3548,7 +3611,7 @@ def _jvm_target_cause(
     the target's reach (``jvm_unreachable``), or written through a type
     path the target isn't on (``_written_off_path``). Only for a row
     under a qualified-call cause or one in ``_REMAINING_CAUSES``."""
-    if cause not in _REMAINING_CAUSES and cause != CAUSE_QUALIFIED_CALL:
+    if cause not in _REMAINING_CAUSES and cause not in _QUALIFIED_FAMILY:
         return None
     if jvm_unreachable(path, sym):
         return CAUSE_NOT_REACHABLE
@@ -3795,10 +3858,15 @@ class _NameInputs:
     target_kinds: frozenset[str]
     read_sites: frozenset[tuple[str, int]]
     is_known_collision_name: bool
+    external_sites: dict[tuple[str, int], str] = field(default_factory=dict)
+    ambiguous_spans: tuple[tuple[str, int, int], ...] = ()
 
 
 def _name_inputs(
-    index: MapIndex, bare_name: str, collision_names: frozenset[str]
+    index: MapIndex,
+    bare_name: str,
+    collision_names: frozenset[str],
+    ambiguous_spans_by_name: dict[str, tuple[tuple[str, int, int], ...]],
 ) -> _NameInputs:
     """Build the shared classification inputs for ``bare_name``.
 
@@ -3809,6 +3877,8 @@ def _name_inputs(
         index: The query index.
         bare_name: The bare name.
         collision_names: ``ambiguous.collision_names(index)``.
+        ambiguous_spans_by_name: ``_ambiguous_spans_by_name(index)``,
+            built once per run by the caller.
 
     Returns:
         The inputs.
@@ -3821,7 +3891,47 @@ def _name_inputs(
         target_kinds=_name_kinds(index, bare_name),
         read_sites=_read_sites(index, bare_name),
         is_known_collision_name=bare_name in collision_names,
+        external_sites=_external_sites(index, bare_name),
+        ambiguous_spans=ambiguous_spans_by_name.get(bare_name, ()),
     )
+
+
+def _external_sites(
+    index: MapIndex, bare_name: str
+) -> dict[tuple[str, int], str]:
+    """Every ``(path, line)`` the map records an external call of
+    ``bare_name`` at, mapped to the callee text as written."""
+    sites: dict[tuple[str, int], str] = {}
+    for ext in index.externals_by_name.get(bare_name, []):
+        path = _caller_path(index, ext.caller)
+        for line in ext.lines:
+            sites[(path, line)] = ext.callee
+
+    return sites
+
+
+def _ambiguous_spans_by_name(
+    index: MapIndex,
+) -> dict[str, tuple[tuple[str, int, int], ...]]:
+    """Bare name -> the ``(path, start, end)`` span of every caller the
+    map records an ambiguous call of that name in.
+
+    Built once per run: ``ambiguous_out`` is keyed by caller, and
+    scanning it per name would cost the whole table for every one of
+    ``--all``'s names. A module-level caller has no span, so it covers
+    its whole file.
+    """
+    spans: dict[str, list[tuple[str, int, int]]] = {}
+    for caller, names in index.ambiguous_out.items():
+        sym = index.symbols_by_id.get(caller)
+        if sym is not None:
+            span = (sym.path, sym.start_line, sym.end_line)
+        else:
+            span = (_caller_path(index, caller), 1, sys.maxsize)
+        for name in set(names):
+            spans.setdefault(name, []).append(span)
+
+    return {name: tuple(rows) for name, rows in spans.items()}
 
 
 def _name_kinds(index: MapIndex, bare_name: str) -> frozenset[str]:
@@ -4064,6 +4174,8 @@ def _classify_grep_hits(
     symbols_by_path: dict[str, list[Symbol]] | None = None,
     scope: _MapScope | None = None,
     read_sites: frozenset[tuple[str, int]] = frozenset(),
+    external_sites: dict[tuple[str, int], str] | None = None,
+    ambiguous_spans: tuple[tuple[str, int, int], ...] = (),
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -4148,84 +4260,142 @@ def _classify_grep_hits(
         chain = _enclosing_chain(
             symbols_by_path.get(h.path, []) if symbols_by_path else [], h.line
         )
-        causes[loc] = classify_miss(
+        causes[loc] = _refine_reference(
             h.snippet,
             bare_name,
-            is_test_file=(
-                scope.is_test_line(h.path, h.line)
-                if scope is not None
-                else is_test_path(h.path)
-            ),
-            unsupported_language=not languages.is_supported(h.path),
-            tests_excluded=tests_excluded,
-            near_own_definition=any(
-                h.path == p and abs(h.line - ln) <= _COMMENT_PROXIMITY_LINES
-                for p, ln in own_def_locs
-            ),
-            looks_like_comment=(
-                _looks_like_comment_line(h.snippet, h.path)
-                or _looks_like_block_comment_continuation(root, h)
-            ),
-            looks_like_import_member=(
-                _looks_like_multiline_import_member(root, h, bare_name)
-                or _looks_like_rust_use_line(root, h, bare_name)
-                or shapes.export_member
-            ),
-            # ``.map(Prompt::as_str)`` also matches the TS-shaped
-            # ``: name`` type template (on the second colon of ``::``)
-            # and used to be labelled "type annotation" for a function
-            # target. The path-value reading wins.
-            looks_like_type_annotation=(
-                not looks_like_value
-                and (
-                    _looks_like_type_annotation(
-                        h.snippet,
-                        bare_name,
-                        h.path,
-                        target_is_type=target_is_type,
+            target_is_type,
+            classify_miss(
+                h.snippet,
+                bare_name,
+                is_test_file=(
+                    scope.is_test_line(h.path, h.line)
+                    if scope is not None
+                    else is_test_path(h.path)
+                ),
+                unsupported_language=not languages.is_supported(h.path),
+                tests_excluded=tests_excluded,
+                near_own_definition=any(
+                    h.path == p
+                    and abs(h.line - ln) <= _COMMENT_PROXIMITY_LINES
+                    for p, ln in own_def_locs
+                ),
+                looks_like_comment=(
+                    _looks_like_comment_line(h.snippet, h.path)
+                    or _looks_like_block_comment_continuation(root, h)
+                ),
+                looks_like_import_member=(
+                    _looks_like_multiline_import_member(root, h, bare_name)
+                    or _looks_like_rust_use_line(root, h, bare_name)
+                    or shapes.export_member
+                ),
+                # ``.map(Prompt::as_str)`` also matches the TS-shaped
+                # ``: name`` type template (on the second colon of ``::``)
+                # and used to be labelled "type annotation" for a function
+                # target. The path-value reading wins.
+                looks_like_type_annotation=(
+                    not looks_like_value
+                    and (
+                        _looks_like_type_annotation(
+                            h.snippet,
+                            bare_name,
+                            h.path,
+                            target_is_type=target_is_type,
+                        )
+                        or shapes.type_shape
                     )
-                    or shapes.type_shape
-                )
+                ),
+                looks_like_local_binding_or_literal=(
+                    js.key_or_field
+                    or _looks_like_local_binding_or_literal(
+                        h.snippet, bare_name
+                    )
+                    or shapes.declaration
+                ),
+                looks_like_type_mention=_looks_like_jvm_type_mention(
+                    h.snippet, bare_name, h.path, target_is_type=target_is_type
+                ),
+                looks_like_string_mention=(
+                    js.string_mention
+                    or _looks_like_jvm_string_mention(
+                        h.snippet, bare_name, h.path
+                    )
+                ),
+                is_recorded_read=js.property_read,
+                in_template_text=shapes.template_text,
+                in_block_comment=shapes.block_comment,
+                looks_like_expression_call=shapes.expression_call,
+                in_type_context=bool(chain)
+                and chain[0].kind in _TYPE_CONTEXT_KINDS,
+                looks_like_trailing_comment=shapes.trailing_comment,
+                looks_like_jsx_text=shapes.jsx_text,
+                looks_like_property_access=shapes.property_access,
+                looks_like_signature=shapes.signature,
+                receiver_field_state=receiver_field_state(
+                    h.snippet, bare_name, chain, scope
+                ),
+                in_leading_header_comment=(
+                    _looks_like_comment_line(h.snippet, h.path)
+                    and _in_leading_header_comment(root, h)
+                ),
+                is_known_collision_name=is_known_collision_name,
+                is_recorded_reference=is_recorded_reference,
+                looks_like_value_reference=looks_like_value,
+                not_mapped=scope is not None and scope.is_unmapped(h.path),
             ),
-            looks_like_local_binding_or_literal=(
-                js.key_or_field
-                or _looks_like_local_binding_or_literal(h.snippet, bare_name)
-                or shapes.declaration
-            ),
-            looks_like_type_mention=_looks_like_jvm_type_mention(
-                h.snippet, bare_name, h.path, target_is_type=target_is_type
-            ),
-            looks_like_string_mention=(
-                js.string_mention
-                or _looks_like_jvm_string_mention(h.snippet, bare_name, h.path)
-            ),
-            is_recorded_read=js.property_read,
-            in_template_text=shapes.template_text,
-            in_block_comment=shapes.block_comment,
-            looks_like_expression_call=shapes.expression_call,
-            in_type_context=bool(chain)
-            and chain[0].kind in _TYPE_CONTEXT_KINDS,
-            looks_like_trailing_comment=shapes.trailing_comment,
-            looks_like_jsx_text=shapes.jsx_text,
-            looks_like_property_access=shapes.property_access,
-            looks_like_signature=shapes.signature,
-            receiver_field_state=receiver_field_state(
-                h.snippet, bare_name, chain, scope
-            ),
-            in_leading_header_comment=(
-                _looks_like_comment_line(h.snippet, h.path)
-                and _in_leading_header_comment(root, h)
-            ),
-            is_known_collision_name=is_known_collision_name,
-            is_recorded_reference=is_recorded_reference,
-            looks_like_value_reference=looks_like_value,
-            not_mapped=scope is not None and scope.is_unmapped(h.path),
         )
+    _apply_map_verdict(causes, external_sites or {}, ambiguous_spans)
     if symbols_by_path:
         _explain_shadowing_locals(
             causes, hits, bare_name, root, own_def_locs, symbols_by_path
         )
     return causes
+
+
+def _refine_reference(
+    snippet: str, bare_name: str, target_is_type: bool, cause: str
+) -> str:
+    """``CAUSE_STATIC_MEMBER_REFERENCE`` for a recorded reference to a
+    type whose every mention on the line is ``Name.member``, else
+    ``cause`` unchanged."""
+    if cause != CAUSE_VALUE_REFERENCE or not target_is_type:
+        return cause
+
+    word = _word(bare_name)
+    static = re.compile(
+        rf"(?<![\w.$]){re.escape(bare_name)}\s*\??\.\s*[A-Za-z_$]"
+    )
+    mentions = len(word.findall(snippet))
+    if mentions and mentions == len(static.findall(snippet)):
+        return CAUSE_STATIC_MEMBER_REFERENCE
+
+    return cause
+
+
+def _apply_map_verdict(
+    causes: dict[tuple[str, int], str],
+    external_sites: dict[tuple[str, int], str],
+    ambiguous_spans: tuple[tuple[str, int, int], ...],
+) -> None:
+    """Relabel qualified-call rows the resolver did decide, in place.
+
+    A line the map records as an external call of the name gets
+    ``CAUSE_RECORDED_EXTERNAL`` (exact to the line, its callee kept for
+    the row); a line inside a caller with an ambiguous call of the name
+    gets ``CAUSE_RECORDED_AMBIGUOUS``. A row the map has no record of
+    keeps ``CAUSE_QUALIFIED_CALL``: that one is the blind spot.
+    """
+    for loc, cause in causes.items():
+        if cause != CAUSE_QUALIFIED_CALL:
+            continue
+        callee = external_sites.get(loc)
+        if callee is not None:
+            causes[loc] = CAUSE_RECORDED_EXTERNAL
+            _external_callees[loc] = callee
+        elif any(
+            path == loc[0] and start <= loc[1] <= end
+            for path, start, end in ambiguous_spans
+        ):
+            causes[loc] = CAUSE_RECORDED_AMBIGUOUS
 
 
 # ``(path, line)`` of a grep hit → the line of the same-named local
@@ -4234,6 +4404,10 @@ def _classify_grep_hits(
 # half-dozen call layers between them: a hit's location is unique
 # within a run and the value is purely presentational.
 _shadow_decl_lines: dict[tuple[str, int], int] = {}
+# ``(path, line)`` of a ``CAUSE_RECORDED_EXTERNAL`` row → the external
+# callee text the map recorded there (``_apply_map_verdict``), read by
+# ``_grep_row``. Process-global for the same reason as above.
+_external_callees: dict[tuple[str, int], str] = {}
 
 
 # --- tier 2: same-named locals ----------------------------------------
@@ -4523,6 +4697,9 @@ def _grep_row(
     decl = _shadow_decl_lines.get((hit.path, hit.line))
     if decl is not None and cause == CAUSE_SHADOWING_LOCAL:
         row["decl_line"] = decl
+    callee = _external_callees.get((hit.path, hit.line))
+    if callee is not None and cause == CAUSE_RECORDED_EXTERNAL:
+        row["external_callee"] = callee
     if resolved_to:
         row["resolved_to"] = resolved_to
     if bound_to is not None and cause == CAUSE_IMPORT_BOUND_ELSEWHERE:
@@ -5559,7 +5736,10 @@ def run(
         query_action = "callers"
         label = sym.id
         inputs = _name_inputs(
-            query_index, sym.name, ambiguous.collision_names(query_index)
+            query_index,
+            sym.name,
+            ambiguous.collision_names(query_index),
+            _ambiguous_spans_by_name(query_index),
         )
         declaring_type = _resolve_declaring_type(query_index, sym)
         attributed = _attributed_sites(query_index, sym.name)
@@ -6033,6 +6213,7 @@ def _run_all_sweeps(
         return {}, plan.error
 
     collision = ambiguous.collision_names(query_index)
+    ambiguous_spans = _ambiguous_spans_by_name(query_index)
 
     def _sweep_one(
         name: str,
@@ -6040,7 +6221,7 @@ def _run_all_sweeps(
         sweep, causes = _sweep_bare_name(
             root,
             name,
-            _name_inputs(query_index, name, collision),
+            _name_inputs(query_index, name, collision, ambiguous_spans),
             tests_excluded=tests_excluded,
             symbols_by_path=query_index.symbols_by_path,
             scope=scope,
