@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.12] — 2026-10-08
+
+### Fixed
+- **`sanity` on a symbol that only exists in test code checks it.** The
+  default run excludes tests, so such a target used to answer "no
+  symbol matches" with unrelated suggestions while `query` found it.
+  Every caller of a test symbol is test code too, so the run now
+  includes tests for it and says so on its first line (`note: '<id>' is
+  test code; checked with --include-tests`, and `note` in `--json`,
+  whose `include_tests` reports the value used).
+- **`sanity --all` names each row by its symbol id.** Rows printed
+  `path:qualname`, so a class's overloaded constructors showed twice
+  under one string that `sanity <target>` then called ambiguous
+  (spring-boot: 95 such pairs). Rows now carry the id
+  (`path::qualname#2`), one per overload, each re-runnable as-is.
+
 ## [1.8.11] — 2026-10-08
 
 ### Fixed

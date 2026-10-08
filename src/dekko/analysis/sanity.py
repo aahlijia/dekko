@@ -4657,6 +4657,7 @@ def _build_json_doc(
     receiver_mismatch_note: str | None = None,
     receiver_mismatch_declaring_type: str | None = None,
     receiver_mismatch_count: int | None = None,
+    note: str | None = None,
 ) -> dict:
     """Assemble ``sanity --json``'s output document.
 
@@ -4730,6 +4731,8 @@ def _build_json_doc(
             receiver_mismatch_declaring_type
         )
         doc["receiver_mismatch_count"] = receiver_mismatch_count
+    if note is not None:
+        doc["note"] = note
     return doc
 
 
@@ -4877,10 +4880,13 @@ def _print_text(
     group_by_file: bool = False,
     budget: int | None = None,
     limit: int = DEFAULT_REPORT_LIMIT,
+    note: str | None = None,
 ) -> None:
     """Render ``run()``'s text report.
 
     Args:
+        note: A line printed before the report (a test-code target
+            checked with tests included), or ``None``.
         grep_only: The grep-only bucket, already fit to
             ``--limit``/``--budget`` by row count -- used for the flat
             (non-grouped) rendering, unchanged from before grouping
@@ -4891,6 +4897,8 @@ def _print_text(
             number of file groups instead of the number of rows (see
             ``_print_bucket_by_file``).
     """
+    if note is not None:
+        print(f"note: {note}")
     print(f"dekko sanity: '{target}' ({action}) vs. grep '{bare_name}'")
     print(f"  grep: {grep_command}")
     if grep_truncated:
@@ -5374,6 +5382,47 @@ def _resolve_declaring_type(query_index: MapIndex, sym: Symbol) -> str | None:
     return container_syms[0].qualname.rsplit(".", 1)[-1]
 
 
+def _callers_target(
+    index: MapIndex, target: str, include_tests: bool
+) -> tuple[Symbol, MapIndex, bool, str | None] | int:
+    """Resolve a callers-mode ``sanity`` target, falling back to test
+    code.
+
+    The default run excludes tests, so a target that only exists in
+    test code used to read as "no symbol matches" while ``query`` found
+    it. Every caller of a test symbol is test code too, so a run that
+    excluded tests could only ever report nothing: resolve it against
+    the full map and check it with tests included instead, saying so.
+
+    Args:
+        index: The unfiltered map index.
+        target: The user's target string.
+        include_tests: Whether ``--include-tests`` was passed.
+
+    Returns:
+        ``(symbol, query_index, include_tests, note)`` for the run to
+        use, ``note`` set only when tests were switched on for a
+        test-code target; or the exit code after reporting a target
+        that doesn't resolve.
+    """
+    query_index = index if include_tests else index.without_tests()
+    sym, candidates = query.resolve_target(query_index, target)
+    if sym is not None:
+        return sym, query_index, include_tests, None
+
+    if include_tests or candidates:
+        return query.report_unresolved(target, candidates, query_index)
+
+    sym, candidates = query.resolve_target(index, target)
+    if sym is None:
+        return query.report_unresolved(
+            target, candidates, index if candidates else query_index
+        )
+
+    note = f"'{sym.id}' is test code; checked with --include-tests"
+    return sym, index, True, note
+
+
 def run(
     index: MapIndex,
     target: str,
@@ -5485,6 +5534,9 @@ def run(
     # The receiver-mismatch gate's declaring type, for the one-per-run
     # banner; the rung itself runs in ``_apply_target_facts``.
     declaring_type: str | None = None
+    # Set when the target only exists in test code and the run switched
+    # tests on for it (``_resolve_sanity_target``).
+    test_note: str | None = None
     # The map's own attribution of every use of the bare name, for the
     # tier-1 resolved-elsewhere cause (``_resolved_elsewhere``). Callers
     # mode only, like everything above.
@@ -5499,9 +5551,10 @@ def run(
         except _QueryFailedError as exc:
             return exc.code
     else:
-        sym, candidates = query.resolve_target(query_index, target)
-        if sym is None:
-            return query.report_unresolved(target, candidates, query_index)
+        resolved = _callers_target(index, target, include_tests)
+        if isinstance(resolved, int):
+            return resolved
+        sym, query_index, include_tests, test_note = resolved
         bare_name = sym.name
         query_action = "callers"
         label = sym.id
@@ -5621,6 +5674,7 @@ def run(
             receiver_mismatch_count=(
                 receiver_mismatch_count if receiver_mismatch_note else None
             ),
+            note=test_note,
         )
         print(json.dumps(doc, indent=2))
         return EXIT_OK
@@ -5642,6 +5696,7 @@ def run(
         group_by_file=group_by_file,
         budget=budget,
         limit=limit,
+        note=test_note,
     )
     return EXIT_OK
 
@@ -5739,9 +5794,10 @@ class _SymbolSweepResult:
     already-classified grep sweep.
 
     Attributes:
-        target: ``path:qualname`` display label — re-runnable directly
-            as ``dekko sanity <target>`` for the full single-target
-            report.
+        target: The symbol id (``path::qualname``, plus ``#N`` for an
+            overload) — re-runnable directly as ``dekko sanity
+            <target>`` for the full single-target report, and distinct
+            for every overload.
         bare_name: The symbol's bare name.
         matches: Count of dekko-hit locations grep's sweep also found.
         dekko_only: Count of dekko-hit locations grep's sweep missed.
@@ -5803,7 +5859,7 @@ def _diff_symbol(
     grep_only_causes = [own[loc] for loc in grep_only]
 
     return _SymbolSweepResult(
-        target=f"{sym.path}:{sym.qualname}",
+        target=sym.id,
         bare_name=sym.name,
         matches=matches,
         dekko_only=dekko_only,

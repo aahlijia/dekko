@@ -198,7 +198,7 @@ def test_method_rows_read_the_same_in_both_modes(
     # receiver label is for.
     assert rows[("src/other.ts", 2)] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
     swept = _all(root, capsys)
-    assert swept["src/widget.ts:Widget.active"] == Counter(rows.values())
+    assert swept[ACTIVE] == Counter(rows.values())
 
 
 def test_every_fan_in_symbol_agrees_across_modes(
@@ -213,7 +213,7 @@ def test_every_fan_in_symbol_agrees_across_modes(
     for syms in sanity._group_fan_in_symbols(query_index).values():
         for sym in syms:
             single = Counter(_single(root, sym.id, capsys).values())
-            assert swept[f"{sym.path}:{sym.qualname}"] == single, sym.id
+            assert swept[sym.id] == single, sym.id
             checked += 1
     assert checked >= 2
 
@@ -247,3 +247,72 @@ def test_cross_file_collision_is_decided_per_target(
             )
             == expected
         )
+
+
+_OVERLOAD_REPO = {
+    "Box.java": ("class Box {\n  Box() {}\n  Box(int n) {}\n}\n"),
+    "Use.java": (
+        "class Use {\n"
+        "  void go() {\n"
+        "    Box a = new Box();\n"
+        "    Box b = new Box(1);\n"
+        "  }\n"
+        "}\n"
+    ),
+}
+
+
+def _all_doc(root: Path, capsys: pytest.CaptureFixture) -> dict:
+    assert cli.main(["sanity", "--all", "--root", str(root), "--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_all_rows_name_overloads_by_their_own_id(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    doc = _all_doc(make_mapped_repo(_OVERLOAD_REPO), capsys)
+    targets = [r["target"] for r in doc["symbols"] if r["bare_name"] == "Box"]
+    assert len(targets) == len(set(targets))
+    assert "Box.java::Box.Box#2" in targets
+
+
+def test_every_all_target_reruns_single_target(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(_OVERLOAD_REPO)
+    for row in _all_doc(root, capsys)["symbols"]:
+        code = cli.main(
+            ["sanity", row["target"], "--root", str(root), "--json"]
+        )
+        capsys.readouterr()
+        assert code == 0, row["target"]
+
+
+def test_nested_same_named_types_agree_across_modes(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    nested = "class {outer} {{\n  static class Servlet {{}}\n}}\n"
+    root = make_mapped_repo(
+        {
+            "A.java": nested.format(outer="A"),
+            "B.java": nested.format(outer="B"),
+            "Use.java": (
+                "class Use {\n"
+                "  Object a = new A.Servlet();\n"
+                "  Object b = new B.Servlet();\n"
+                "}\n"
+            ),
+            "data/import.sql": (
+                "insert into note values (4, 'the Java Servlet api');\n"
+            ),
+        }
+    )
+    rows = {
+        r["target"]: Counter(r["causes"])
+        for r in _all_doc(root, capsys)["symbols"]
+        if r["bare_name"] == "Servlet"
+    }
+    assert rows
+    for target, causes in rows.items():
+        single = Counter(_single(root, target, capsys).values())
+        assert single == causes, target

@@ -127,10 +127,16 @@ def test_single_target_and_all_agree_on_class_and_constructor(
     swept: dict[str, list[Counter]] = {}
     for r in doc["symbols"]:
         swept.setdefault(r["target"], []).append(Counter(r["causes"]))
-    assert swept["web/Ticket.java:Ticket"] == [single[TICKET_CLASS]]
-    # Overloads share the ``path:qualname`` label; only the (int) one
-    # has a caller, so only it is swept.
-    assert single[TICKET_INT_CTOR] in swept["web/Ticket.java:Ticket.Ticket"]
+    assert swept[TICKET_CLASS] == [single[TICKET_CLASS]]
+    # Each overload is its own row; only the (int) one has a caller,
+    # so only it is swept.
+    ctors = [
+        causes
+        for target, rows in swept.items()
+        if target.startswith("web/Ticket.java::Ticket.Ticket")
+        for causes in rows
+    ]
+    assert ctors == [single[TICKET_INT_CTOR]]
 
 
 def test_type_mention_is_off_for_a_name_shared_with_a_method(
@@ -166,8 +172,8 @@ def test_type_mention_is_off_for_a_name_shared_with_a_method(
     assert cli.main(["sanity", "--all", "--root", str(root), "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
     swept = {r["target"]: Counter(r["causes"]) for r in doc["symbols"]}
-    assert sum(swept["web/Status.java:Status"].values()) >= 1
-    assert sanity.CAUSE_TYPE_MENTION not in swept["web/Status.java:Status"]
+    assert sum(swept["web/Status.java::Status"].values()) >= 1
+    assert sanity.CAUSE_TYPE_MENTION not in swept["web/Status.java::Status"]
 
 
 KOTLIN_REPO = {
