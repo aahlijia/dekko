@@ -444,6 +444,19 @@ CAUSE_TRAILING_COMMENT = (
     "on the line)"
 )
 CAUSE_JSX_TEXT = "JSX text content — literal text, not a call site"
+# JS/TS, Python and Rust: the line assigns to the name
+# (``activityCallback = cb``, ``count += 1``). A write is never a call;
+# ``==`` and a call refuse the shape. Applied only to a row the ladder
+# left open (``_refine_cause``).
+CAUSE_ASSIGNMENT = "assignment to the name — a write, not a call"
+_ASSIGNMENT_GRAMMARS = frozenset(
+    {"javascript", "typescript", "tsx", "python", "rust"}
+)
+_ASSIGNMENT_TEMPLATE = r"^\s*{name}\s*(?:[-+*/%|&]|\*\*|<<|>>)?=(?![=>])"
+# The open causes an assignment shape may still settle.
+_ASSIGNMENT_OPEN_CAUSES = frozenset(
+    {CAUSE_UNEXPLAINED, CAUSE_GENERIC_NAME, CAUSE_TEST_FILTER}
+)
 CAUSE_SIGNATURE = (
     "a method or function signature with this name (abstract, interface "
     "member or overload) — a declaration, not a call site"
@@ -761,11 +774,14 @@ def _looks_qualified_call(snippet: str, bare_name: str) -> bool:
 # line that merely mentions "import" mid-sentence (prose, a different
 # identifier) never false-positives -- a real import/require statement's
 # keyword always opens the (stripped) line.
+# Both allow the default-plus-named form ``import X, { y } from '..'``.
 _ESM_NAMED_IMPORT_TEMPLATE = (
-    r"^import\s+(?:type\s+)?\{{[^}}]*\b{name}\b[^}}]*\}}\s*from\s+['\"]"
+    r"^import\s+(?:type\s+)?(?:[\w$]+\s*,\s*)?"
+    r"\{{[^}}]*\b{name}\b[^}}]*\}}\s*from\s+['\"]"
 )
 _ESM_DEFAULT_IMPORT_TEMPLATE = (
-    r"^import\s+(?:\*\s+as\s+)?{name}\s+from\s+['\"]"
+    r"^import\s+(?:\*\s+as\s+)?{name}(?:\s*,\s*\{{[^}}]*\}})?"
+    r"\s+from\s+['\"]"
 )
 _PY_FROM_IMPORT_TEMPLATE = r"^from\s+\S+\s+import\s+.*\b{name}\b"
 # Java's ``import a.b.C;`` (and ``import static a.b.C.field;``) has no
@@ -859,7 +875,10 @@ _TS_IMPORT_TYPE_TEMPLATE = r"^import\s+type\s+.*\b{name}\b"
 # `x: Output`, not `x: Output()`
 _TS_TYPE_COLON_TEMPLATE = r":\s*{name}\b(?!\s*\()"
 # `Foo<Output>`, `Foo<Output, Bar>`
-_TS_TYPE_GENERIC_TEMPLATE = r"<\s*{name}\s*[,>]"
+# Any position in an angle-bracket list (``ToolDef<In, Output, Prog>``),
+# with no parenthesis between the ``<`` and the name, so a call's
+# argument list ``run(a, Output, b)`` never reads as one.
+_TS_TYPE_GENERIC_TEMPLATE = r"<[^<>()]*\b{name}\s*[,>]"
 _TS_TYPE_POSITION_TEMPLATE = (
     f"{_TS_TYPE_COLON_TEMPLATE}|{_TS_TYPE_GENERIC_TEMPLATE}"
 )
@@ -1089,6 +1108,113 @@ def _looks_like_jvm_type_mention(
 
     return _word(bare_name).search(code) is not None and not (
         _looks_like_jvm_construction(code, bare_name, grammar)
+    )
+
+
+# Comments and string literals per grammar, one alternation each so a
+# quote inside a comment never opens a string. Strings may span lines
+# (Python triple quotes, Go backticks, Rust raw and plain strings), so
+# these run over a whole file at once (``_code_lines``). Group ``s``
+# marks a string; anything else matched is a comment, left as it is.
+_RUST_TOKENS = re.compile(
+    r"//[^\n]*|/\*[\s\S]*?\*/"
+    r"|(?P<s>(?<![A-Za-z0-9_])(?:b?r(?P<h>#*)\"[\s\S]*?\"(?P=h)"
+    r"|b?\"(?:\\[\s\S]|[^\"\\])*\""
+    r"|b?'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'))"
+)
+_PYTHON_TOKENS = re.compile(
+    r"#[^\n]*"
+    r"|(?P<s>(?<![A-Za-z0-9_])(?P<p>[rRbBuUfF]{0,2})"
+    r"(?:(?P<q>\"\"\"|''')[\s\S]*?(?P=q)"
+    r"|(?P<q1>[\"'])(?:\\.|(?!(?P=q1))[^\\\n])*(?P=q1)))"
+)
+_GO_TOKENS = re.compile(
+    r"//[^\n]*|/\*[\s\S]*?\*/"
+    r"|(?P<s>`[^`]*`|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])+')"
+)
+_STRING_TOKENS = {
+    "rust": _RUST_TOKENS,
+    "python": _PYTHON_TOKENS,
+    "go": _GO_TOKENS,
+}
+# What stays code inside a string: Rust's inline format arguments
+# (``format!("{error}")``, in any string, since one line can't tell a
+# format macro's literal from another) and a Python f-string's fields.
+_RUST_FORMAT_ARG = re.compile(r"(?<!\{)\{([A-Za-z_]\w*)(?::[^{}]*)?\}(?!\})")
+_PYTHON_FSTRING_FIELD = re.compile(r"(?<!\{)\{([^{}]+)\}(?!\})")
+
+
+def _kept_in_string(match: re.Match, grammar: str) -> re.Pattern | None:
+    """The pattern whose group 1 stays code inside this string, or
+    ``None`` when all of it is text."""
+    if grammar == "rust":
+        return _RUST_FORMAT_ARG
+    if grammar == "python" and "f" in (match.group("p") or "").lower():
+        return _PYTHON_FSTRING_FIELD
+    return None
+
+
+def _blank_strings(text: str, grammar: str) -> str:
+    """``text`` with string-literal text blanked (newlines kept, so
+    lines stay aligned), interpolated code kept in place, comments left
+    as they are."""
+    out = list(text)
+    for match in _STRING_TOKENS[grammar].finditer(text):
+        if match.group("s") is None:
+            continue
+        start, end = match.span("s")
+        for i in range(start, end):
+            if out[i] != "\n":
+                out[i] = " "
+        kept = _kept_in_string(match, grammar)
+        if kept is None:
+            continue
+        for field_match in kept.finditer(text, start, end):
+            fs, fe = field_match.span(1)
+            out[fs:fe] = text[fs:fe]
+
+    return "".join(out)
+
+
+def _rust_code_only(line: str) -> str:
+    """A Rust line with string and char literal text blanked (never a
+    lifetime), inline format arguments kept."""
+    return _blank_strings(line, "rust")
+
+
+def _code_lines(root: Path, path: str, grammar: str) -> list[str]:
+    """``path``'s lines with string text blanked, cached for the run.
+    Whole-file, so a line inside a docstring or a multi-line raw string
+    reads as text even though nothing on it opens one."""
+    key = (str(root), path)
+    lines = _code_line_cache.get(key)
+    if lines is None:
+        raw = _cached_lines(root, path)
+        lines = _blank_strings("\n".join(raw), grammar).split("\n")
+        _code_line_cache[key] = lines
+
+    return lines
+
+
+def _looks_like_string_mention_in(
+    root: Path, path: str, line: int, bare_name: str
+) -> bool:
+    """Whether a Rust, Python or Go line names ``bare_name`` only inside
+    string text: present on the line, gone once its strings (one opened
+    on a line above included) are blanked."""
+    grammar = _grammar_for_path(path)
+    if grammar not in _STRING_TOKENS:
+        return False
+
+    raw = _cached_lines(root, path)
+    code = _code_lines(root, path, grammar)
+    if not 0 < line <= min(len(raw), len(code)):
+        return False
+
+    word = _word(bare_name)
+    return (
+        word.search(raw[line - 1]) is not None
+        and word.search(code[line - 1]) is None
     )
 
 
@@ -1419,11 +1545,13 @@ def _js_shapes(
 # atomic in CPython, and two threads that compute the same file agree.
 _file_lines: dict[tuple[str, str], list[str]] = {}
 _file_states: dict[tuple[str, str], list[str]] = {}
+_code_line_cache: dict[tuple[str, str], list[str]] = {}
 
 
 def _reset_file_caches() -> None:
     _file_lines.clear()
     _file_states.clear()
+    _code_line_cache.clear()
     _shadow_decl_lines.clear()
     _external_callees.clear()
     _row_languages.clear()
@@ -1739,10 +1867,12 @@ def _looks_like_signature(code: str, bare_name: str) -> bool:
     ):
         return True
 
+    # ``function name(`` is a declaration whatever follows: an overload
+    # head whose parameters continue on the next lines included.
     return (
         re.search(
-            rf"^(?:export\s+)?(?:async\s+)?function\s+{name}\s*(?:<[^>]*>)?"
-            rf"\([^)]*\)\s*:\s*[^={{;]+;?\s*$",
+            rf"^(?:export\s+)?(?:declare\s+)?(?:async\s+)?"
+            rf"function\s*\*?\s*{name}\s*[<(]",
             code,
         )
         is not None
@@ -3719,14 +3849,11 @@ def _language_rule_cause(
     return None
 
 
-_RUST_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
-
-
 def _rust_constructs(snippet: str, name: str) -> bool:
     """Whether some occurrence of the type ``name`` on a Rust line
     could build one: a struct literal ``Name {`` or a tuple-struct
     call ``Name(`` (a match pattern has the same shape and stays)."""
-    code = _RUST_STRING.sub('""', snippet)
+    code = _rust_code_only(snippet)
     return re.search(rf"\b{re.escape(name)}\s*[({{]", code) is not None
 
 
@@ -4436,8 +4563,8 @@ def _classify_grep_hits(
         chain = _enclosing_chain(
             symbols_by_path.get(h.path, []) if symbols_by_path else [], h.line
         )
-        causes[loc] = _refine_reference(
-            h.snippet,
+        causes[loc] = _refine_cause(
+            h,
             bare_name,
             target_is_type,
             classify_miss(
@@ -4495,6 +4622,9 @@ def _classify_grep_hits(
                     or _looks_like_jvm_string_mention(
                         h.snippet, bare_name, h.path
                     )
+                    or _looks_like_string_mention_in(
+                        root, h.path, h.line, bare_name
+                    )
                 ),
                 is_recorded_read=js.property_read,
                 in_template_text=shapes.template_text,
@@ -4527,15 +4657,19 @@ def _classify_grep_hits(
     return causes
 
 
-def _refine_reference(
-    snippet: str, bare_name: str, target_is_type: bool, cause: str
+def _refine_cause(
+    hit: GrepHit, bare_name: str, target_is_type: bool, cause: str
 ) -> str:
-    """``CAUSE_STATIC_MEMBER_REFERENCE`` for a recorded reference to a
-    type whose every mention on the line is ``Name.member``, else
-    ``cause`` unchanged."""
+    """Sharpen a cause the ladder settled on: a recorded reference that
+    is a static member's receiver, or an open row that is an
+    assignment to the name. Otherwise ``cause`` unchanged."""
+    if cause in _ASSIGNMENT_OPEN_CAUSES:
+        return _assignment_cause(hit, bare_name) or cause
+
     if cause != CAUSE_VALUE_REFERENCE or not target_is_type:
         return cause
 
+    snippet = hit.snippet
     word = _word(bare_name)
     static = re.compile(
         rf"(?<![\w.$]){re.escape(bare_name)}\s*\??\.\s*[A-Za-z_$]"
@@ -4545,6 +4679,18 @@ def _refine_reference(
         return CAUSE_STATIC_MEMBER_REFERENCE
 
     return cause
+
+
+def _assignment_cause(hit: GrepHit, bare_name: str) -> str | None:
+    """``CAUSE_ASSIGNMENT`` when the line assigns to ``bare_name``."""
+    if _grammar_for_path(hit.path) not in _ASSIGNMENT_GRAMMARS:
+        return None
+
+    pattern = _ASSIGNMENT_TEMPLATE.format(name=re.escape(bare_name))
+    if re.search(pattern, hit.snippet) is None:
+        return None
+
+    return CAUSE_ASSIGNMENT
 
 
 def _apply_map_verdict(
@@ -4591,9 +4737,6 @@ _row_languages: dict[tuple[str, int], dict[str, str]] = {}
 
 # --- tier 2: same-named locals ----------------------------------------
 
-# JS/TS only, like every other shape rule in this module: Python's
-# scoping would mostly work too, but the evidence was TS.
-_SHADOW_GRAMMARS = frozenset({"typescript", "tsx", "javascript"})
 # The shapes that bind a name in JS/TS: a ``const``/``let``/``var``
 # (plain or destructured), a ``catch`` parameter, an arrow parameter
 # (``name =>``, ``(x, name) =>``, ``({ name }) =>``, ``([a, name]) =>``),
@@ -4606,6 +4749,39 @@ _SHADOW_DECL_TEMPLATE = (
     r"|\bfunction\b[^(]*\([^)]*\b{name}\b"
     r"|\bfor\s*\(\s*(?:const|let|var)\s+(?:[{{\[][^=]*)?\b{name}\b"
 )
+# Rust: a ``let`` (``mut``, or a pattern before its ``=``, ``if let`` and
+# ``while let`` too), a closure parameter, a ``for`` pattern. zed:
+# ``callback`` 605 unexplained rows were a closure parameter or a local.
+_RUST_CLOSURE_TEMPLATE = r"\|[^|]*\b{name}\b[^|]*\|"
+_RUST_SHADOW_TEMPLATE = (
+    r"\blet\s+(?:mut\s+)?{name}\b"
+    r"|\b(?:let|if\s+let|while\s+let)\b[^=]*\b{name}\b[^=]*=(?!=)"
+    rf"|{_RUST_CLOSURE_TEMPLATE}"
+    r"|\bfor\b[^=]*\b{name}\b[^=]*\bin\b"
+)
+# Python: an assignment (annotated or not), a ``for`` target, ``with``
+# / ``except`` ... ``as``, a ``lambda`` parameter.
+_PY_LAMBDA_TEMPLATE = r"\blambda\b[^:]*\b{name}\b[^:]*:"
+_PY_SHADOW_TEMPLATE = (
+    r"^\s*{name}\s*(?::[^=]+)?=(?!=)"
+    r"|\bfor\b.*\b{name}\b.*\bin\b"
+    r"|\bas\s+{name}\b"
+    rf"|{_PY_LAMBDA_TEMPLATE}"
+)
+_SHADOW_DECL_TEMPLATES = {
+    "javascript": _SHADOW_DECL_TEMPLATE,
+    "typescript": _SHADOW_DECL_TEMPLATE,
+    "tsx": _SHADOW_DECL_TEMPLATE,
+    "rust": _RUST_SHADOW_TEMPLATE,
+    "python": _PY_SHADOW_TEMPLATE,
+}
+_SHADOW_GRAMMARS = frozenset(_SHADOW_DECL_TEMPLATES)
+# A binding on the hit's own line, before the use: a closure or lambda
+# parameter (``.map(|callback| callback(1))``).
+_SHADOW_SAME_LINE_TEMPLATES = {
+    "rust": _RUST_CLOSURE_TEMPLATE,
+    "python": _PY_LAMBDA_TEMPLATE,
+}
 # How far above a hit with no enclosing symbol the scan may go before
 # the first indent-0 line stops it.
 _SHADOW_SCAN_LINES = 400
@@ -4681,7 +4857,12 @@ def _shadowing_decl_line(
     lines = _cached_lines(root, hit.path)
     if not lines or hit.line > len(lines):
         return None
-    decl = re.compile(_SHADOW_DECL_TEMPLATE.format(name=re.escape(bare_name)))
+    grammar = _grammar_for_path(hit.path) or ""
+    if _binds_on_own_line(lines[hit.line - 1], grammar, bare_name):
+        return hit.line
+    decl = re.compile(
+        _SHADOW_DECL_TEMPLATES[grammar].format(name=re.escape(bare_name))
+    )
     hit_indent = _indent(lines[hit.line - 1])
     lowest = (
         chain[-1].start_line
@@ -4696,13 +4877,36 @@ def _shadowing_decl_line(
         if found is not None and _indent(lines[found - 1]) > hit_indent:
             found = None
         if found is None and _indent(text) <= hit_indent:
-            found = ln if decl.search(_js_code_only(text)) else None
+            found = ln if decl.search(_shadow_code(text, grammar)) else None
         if found is not None:
             return None if (hit.path, found) in own_def_locs else found
         if not chain and _indent(text) == 0:
             return None
 
     return None
+
+
+def _shadow_code(text: str, grammar: str) -> str:
+    """``text`` with string text blanked for the declaration scan, by
+    the line's grammar."""
+    if grammar in _STRING_TOKENS:
+        return _blank_strings(text, grammar)
+
+    return _js_code_only(text)
+
+
+def _binds_on_own_line(text: str, grammar: str, bare_name: str) -> bool:
+    """Whether ``text`` binds ``bare_name`` as a closure or lambda
+    parameter before using it on the same line."""
+    template = _SHADOW_SAME_LINE_TEMPLATES.get(grammar)
+    if template is None:
+        return False
+
+    code = _shadow_code(text, grammar)
+    binding = re.search(template.format(name=re.escape(bare_name)), code)
+    return binding is not None and (
+        _word(bare_name).search(code, binding.end()) is not None
+    )
 
 
 def _explain_shadowing_locals(

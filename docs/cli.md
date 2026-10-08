@@ -430,7 +430,11 @@ of `unexplained miss`:
     `logForDebugging('CCRClient: Epoch mismatch')` reads `mention
     inside a string or template text`. Not when the string text
     calls it (`eval("cleanup()")`, `setTimeout("cleanup()")`), which
-    is a real reference the resolver can't see.
+    is a real reference the resolver can't see. Since 1.8.15 Rust,
+    Python and Go lines get the same reading, with strings found over
+    the whole file so a docstring's or a raw string's inner lines
+    count too; a Rust `{name}` format argument and a Python f-string
+    field stay code.
   - A property read the map records at that line (`result.warn.map(...)`)
     reads `a property read of a same-named field`. Not in `--usages`
     mode, where a `this.handler` passed along could be the reference
@@ -674,7 +678,8 @@ sites, which have no line in the map. Measured with `sanity --all`
 1,439 → 218; the grep-only totals are unchanged, since only causes on
 grep-only rows move.
 
-**Same-named locals (JS/TS only), since 0.43.76; widened in 1.5.10.**
+**Same-named locals (JS/TS since 0.43.76, widened in 1.5.10; Rust and
+Python since 1.8.15).**
 A second pass over whatever is still `unexplained` after every shape
 above: a use of a local declared earlier in an enclosing scope reads
 as `use of a same-named local declared earlier in an enclosing scope —
@@ -686,7 +691,11 @@ fragmenting by line number. A binding is a `const`/`let`/`var` (plain
 or destructured, including a member line of a multi-line `const {`),
 a `catch (e)` parameter, an arrow or `function` parameter on a line
 above (`xs.map(count => ...)`, `({ action }) =>`), a `for`-of binding,
-or a parameter of any enclosing symbol, read off the map (a
+in Rust a `let` / `if let` / `while let` pattern, a closure parameter
+(on the hit's own line too: `.map(|callback| callback(1))`) or a `for`
+pattern, in Python an assignment, a `for` target, `with`/`except ...
+as name` or a `lambda` parameter, or a parameter of any enclosing
+symbol, read off the map (a
 destructured parameter `{ slots, activeSlot }` and an optional one
 `count?` count). Scope is every enclosing symbol, then the file's top
 level: an inner arrow sees the outer function's locals, and a hit with

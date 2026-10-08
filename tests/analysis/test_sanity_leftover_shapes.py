@@ -767,3 +767,113 @@ def test_a_barrel_cycle_ends_the_walk(make_mapped_repo: RepoFactory) -> None:
         sanity._import_bound_to(index, "app.ts", "ghost", "target.ts")
         == "a.ts"
     )
+
+
+_TS_RESIDUE_REPO = {
+    "ink/r.ts": (
+        "export default function createRenderer(): void {}\n"
+        "export type Renderer = number;\n"
+    ),
+    "ink/ink.ts": (
+        "import createRenderer, { type Renderer } from './r.js'\n"
+        "export const r: Renderer = 1\n"
+        "createRenderer()\n"
+    ),
+    "src/exec.ts": (
+        "export function execSync_DEPRECATED(\n"
+        "  cmd: string,\n"
+        "): string\n"
+        "export function execSync_DEPRECATED(\n"
+        "  cmd: string,\n"
+        "  opts: object,\n"
+        "): string\n"
+        "export function execSync_DEPRECATED(cmd: string, opts?: object)"
+        ": string {\n"
+        "  return cmd\n"
+        "}\n"
+    ),
+    "src/err.ts": "export class LimitError extends Error {}\n",
+    "src/guard.ts": (
+        "import { LimitError } from './err'\n"
+        "export function isLimit(e: unknown): e is LimitError {\n"
+        "  return e instanceof LimitError\n"
+        "}\n"
+    ),
+    "src/tool.ts": "export type Output = number;\n",
+    "src/use2.ts": (
+        "import type { Output } from './tool'\n"
+        "export const t = {} satisfies ToolDef<In, Output, Prog>\n"
+    ),
+    "src/act.ts": (
+        "export let activityCallback: (() => void) | null = null\n"
+        "export function set(cb: () => void): void {\n"
+        "  activityCallback = cb\n"
+        "}\n"
+        "export function check(cb: any): boolean {\n"
+        "  return activityCallback == cb\n"
+        "}\n"
+    ),
+}
+
+
+def test_default_and_named_import_line_names_both(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(_TS_RESIDUE_REPO)
+    for target in ("ink/r.ts::createRenderer", "ink/r.ts::Renderer"):
+        rows = _sanity_json(root, target, capsys)
+        assert rows[("ink/ink.ts", 1)]["cause"] == (
+            sanity.CAUSE_IMPORT_STATEMENT
+        ), target
+    rows = _sanity_json(root, "ink/r.ts::createRenderer", capsys)
+    assert ("ink/ink.ts", 3) not in rows
+
+
+def test_overload_heads_are_signatures(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    rows = _sanity_json(
+        make_mapped_repo(_TS_RESIDUE_REPO),
+        "src/exec.ts::execSync_DEPRECATED",
+        capsys,
+    )
+    for line in (1, 4):
+        assert rows[("src/exec.ts", line)]["cause"] == (
+            sanity.CAUSE_SIGNATURE
+        ), line
+
+
+def test_type_guard_and_mid_list_generic_are_type_positions(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(_TS_RESIDUE_REPO)
+    rows = _sanity_json(root, "src/err.ts::LimitError", capsys)
+    assert rows[("src/guard.ts", 2)]["cause"] == sanity.CAUSE_TYPE_ANNOTATION
+    rows = _sanity_json(root, "src/tool.ts::Output", capsys)
+    assert rows[("src/use2.ts", 2)]["cause"] == sanity.CAUSE_TYPE_ANNOTATION
+
+
+def test_assignment_to_the_name_is_a_write(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    rows = _sanity_json(
+        make_mapped_repo(_TS_RESIDUE_REPO),
+        "src/act.ts::activityCallback",
+        capsys,
+    )
+    assert rows[("src/act.ts", 3)]["cause"] == sanity.CAUSE_ASSIGNMENT
+    assert rows[("src/act.ts", 6)]["cause"] != sanity.CAUSE_ASSIGNMENT
+
+
+def test_assignment_shape_refuses_a_comparison_or_call(tmp_path: Path) -> None:
+    for snippet in ("activityCallback == cb", "activityCallback(cb)"):
+        (tmp_path / "a.ts").write_text(snippet + "\n")
+        hit = sanity.GrepHit(path="a.ts", line=1, snippet=snippet)
+        causes = sanity._classify_grep_hits(
+            [hit],
+            "activityCallback",
+            tmp_path,
+            own_def_locs=frozenset(),
+            tests_excluded=True,
+        )
+        assert causes[("a.ts", 1)] != sanity.CAUSE_ASSIGNMENT, snippet

@@ -3996,16 +3996,16 @@ def test_sanity_group_by_file_rolls_up_grep_only(
     # surfaces as ``CAUSE_GENERIC_NAME`` rather than leaving it
     # unexplained. And a bare value
     # reference (``value = name``) is explained too, from the map's
-    # own reference edges. A name inside a longer string is the one
-    # shape sanity deliberately refuses to classify, which keeps these
-    # two hits genuinely unexplained -- the rendering behavior this
-    # test actually exercises.
+    # own reference edges, and a name inside a string reads as a string
+    # mention. A subscript and a comparison operand stay genuinely
+    # unexplained -- the rendering behavior this test actually
+    # exercises.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
             "b.py": (
-                "value = 'see totally_unrelated_wrapper docs'\n"
-                "another = 'or totally_unrelated_wrapper here'\n"
+                "value = obj[totally_unrelated_wrapper]\n"
+                "another = totally_unrelated_wrapper > 3\n"
             ),
             "c.py": (
                 "import pkg\n\n\n"
@@ -4044,15 +4044,15 @@ def test_sanity_group_by_file_omitted_keeps_flat_listing(
     # C.3: default behavior (--group-by-file omitted) is unchanged —
     # the existing flat _print_bucket_text rendering still applies.
     #
-    # Names inside longer strings, not calls or bare references --
-    # see the sibling rollup test above for why those two shapes no
-    # longer stay unexplained.
+    # A subscript and a comparison operand, not calls, bare references
+    # or strings -- see the sibling rollup test above for why those
+    # shapes no longer stay unexplained.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
             "b.py": (
-                "value = 'see totally_unrelated_wrapper docs'\n"
-                "another = 'or totally_unrelated_wrapper here'\n"
+                "value = obj[totally_unrelated_wrapper]\n"
+                "another = totally_unrelated_wrapper > 3\n"
             ),
         }
     )
@@ -5099,9 +5099,9 @@ def test_js_prose_parenthetical_is_string_mention(tmp_path: Path) -> None:
     assert cause == sanity.CAUSE_STRING_MENTION
 
 
-def test_python_string_mention_keeps_its_label(tmp_path: Path) -> None:
+def test_python_string_mention_is_a_string_mention(tmp_path: Path) -> None:
     cause = _classify_one(tmp_path, "src/a.py", 'log("please warn now")')
-    assert cause == sanity.CAUSE_UNEXPLAINED
+    assert cause == sanity.CAUSE_STRING_MENTION
 
 
 def test_js_recorded_read_is_property_read(tmp_path: Path) -> None:

@@ -160,10 +160,16 @@ def test_rust_bare_identifier_is_not_the_method(
     rows = _sanity_json(
         make_mapped_repo(RUST_METHOD_REPO), "src/lib.rs::B.builder", capsys
     )
-    for line in (3, 4, 9):
-        assert _cause(rows, ("src/use.rs", line)) == (
-            sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
-        ), line
+    assert _cause(rows, ("src/use.rs", 9)) == (
+        sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
+    )
+    # With ``let builder`` in scope the shared shadowing pass explains
+    # these first; either way they are not the method.
+    for line in (3, 4):
+        assert _cause(rows, ("src/use.rs", line)) in {
+            sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD,
+            sanity.CAUSE_SHADOWING_LOCAL,
+        }, line
     assert _cause(rows, ("src/use.rs", 2)) not in MAY_STILL_MISS
 
 
@@ -190,9 +196,7 @@ PY_METHOD_REPO = {
         "    def name(self, v):\n"
         "        pass\n"
     ),
-    "pkg/use.py": (
-        "def go(w):\n    name = 3\n    print(name)\n    return w.name\n"
-    ),
+    "pkg/use.py": ("def go(w):\n    print(name)\n    return w.name\n"),
 }
 
 
@@ -202,10 +206,10 @@ def test_python_bare_name_outside_the_class_is_not_the_method(
     rows = _sanity_json(
         make_mapped_repo(PY_METHOD_REPO), "pkg/w.py::W.name", capsys
     )
-    assert _cause(rows, ("pkg/use.py", 3)) == (
+    assert _cause(rows, ("pkg/use.py", 2)) == (
         sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
     )
-    assert _cause(rows, ("pkg/use.py", 4)) != (
+    assert _cause(rows, ("pkg/use.py", 3)) != (
         sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
     )
     assert _cause(rows, ("pkg/w.py", 6)) != (

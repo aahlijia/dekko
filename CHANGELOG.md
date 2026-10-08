@@ -9,6 +9,29 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.15] — 2026-10-08
+
+### Fixed
+- **A name inside a Rust, Python or Go string reads as a string
+  mention**, as it already did in JS/TS and the JVM languages (zed's
+  `log::info!("Task trace ...")`, awesome-go's `" **Link consistency**:
+  ..."`). Strings are found over the whole file, so the inner lines of
+  a docstring or a multi-line raw string count; a Rust `{name}` format
+  argument and a Python f-string field stay code.
+- **Same-named locals are recognized in Rust and Python.** A `let` or
+  `if let` pattern, a closure parameter (on the same line as the use
+  too), a `for` pattern, a Python assignment, `for` target, `with` /
+  `except ... as` or `lambda` parameter now explains a use below it, as
+  in JS/TS. zed: the free function `callback` 603 unexplained rows → 71.
+- **TypeScript leftovers.** `import X, { y } from '...'` lines read as
+  imports for both names; `function name(` overload heads read as
+  signatures; a generic argument in any position of an angle-bracket
+  list (`ToolDef<In, Output, Prog>`) reads as a type position.
+- **An assignment to the name** (`activityCallback = cb`, `count += 1`)
+  in JS/TS, Python or Rust reads `assignment to the name — a write, not
+  a call`. claude-code `sanity --all` unexplained: 40 → 21.
+- `sanity --all`'s `aggregate_causes` gains the assignment key.
+
 ## [1.8.14] — 2026-10-08
 
 ### Fixed
