@@ -9,6 +9,30 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.16] — 2026-10-08
+
+### Fixed
+Four ways the 1.8.14-1.8.15 `sanity` rules could relabel a real missed
+call as explained:
+- **A Rust turbofish with a nested generic** (`.cursor::<Dimensions<A,
+  B>>(..)`) read as a bare identifier, because the turbofish match
+  stopped at the first `>`. Any `.name::` or `.name(` now reaches the
+  method (zed `SumTree.cursor`: 38 such rows).
+- **An assignment that also calls the name** (`command =
+  command(xs)`) read as a write. A call of the name after the `=` now
+  refuses the assignment label.
+- **A Swift line calling a C function** read "dekko never links calls
+  across languages", which is false: the resolver links Swift to C
+  functions. The other-language rule now asks the resolver's own table
+  (`resolver.can_link_across`) instead of keeping a copy, so the two
+  can't drift; Groovy and Scala lines against Java now count as other
+  languages, as the resolver treats them.
+- **A closure, `||` chain or comprehension declared a local for later
+  lines.** A Rust closure parameter now binds below its line only when
+  the body stays open (`|x| {`), `||` never opens a parameter list, a
+  Python `lambda` binds only on its own line, and only a `for`
+  statement's target (not a comprehension's) binds.
+
 ## [1.8.15] — 2026-10-08
 
 ### Fixed

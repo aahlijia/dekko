@@ -312,3 +312,59 @@ def test_an_unparsed_file_keeps_its_label_under_every_language_rule(
     assert _cause(rows, ("docs/more.md", 1)) == (
         sanity.CAUSE_UNSUPPORTED_LANGUAGE
     )
+
+
+def test_rust_turbofish_with_a_nested_generic_reaches_the_method(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    rows = _sanity_json(
+        make_mapped_repo(
+            {
+                "src/tree.rs": (
+                    "pub struct T;\n"
+                    "impl T {\n"
+                    "    pub fn cursor<D>(&self) -> u8 {\n"
+                    "        1\n"
+                    "    }\n"
+                    "}\n"
+                ),
+                "src/use.rs": (
+                    "pub fn run(t: Thing) -> u8 {\n"
+                    "    t.cursor::<Dimensions<A, B>>(())\n"
+                    "}\n"
+                ),
+            }
+        ),
+        "src/tree.rs::T.cursor",
+        capsys,
+    )
+    assert _cause(rows, ("src/use.rs", 2)) != (
+        sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
+    )
+
+
+def test_swift_line_against_a_c_function_is_not_another_language(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The resolver links this Swift call to C; take every hit as
+    # grep-only so the label a missed one would get is what's tested.
+    monkeypatch.setattr(
+        sanity, "_dekko_hits_callers", lambda *_a, **_kw: ([], [])
+    )
+    rows = _sanity_json(
+        make_mapped_repo(
+            {
+                "c/api.c": "int tf_run(int x) {\n    return x;\n}\n",
+                "swift/Use.swift": "let r = tf_run(1)\n",
+                "py/use.py": "r = tf_run(1)\n",
+            }
+        ),
+        "c/api.c::tf_run",
+        capsys,
+    )
+    assert _cause(rows, ("swift/Use.swift", 1)) != (
+        sanity.CAUSE_OTHER_LANGUAGE
+    )
+    assert _cause(rows, ("py/use.py", 1)) == sanity.CAUSE_OTHER_LANGUAGE

@@ -877,3 +877,23 @@ def test_assignment_shape_refuses_a_comparison_or_call(tmp_path: Path) -> None:
             tests_excluded=True,
         )
         assert causes[("a.ts", 1)] != sanity.CAUSE_ASSIGNMENT, snippet
+
+
+def test_an_assignment_that_also_calls_the_name_is_not_a_write(
+    tmp_path: Path,
+) -> None:
+    for path, snippet in (
+        ("a.py", "command = command(xs)"),
+        ("a.ts", "command = command(2);"),
+        ("a.rs", "command = command::<u8>(2);"),
+    ):
+        (tmp_path / path).write_text(snippet + "\n")
+        hit = sanity.GrepHit(path=path, line=1, snippet=snippet)
+        causes = sanity._classify_grep_hits(
+            [hit],
+            "command",
+            tmp_path,
+            own_def_locs=frozenset(),
+            tests_excluded=True,
+        )
+        assert causes[(path, 1)] != sanity.CAUSE_ASSIGNMENT, snippet

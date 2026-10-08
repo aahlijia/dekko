@@ -3364,6 +3364,37 @@ def _resolution_language(language: str) -> str:
     return _RESOLUTION_LANGUAGE.get(language, language)
 
 
+def can_link_across(
+    line_language: str, target_language: str, target_kind: str
+) -> bool:
+    """Whether a call written in ``line_language`` may resolve to a
+    ``target_kind`` symbol in ``target_language``.
+
+    The same boundary ``_language_filtered`` applies to candidates,
+    for a caller that has to say why a line *can't* reach a symbol:
+    the language's family (``_LANGUAGE_FAMILIES``), narrowed to the
+    kinds a family's other languages may supply
+    (``_FAMILY_FOREIGN_KINDS``, Swift reaching only C functions).
+
+    Args:
+        line_language: The calling line's language.
+        target_language: The symbol's language.
+        target_kind: The symbol's kind.
+
+    Returns:
+        ``True`` when the resolver could link the two.
+    """
+    if line_language == target_language:
+        return True
+
+    family = _LANGUAGE_FAMILIES.get(line_language, frozenset({line_language}))
+    if target_language not in family:
+        return False
+
+    kinds = _FAMILY_FOREIGN_KINDS.get(line_language)
+    return kinds is None or target_kind in kinds
+
+
 def _language_filtered(
     call: _Referable, candidates: list[Symbol]
 ) -> list[Symbol]:

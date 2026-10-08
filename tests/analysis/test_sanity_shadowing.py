@@ -401,3 +401,45 @@ def test_python_for_target_shadows_a_free_function(
     assert row["cause"] == sanity.CAUSE_SHADOWING_LOCAL
     assert row["decl_line"] == 2
     assert rows[("pkg/run.py", 7)]["cause"] != sanity.CAUSE_SHADOWING_LOCAL
+
+
+def _shadow_one(tmp_path: Path, path: str, src: str, line: int) -> str:
+    (tmp_path / path).write_text(src)
+    text = src.splitlines()[line - 1]
+    hit = sanity.GrepHit(path=path, line=line, snippet=text)
+    causes = {(path, line): sanity.CAUSE_UNEXPLAINED}
+    sanity._explain_shadowing_locals(
+        causes, [hit], "callback", tmp_path, frozenset(), {}
+    )
+    return causes[(path, line)]
+
+
+@pytest.mark.parametrize(
+    ("path", "src"),
+    [
+        (
+            "a.rs",
+            "fn f(items: Vec<u8>) {\n"
+            "    items.iter().for_each(|callback| drop(callback));\n"
+            "    callback(1);\n"
+            "}\n",
+        ),
+        (
+            "b.rs",
+            "fn g(a: bool, b: bool) {\n"
+            "    let z = a || callback(2) > 0 || b;\n"
+            "    callback(3);\n"
+            "}\n",
+        ),
+        (
+            "c.py",
+            "def h(xs, s):\n"
+            "    ys = [f(callback) for callback in xs if callback in s]\n"
+            "    callback(1)\n",
+        ),
+    ],
+)
+def test_a_closed_closure_or_comprehension_binds_nothing_below(
+    tmp_path: Path, path: str, src: str
+) -> None:
+    assert _shadow_one(tmp_path, path, src, 3) == sanity.CAUSE_UNEXPLAINED

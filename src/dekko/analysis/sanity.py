@@ -101,6 +101,7 @@ from dekko.classify import is_test_path
 from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, Field, RawCall, ReadSite, Symbol
 from dekko.core.resolver import (
+    can_link_across,
     jvm_off_written_path,
     jvm_package_dir,
     jvm_unreachable,
@@ -500,8 +501,9 @@ CAUSE_OTHER_PACKAGE = (
     "written through another package's or type's qualified name, so it "
     "names a different type — not a miss"
 )
-# Per target: the hit's file and the target are in different language
-# families, and dekko never links a call across languages, so the row
+# Per target: the resolver can't link a call on the hit's line to the
+# target's language (``resolver.can_link_across``: Java and Kotlin, the
+# JS dialects, C and C++ link; Swift reaches C functions), so the row
 # can't be a resolver miss. Not "no use": a binding layer (pybind, JNI,
 # FFI) may still reach the target. The two grammar names ride on the
 # row as ``languages``, so the cause string stays one ``--all`` bucket.
@@ -526,19 +528,6 @@ CAUSE_BARE_IDENTIFIER_NOT_METHOD = (
 _BARE_NOT_METHOD_GRAMMARS = frozenset(
     {"rust", "python", "javascript", "typescript", "tsx", "go"}
 )
-# Grammars one call can cross between. Every other grammar is a family
-# of its own; a file with no grammar has none and is never compared.
-_LANGUAGE_FAMILIES = {
-    "java": "jvm",
-    "kotlin": "jvm",
-    "groovy": "jvm",
-    "scala": "jvm",
-    "javascript": "js",
-    "typescript": "js",
-    "tsx": "js",
-    "c": "c",
-    "cpp": "c",
-}
 # Every cause at or below ``_classify_miss_remaining``: the rungs the
 # per-target tier-1 facts (self-recursion, import bound elsewhere) sit
 # above. A row under one of these is re-decided by them; a row with a
@@ -3798,16 +3787,6 @@ def _jvm_target_cause(
 _JVM_NEW_PATH = re.compile(r"\bnew\s+([A-Za-z_][\w.]*)")
 
 
-def _language_family(path: str) -> str | None:
-    """The language family of ``path``'s grammar, or ``None`` when
-    dekko has no grammar for it."""
-    grammar = _grammar_for_path(path)
-    if grammar is None:
-        return None
-
-    return _LANGUAGE_FAMILIES.get(grammar, grammar)
-
-
 def _language_rule_cause(
     index: MapIndex,
     sym: Symbol,
@@ -3831,13 +3810,14 @@ def _language_rule_cause(
     if cause == CAUSE_UNSUPPORTED_LANGUAGE:
         return None
 
-    line_family = _language_family(loc[0])
-    target_family = _language_family(sym.path)
-    if line_family and target_family and line_family != target_family:
-        _row_languages[loc] = {
-            "line": _grammar_for_path(loc[0]) or "",
-            "target": _grammar_for_path(sym.path) or "",
-        }
+    line_lang = _grammar_for_path(loc[0])
+    target_lang = _grammar_for_path(sym.path)
+    if (
+        line_lang
+        and target_lang
+        and not can_link_across(line_lang, target_lang, sym.kind)
+    ):
+        _row_languages[loc] = {"line": line_lang, "target": target_lang}
         return CAUSE_OTHER_LANGUAGE
 
     if _bare_identifier_only(index, sym, loc, snippet):
@@ -3890,7 +3870,9 @@ def _reaches_method(snippet: str, name: str, grammar: str) -> bool:
     others, where it may be a bound method value."""
     n = re.escape(name)
     if grammar == "rust":
-        pattern = rf"\.\s*{n}\s*(?:::\s*<[^>]*>\s*)?\(|::\s*{n}\b"
+        # ``.name::`` is a turbofish whatever its generics hold
+        # (``.cursor::<Dimensions<A, B>>(..)``); a field never has one.
+        pattern = rf"\.\s*{n}\s*(?:\(|::)|::\s*{n}\b"
     else:
         pattern = rf"\.\s*{n}\b"
     return re.search(pattern, snippet) is not None
@@ -4686,8 +4668,14 @@ def _assignment_cause(hit: GrepHit, bare_name: str) -> str | None:
     if _grammar_for_path(hit.path) not in _ASSIGNMENT_GRAMMARS:
         return None
 
-    pattern = _ASSIGNMENT_TEMPLATE.format(name=re.escape(bare_name))
-    if re.search(pattern, hit.snippet) is None:
+    name = re.escape(bare_name)
+    write = re.search(_ASSIGNMENT_TEMPLATE.format(name=name), hit.snippet)
+    if write is None:
+        return None
+
+    # ``command = command(xs)`` writes the name and calls it.
+    rest = hit.snippet[write.end() :]
+    if re.search(rf"\b{name}\s*(?:\(|::\s*<)", rest):
         return None
 
     return CAUSE_ASSIGNMENT
@@ -4752,21 +4740,25 @@ _SHADOW_DECL_TEMPLATE = (
 # Rust: a ``let`` (``mut``, or a pattern before its ``=``, ``if let`` and
 # ``while let`` too), a closure parameter, a ``for`` pattern. zed:
 # ``callback`` 605 unexplained rows were a closure parameter or a local.
-_RUST_CLOSURE_TEMPLATE = r"\|[^|]*\b{name}\b[^|]*\|"
+# A closure's parameters live only as long as its body, so on a line
+# above the hit one binds only when its body stays open (``|x| {``);
+# ``||`` is never a parameter list.
+_RUST_CLOSURE_TEMPLATE = r"(?<!\|)\|(?!\|)[^|]*\b{name}\b[^|]*\|"
 _RUST_SHADOW_TEMPLATE = (
     r"\blet\s+(?:mut\s+)?{name}\b"
     r"|\b(?:let|if\s+let|while\s+let)\b[^=]*\b{name}\b[^=]*=(?!=)"
-    rf"|{_RUST_CLOSURE_TEMPLATE}"
+    rf"|{_RUST_CLOSURE_TEMPLATE}[^|]*\{{{{\s*$"
     r"|\bfor\b[^=]*\b{name}\b[^=]*\bin\b"
 )
-# Python: an assignment (annotated or not), a ``for`` target, ``with``
-# / ``except`` ... ``as``, a ``lambda`` parameter.
+# Python: an assignment (annotated or not), a ``for`` statement's
+# target (not a comprehension's, which doesn't leak), ``with`` /
+# ``except`` ... ``as``. A ``lambda`` parameter binds only on its own
+# line (``_SHADOW_SAME_LINE_TEMPLATES``).
 _PY_LAMBDA_TEMPLATE = r"\blambda\b[^:]*\b{name}\b[^:]*:"
 _PY_SHADOW_TEMPLATE = (
     r"^\s*{name}\s*(?::[^=]+)?=(?!=)"
-    r"|\bfor\b.*\b{name}\b.*\bin\b"
+    r"|^\s*(?:async\s+)?for\b[^:]*\b{name}\b[^:]*\bin\b"
     r"|\bas\s+{name}\b"
-    rf"|{_PY_LAMBDA_TEMPLATE}"
 )
 _SHADOW_DECL_TEMPLATES = {
     "javascript": _SHADOW_DECL_TEMPLATE,
