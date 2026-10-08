@@ -234,6 +234,14 @@ class RawCall:
             isn't ``?``; ``None`` otherwise. Read by
             ``resolver._pick_constructor`` to rule out an overload
             whose parameter a literal can't be.
+        bound: What the callee text's first segment is lexically bound
+            to (the receiver's head for ``x.m()``, the name itself for
+            a bare ``f()``): ``"param"``, ``"local"``, or ``None`` for
+            anything else (a symbol, an import, ``this``, a field, or a
+            language with no ``binding_query``). Read by the resolver:
+            a bare name that is a parameter or a local is not a field of
+            the enclosing type, and a bare call to a parameter is not a
+            call to a repo function of that name.
     """
 
     caller_id: str | None
@@ -244,6 +252,7 @@ class RawCall:
     line: int = 0
     arg_count: int | None = None
     arg_kinds: tuple[str, ...] | None = None
+    bound: str | None = None
 
 
 @dataclass

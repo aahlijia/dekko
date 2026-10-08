@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from dekko.core import rust_cfg
-from dekko.core.languages import LanguageSpec
+from dekko.core.languages import VALUE_NAMESPACE_LANGUAGES, LanguageSpec
 from dekko.core.model import (
     TYPE_KINDS,
     EnvRead,
@@ -99,18 +99,21 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
 
     defs = _collect_definitions(spec, tree.root_node, rel)
     _collect_fields(spec, tree.root_node, rel, defs)
-    calls = _collect_calls(spec, tree.root_node, rel, defs)
+    import_matches = _import_matches(spec, tree.root_node)
+    bindings = _local_bindings(
+        spec, tree.root_node, defs, _import_binding_bytes(import_matches)
+    )
+    calls = _collect_calls(spec, tree.root_node, rel, defs, bindings)
     if spec.name == "rust":
         calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
     if spec.name in ("c", "cpp"):
         calls.extend(_collect_cpp_ctor_arg_calls(tree.root_node, rel, defs))
-    import_matches = _import_matches(spec, tree.root_node)
     refs = _collect_refs(
         spec,
         tree.root_node,
         rel,
         defs,
-        _import_binding_bytes(import_matches),
+        bindings if spec.name in VALUE_NAMESPACE_LANGUAGES else {},
     )
     reads = _collect_reads(spec, tree.root_node, rel, defs)
     heritage = _collect_heritage(spec, tree.root_node, rel, defs)
@@ -1588,12 +1591,27 @@ def _parse_params(style: str, params_node: Node) -> list[Param]:
 # Calls
 
 
+# One scope's claim on a name: (start byte, end byte, kind, scope node
+# type). ``kind`` is "param" / "local", or ``_BOUND_EXEMPT`` for a
+# binding the map already indexes (a nested def, an import), recorded
+# only so the innermost-scope search stops on it.
+_Binding = tuple[int, int, str, str]
+
+
 def _collect_calls(
-    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+    spec: LanguageSpec,
+    root: Node,
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+    bindings: dict[str, list[_Binding]],
 ) -> list[RawCall]:
-    """Find call expressions and attribute them to enclosing defs."""
+    """Find call expressions and attribute them to enclosing defs.
+
+    Each call is tagged with what its callee's first segment is bound
+    to (``RawCall.bound``); ``bindings`` is ``_local_bindings``' table.
+    """
     if spec.name == "kotlin":
-        return _collect_kotlin_calls(spec, root, rel, defs)
+        return _collect_kotlin_calls(spec, root, rel, defs, bindings)
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
     attrs = (
         _rust_error_attribute_spans(root)
@@ -1622,6 +1640,7 @@ def _collect_calls(
         call = _raw_call(callee, rel, spans, arg_count, constructs=cpp_new)
         if call is None:
             continue
+        _tag_bound(spec, call, callee, bindings)
         if (
             spec.name == "java"
             and call_node is not None
@@ -1638,7 +1657,11 @@ def _collect_calls(
 
 
 def _collect_kotlin_calls(
-    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+    spec: LanguageSpec,
+    root: Node,
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+    bindings: dict[str, list[_Binding]],
 ) -> list[RawCall]:
     """Kotlin calls, attributed to their enclosing definitions.
 
@@ -1653,6 +1676,7 @@ def _collect_kotlin_calls(
     for _, caps in _run_query(spec.grammar, spec.call_query, root):
         generic = _kotlin_generic_call(caps, rel, spans)
         if generic is not None:
+            _tag_bound(spec, generic, _one(caps, "gcall"), bindings)
             calls.append(generic)
             continue
         ctor = _one(caps, "ctor")
@@ -1669,18 +1693,41 @@ def _collect_kotlin_calls(
         text, name, receiver = parts
         text, receiver = _cap_callee(text, name, receiver)
         caller = _enclosing(spans, call_node.start_byte)
-        calls.append(
-            RawCall(
-                caller_id=caller.id if caller else None,
-                path=rel,
-                text=text,
-                name=name,
-                receiver=receiver,
-                line=call_node.start_point[0] + 1,
-                arg_count=_kotlin_arg_count(call_node),
-            )
+        call = RawCall(
+            caller_id=caller.id if caller else None,
+            path=rel,
+            text=text,
+            name=name,
+            receiver=receiver,
+            line=call_node.start_point[0] + 1,
+            arg_count=_kotlin_arg_count(call_node),
         )
+        _tag_bound(spec, call, call_node, bindings)
+        calls.append(call)
     return calls
+
+
+# The joiners a callee text's segments are split on.
+_CALLEE_JOINERS = re.compile(r"\?\.|->|::|\.")
+
+
+def _callee_head(text: str) -> str:
+    """The first segment of a callee text: ``a`` of ``a.b.c``,
+    ``a?.b``, ``a->b`` or ``a::b``; the text itself when it has one."""
+    return _CALLEE_JOINERS.split(text, maxsplit=1)[0]
+
+
+def _tag_bound(
+    spec: LanguageSpec,
+    call: RawCall,
+    node: Node | None,
+    bindings: dict[str, list[_Binding]],
+) -> None:
+    """Set ``call.bound`` from the binding table, at ``node``'s place."""
+    if node is None or not bindings:
+        return
+    claims = bindings.get(_callee_head(call.text))
+    call.bound = _bound_kind(spec, node, claims)
 
 
 def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
@@ -2594,7 +2641,7 @@ def _collect_refs(
     root: Node,
     rel: str,
     defs: list[tuple[Node, Symbol]],
-    import_bytes: frozenset[int] = frozenset(),
+    bindings: dict[str, list[_Binding]],
 ) -> list[RawRef]:
     """Find bare-identifier value references, attributed to enclosing defs.
 
@@ -2607,13 +2654,12 @@ def _collect_refs(
     yet.
 
     Each reference is tagged with what it is lexically bound to
-    (``RawRef.bound``, see ``_local_bindings``); ``import_bytes`` is
-    ``_import_binding_bytes``'s set.
+    (``RawRef.bound``); ``bindings`` is ``_local_bindings``' table, or
+    empty for a language whose references a local can't shadow.
     """
     if spec.reference_query is None:
         return []
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
-    bindings = _local_bindings(spec, root, defs, import_bytes)
     refs: list[RawRef] = []
     for _, caps in _run_query(spec.grammar, spec.reference_query, root):
         ctor_ref = _one(caps, "ctorref")
@@ -2762,11 +2808,6 @@ def _is_property_read(site: Node) -> bool:
 # yields ``bound=None``, which is exactly the behavior without this
 # table: it can leave a false edge standing, never remove a true one.
 
-# One scope's claim on a name: (start byte, end byte, kind, scope node
-# type). ``kind`` is "param" / "local", or ``_BOUND_EXEMPT`` for a
-# binding the map already indexes (a nested def, an import), recorded
-# only so the innermost-scope search stops on it.
-_Binding = tuple[int, int, str, str]
 _BOUND_EXEMPT = ""
 
 # A class body binds names for its own statements only: code inside a
@@ -2791,6 +2832,12 @@ _PATTERN_CONTAINERS = frozenset(
         "as_pattern_target",
         "tuple",
         "list",
+        "inferred_parameters",
+        "parameter_list",
+        "reference_declarator",
+        "structured_binding_declarator",
+        "multi_variable_declaration",
+        "function_value_parameters",
     }
 )
 # Pattern nodes that keep the bound name under one field; every other
@@ -2803,7 +2850,17 @@ _PATTERN_FIELDS = {
     "optional_parameter": "pattern",
     "default_parameter": "name",
     "typed_default_parameter": "name",
+    "formal_parameter": "name",
+    "catch_formal_parameter": "name",
+    "init_declarator": "declarator",
+    "pointer_declarator": "declarator",
+    "array_declarator": "declarator",
+    "parameter_declaration": "declarator",
+    "optional_parameter_declaration": "declarator",
 }
+# Kotlin pattern nodes with no fields: the name is their first
+# ``identifier`` child (a ``parameter`` may lead with modifiers).
+_FIRST_IDENTIFIER_PATTERNS = frozenset({"parameter", "variable_declaration"})
 _PATTERN_LEAVES = frozenset(
     {"identifier", "shorthand_property_identifier_pattern"}
 )
@@ -2827,6 +2884,11 @@ def _pattern_identifiers(node: Node) -> list[Node]:
         # identifiers that bind nothing.
         first = node.named_children[0] if node.named_children else None
         return _pattern_identifiers(first) if first is not None else []
+    if node.type in _FIRST_IDENTIFIER_PATTERNS:
+        first = next(
+            (c for c in node.named_children if c.type == "identifier"), None
+        )
+        return [first] if first is not None else []
     if node.type in _PATTERN_CONTAINERS:
         return [
             ident
@@ -2877,6 +2939,9 @@ def _binding_sites(
         return node.parent, "param", _pattern_identifiers(node)
     if capture == "scoped":
         return scope_node, "local", _pattern_identifiers(node)
+    if capture == "funcparams":
+        scope = _scope_above(node.parent, spec.binding_function_scopes)
+        return scope, "param", _pattern_identifiers(node)
     if capture == "funclocal":
         scope = _scope_above(node.parent, spec.binding_function_scopes)
         return scope, "local", _pattern_identifiers(node)
@@ -2902,6 +2967,7 @@ def _binding_sites(
 
 _BINDING_CAPTURES = (
     "params",
+    "funcparams",
     "param",
     "local",
     "funclocal",

@@ -94,9 +94,14 @@ class LanguageSpec:
             ``@global``/``@nonlocal``/``@import``. Destructuring nests
             to any depth and a query can't recurse, so the query finds
             the pattern's root and ``extractor._pattern_identifiers``
-            walks it. ``None`` for languages whose reference shapes
-            can't be shadowed by a value local (Go's type identifiers,
-            Java's ``Type::method``).
+            walks it. Calls read it too (``RawCall.bound``): in Java,
+            Kotlin and C++ it is what tells a local receiver from a
+            field used without ``this``, and there it is read for calls
+            only, since their references (``Type::method``) name
+            nothing a local shadows (see ``VALUE_NAMESPACE_LANGUAGES``).
+            C++ adds ``@funcparams``: a parameter list that binds in
+            the nearest function scope rather than its parent. ``None``
+            for Go, Rust and C, whose receivers are written out.
         binding_function_scopes: Node types that open a function-level
             scope for ``binding_query``. For Python this includes
             ``class_definition``: a class body binds its own
@@ -570,10 +575,32 @@ C = LanguageSpec(
     env_read_query=_C_ENV_READ_QUERY,
 )
 
+# Where C++ binds a local name (see ``LanguageSpec.binding_query``).
+# A method reads its type's fields bare (``delegate_->Run()``), so the
+# resolver asks this table whether a bare receiver is a local before
+# typing it as a field. A ``parameter_list`` hangs off a
+# ``function_declarator``, whose span stops before the body, so it binds
+# in the nearest function scope (``@funcparams``); a prototype's list
+# outside any body binds nothing.
+_CPP_BINDING_QUERY = """
+(parameter_list) @funcparams
+(declaration declarator: (_) @local)
+(for_range_loop declarator: (_) @scoped) @scope
+(catch_clause parameters: (parameter_list) @scoped) @scope
+"""
+
 CPP = LanguageSpec(
     name="cpp",
     field_query=_C_FIELD_QUERY,
     grammar="cpp",
+    binding_query=_CPP_BINDING_QUERY,
+    binding_function_scopes=("function_definition", "lambda_expression"),
+    binding_block_scopes=(
+        "compound_statement",
+        "for_statement",
+        "for_range_loop",
+        "catch_clause",
+    ),
     extensions=(".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"),
     definition_query="""
 (function_definition
@@ -1438,6 +1465,25 @@ _JAVA_FIELD_QUERY = """
     name: (identifier) @name) @field)
 """
 
+# Where Java binds a local name (see ``LanguageSpec.binding_query``).
+# Read for calls only: a method uses its type's fields without
+# ``this``, so ``repository.findAll()`` is typed through the field
+# unless a parameter or local of that name is in scope. References
+# never read it (``Foo::bar`` names a method, which no local shadows).
+_JAVA_BINDING_QUERY = """
+(formal_parameters) @params
+(inferred_parameters) @params
+(lambda_expression parameters: (identifier) @param)
+(local_variable_declaration
+  declarator: (variable_declarator name: (_) @local))
+(enhanced_for_statement name: (_) @scoped) @scope
+(catch_clause (catch_formal_parameter name: (_) @scoped)) @scope
+(resource name: (_) @local)
+(instanceof_expression name: (identifier) @local)
+(type_pattern (identifier) @local)
+(record_pattern_component (identifier) @local)
+"""
+
 JAVA = LanguageSpec(
     name="java",
     field_query=_JAVA_FIELD_QUERY,
@@ -1488,6 +1534,22 @@ JAVA = LanguageSpec(
     ),
     param_style="generic",
     reference_query=_JAVA_REFERENCE_QUERY,
+    binding_query=_JAVA_BINDING_QUERY,
+    binding_function_scopes=(
+        "method_declaration",
+        "constructor_declaration",
+        "compact_constructor_declaration",
+        "lambda_expression",
+    ),
+    binding_block_scopes=(
+        "block",
+        "for_statement",
+        "enhanced_for_statement",
+        "catch_clause",
+        "try_with_resources_statement",
+        "switch_block_statement_group",
+        "switch_rule",
+    ),
     heritage_query="""
 (class_declaration
   name: (identifier) @classname
@@ -1590,6 +1652,20 @@ _KOTLIN_FIELD_QUERY = """
     (identifier) @name) @field)
 """
 
+# Where Kotlin binds a local name (see ``LanguageSpec.binding_query``),
+# read for calls only, as Java's is. A class-level
+# ``property_declaration`` is a field, not a local: no function or
+# block scope encloses it, so it binds nothing here.
+_KOTLIN_BINDING_QUERY = """
+(function_value_parameters) @params
+(lambda_parameters) @params
+(property_declaration (variable_declaration) @local)
+(property_declaration (multi_variable_declaration) @local)
+(for_statement (variable_declaration) @scoped) @scope
+(for_statement (multi_variable_declaration) @scoped) @scope
+(catch_block (identifier) @scoped) @scope
+"""
+
 KOTLIN = LanguageSpec(
     name="kotlin",
     field_query=_KOTLIN_FIELD_QUERY,
@@ -1647,6 +1723,14 @@ KOTLIN = LanguageSpec(
         "lambda_literal",
         "anonymous_function",
     ),
+    binding_query=_KOTLIN_BINDING_QUERY,
+    binding_function_scopes=(
+        "function_declaration",
+        "secondary_constructor",
+        "lambda_literal",
+        "anonymous_function",
+    ),
+    binding_block_scopes=("block", "for_statement", "catch_block"),
     # Kotlin writes a superclass as a constructor call (``: Base(p)``)
     # and an interface bare (``: Iface``), and a class has at most one
     # superclass, so the clause says which relation each entry is.
@@ -1676,6 +1760,15 @@ KOTLIN = LanguageSpec(
 # propagation and Go's returned-``error``-value convention are
 # type-inference problems, not syntax a tree-sitter query can point at;
 # C has no exception concept to extract at all.
+
+# Languages where a function's name is a value a local binding can
+# shadow: a bare reference or a bare call to a parameter named ``run``
+# means that parameter, not a repo function ``run``. Java keeps method
+# names apart from locals (``Foo::bar`` and ``bar()`` never mean a
+# local ``bar``), so its binding table types receivers only.
+VALUE_NAMESPACE_LANGUAGES = frozenset(
+    {"python", "javascript", "typescript", "tsx"}
+)
 
 TIER1_SPECS: tuple[LanguageSpec, ...] = (
     PYTHON,

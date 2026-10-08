@@ -1911,7 +1911,7 @@ _CONFTEST = "conftest.py"
 
 
 def _fixture_param_target(
-    ref: RawRef, candidates: list[Symbol]
+    ref: _Referable, candidates: list[Symbol]
 ) -> Symbol | None:
     """The pytest fixture a bound parameter stands for, if any.
 
@@ -1955,9 +1955,7 @@ def _fixture_param_target(
 # kind a local binding can shadow. Java's references are syntactic
 # ``Type::method`` and Go's are type identifiers: a wrong edge there is
 # an ordinary name collision, not this bug, and is left to the ladder.
-_REF_VISIBILITY_LANGUAGES = frozenset(
-    {"python", "javascript", "typescript", "tsx"}
-)
+_REF_VISIBILITY_LANGUAGES = languages.VALUE_NAMESPACE_LANGUAGES
 _JS_FAMILY = _LANGUAGE_FAMILIES["javascript"]
 _CPP_FAMILY = _LANGUAGE_FAMILIES["cpp"]
 
@@ -2034,6 +2032,47 @@ def _ref_target_visible(
         return is_script or target.path.endswith(".d.ts")
 
     return any(_module_matches(s.source, target.path) for s in stars or ())
+
+
+def _bare_call_is_param(call: RawCall) -> bool:
+    """Whether a bare call names one of its function's parameters.
+
+    ``makeC(requestCapability)`` returning ``() =>
+    requestCapability(..)`` calls whatever was passed in, never the
+    repo's own ``requestCapability``, so the call is external. Only
+    where a function's name is a value a parameter can shadow; Java's
+    ``run()`` beside a ``Runnable run`` parameter is still the method.
+    A called local is left alone: it usually holds the very function
+    it is named after (``const { run } = helpers; run()``), so the
+    ladder's by-name answer is often the right one.
+    """
+    return (
+        call.receiver is None
+        and call.bound == "param"
+        and _site_language(call.path) in _REF_VISIBILITY_LANGUAGES
+    )
+
+
+def _resolve_param_call(
+    call: RawCall,
+    caller_id: str,
+    index: dict[str, list[Symbol]],
+    edges: dict[tuple[str, str], set[int]],
+    external: dict[tuple[str, str], set[int]],
+) -> None:
+    """Record a bare call to a parameter: the pytest fixture the
+    parameter stands for, else external.
+
+    ``def test_b(make_repo): make_repo()`` calls what the
+    ``make_repo`` fixture returned; the edge to the fixture is how
+    ``affected`` reaches a test through it.
+    """
+    candidates = _language_filtered(call, index.get(call.name, []))
+    fixture = _fixture_param_target(call, candidates)
+    if fixture is not None and fixture.id != caller_id:
+        edges.setdefault((caller_id, fixture.id), set()).add(call.line)
+        return
+    external.setdefault((caller_id, call.text), set()).add(call.line)
 
 
 def _call_target_visible(
@@ -3028,10 +3067,9 @@ def _resolve_call(
     caller = symbols_by_id.get(call.caller_id or "")
     ctx = _WalkCtx(index, by_name_path, imports_by_file or {}, repo_stems)
     walk = _call_walk(call, caller, ctx)
-    if walk.kind == "foreign" or _receiver_is_external(
-        call, file_imports, repo_stems
+    if _settled_before_lookup(
+        call, caller_id, walk, index, file_imports, repo_stems, edges, external
     ):
-        external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
     candidates = _language_filtered(call, index.get(call.name, []))
@@ -5967,6 +6005,10 @@ _WALK_UNKNOWN = WalkResult("unknown")
 _WALK_FOREIGN = WalkResult("foreign")
 
 _WALK_SEGMENT_SPLIT = re.compile(r"->|::|\.")
+# Languages whose methods use a field without ``this``; C has no
+# methods.
+_BARE_FIELD_LANGUAGES = frozenset({"java", "kotlin", "cpp"})
+_WALK_PLAIN_NAME = re.compile(r"[A-Za-z_$][\w$]*\Z")
 _WALK_SEGMENT = re.compile(r"[A-Za-z_$][\w$]*(?:\(\))?\Z|\d+\Z")
 # Calls that hand back what they're called on (a lock guard, a cell
 # borrow, an unwrap, an awaited future), so the type walks through.
@@ -6107,14 +6149,14 @@ def _call_walk(
         The walk's verdict on the whole receiver; ``unknown`` when the
         call has no chained receiver or its language has no fields.
     """
-    segments = _walk_segments(call.receiver)
-    if segments is None:
-        return _WALK_UNKNOWN
     spec = languages.spec_for_path(call.path)
     if spec is None or spec.field_query is None:
         return _WALK_UNKNOWN
+    segments = _walk_segments(call.receiver)
+    if segments is None:
+        return _walk_one_segment(call, caller, ctx)
     nxt = segments[1] if len(segments) > 1 else None
-    result, at = _walk_hop_zero(segments[0], nxt, call.path, caller, ctx)
+    result, at = _walk_hop_zero(segments[0], nxt, call, caller, ctx)
     while at < len(segments) and result.kind == "typed":
         nxt = segments[at + 1] if at + 1 < len(segments) else None
         result, used = _walk_step(result, segments[at], nxt, ctx)
@@ -6126,6 +6168,80 @@ def _call_walk(
         return _WALK_UNKNOWN
 
     return result
+
+
+def _settled_before_lookup(
+    call: RawCall,
+    caller_id: str,
+    walk: WalkResult,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+    edges: dict[tuple[str, str], set[int]],
+    external: dict[tuple[str, str], set[int]],
+) -> bool:
+    """Record a call the candidate ladder never sees, if this is one.
+
+    A bare call to a parameter (see ``_bare_call_is_param``), and a
+    call whose receiver is typed outside the repo or names an outside
+    import. Returns whether the call was recorded.
+    """
+    if _bare_call_is_param(call):
+        _resolve_param_call(call, caller_id, index, edges, external)
+        return True
+    if walk.kind == "foreign" or _receiver_is_external(
+        call, file_imports, repo_stems
+    ):
+        external.setdefault((caller_id, call.text), set()).add(call.line)
+        return True
+
+    return False
+
+
+def _walk_one_segment(
+    call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> WalkResult:
+    """A one-segment receiver: walked only when it is a bare field.
+
+    ``repository.findAll()`` in Java, Kotlin or C++ is a call on the
+    caller's field. Every other one-segment receiver (self, a typed
+    parameter, a type name) stays with the structural rungs.
+    """
+    receiver = call.receiver or ""
+    if not _WALK_PLAIN_NAME.match(receiver):
+        return _WALK_UNKNOWN
+    result, _ = _walk_bare_field(receiver, None, call, caller, ctx)
+
+    return result
+
+
+def _walk_bare_field(
+    first: str,
+    nxt: str | None,
+    call: RawCall,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """A receiver's first segment as a field used without ``this``.
+
+    Java, Kotlin and C++ methods read their type's fields bare. A name
+    the binding pass found no parameter or local for, and that isn't
+    the caller's own parameter, is looked up as a field of the caller's
+    container (own, then inherited). Anything else, a field without a
+    type included, is ``unknown``, which leaves the ladder as it was.
+    """
+    if (
+        _site_language(call.path) not in _BARE_FIELD_LANGUAGES
+        or call.bound is not None
+        or _walk_is_self(first, call.path)
+        or _walk_param(caller, first) is not None
+    ):
+        return _WALK_UNKNOWN, 1
+    container = _walk_container(caller, ctx)
+    if container.kind != "typed":
+        return _WALK_UNKNOWN, 1
+
+    return _walk_field(container, first, nxt, ctx)
 
 
 def _walk_only_transparent(segments: list[str]) -> bool:
@@ -6242,16 +6358,18 @@ def _walk_segments(receiver: str | None) -> list[str] | None:
 def _walk_hop_zero(
     first: str,
     nxt: str | None,
-    path: str,
+    call: RawCall,
     caller: Symbol | None,
     ctx: _WalkCtx,
 ) -> tuple[WalkResult, int]:
-    """Type a receiver's first segment: self, a parameter, or a type.
+    """Type a receiver's first segment: self, a parameter, a type, or
+    (Java, Kotlin, C++) a field used without ``this``.
 
     Returns the result and how many segments it used: two for a
     parameter with an inline object type (``input: { client: Client }``),
     whose next segment names the member.
     """
+    path = call.path
     if _walk_is_self(first, path):
         return _walk_container(caller, ctx), 1
     if first.endswith("()"):
@@ -6261,9 +6379,9 @@ def _walk_hop_zero(
         return _walk_param_type(param, nxt, caller, ctx)
     found = _walk_type_token(first, path, ctx)
     if not found:
-        # A name the repo has no type for is a local or a module
-        # alias, not a type outside the repo.
-        return _WALK_UNKNOWN, 1
+        # A name the repo has no type for is a field, a local or a
+        # module alias, not a type outside the repo.
+        return _walk_bare_field(first, nxt, call, caller, ctx)
 
     return WalkResult("typed", (found,)), 1
 

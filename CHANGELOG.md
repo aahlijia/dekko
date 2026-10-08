@@ -9,6 +9,49 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.10] — 2026-10-08
+
+### Fixed
+- **A Java, Kotlin or C++ field used without `this` reaches its type.**
+  `repository.findAll()` inside a class with a `Repo repository` field,
+  Kotlin's `repo.findAll()` through a `private val repo: Repo`
+  constructor parameter, and C++'s `delegate_->Run()` or
+  `owned_->Run()` through a `std::unique_ptr<Repo>` member are walked
+  the way `this.repository.findAll()` already was: to the field type's
+  member, external when the type is outside the repo
+  (`logger.info(..)` on commons-logging, `DEFAULT_DOMAIN.equals(..)` on
+  a `String` constant, which used to land on `ImageName.equals`), and
+  on through longer chains (`repository.helper.go()`). A parameter or
+  local of the same name, lambda parameters included, still wins over
+  the field.
+- **A bare call to a parameter is not a call to a repo function of that
+  name.** `makeC(requestCapability)` returning `() =>
+  requestCapability(..)` calls its argument, not the repo's own
+  `requestCapability`; Python's `def apply(f): f()` likewise. Those
+  calls are external now, in Python, JavaScript and TypeScript, where a
+  function's name is a value a parameter shadows. Where the function is
+  passed in under its own name (`handler(.., responseStream, ..)`), the
+  passing site is still a reference to it. A called local keeps the
+  edge it had: it usually holds the function it is named after
+  (`const { run } = helpers`).
+
+Against 1.8.9, edge sites and ambiguous rows:
+
+| Repo | Edge sites | External sites | Ambiguous rows |
+|---|---|---|---|
+| spring-boot | +87 −17 | +604 −18 | 45,821 → 45,316 |
+| tensorflow | +2,141 −1,073 | +3,890 −146 | 190,447 → 187,242 |
+| cline | +0 −139 | +427 −0 | 3,671 → 3,484 |
+
+tensorflow's C++ gains are typed members (`input_impl_->GetNext(..)` is
+`IteratorBase.GetNext`); most of its losses are `std::` containers that
+had landed on a same-named repo method (`execution_plan_.size()` on
+`TfLiteIntArrayView.size`). Some C++ classes the map doesn't extract
+(declared behind a macro, or in a vendored directory) make their fields
+read as outside the repo, so a few right edges go external too. cline's
+and tensorflow's Python losses are all bare calls to a parameter.
+Map time is within 3% of 1.8.9.
+
 ## [1.8.9] — 2026-10-07
 
 ### Added
