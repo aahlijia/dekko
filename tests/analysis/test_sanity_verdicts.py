@@ -151,3 +151,11 @@ def test_static_member_access_names_the_class_as_receiver(
         sanity.CAUSE_STATIC_MEMBER_REFERENCE
     )
     assert ("use.ts", 3) not in rows
+
+
+def test_text_mode_names_the_external_callee(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(VERDICT_REPO)
+    assert cli.main(["sanity", "c.ts::C.entries", "--root", str(root)]) == 0
+    assert "(external: Object.entries)" in capsys.readouterr().out

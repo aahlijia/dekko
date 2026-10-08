@@ -193,10 +193,15 @@ def test_method_rows_read_the_same_in_both_modes(
     # A same-named local is a local, not a library method.
     assert rows[("src/local.ts", 3)] == sanity.CAUSE_SHADOWING_LOCAL
     # A test file's own helper belongs to the test filter.
-    assert rows[("test/widget.test.ts", 5)] == sanity.CAUSE_TEST_FILTER
+    # A bare ``active()`` can't be a TS class method, test file or not.
+    assert rows[("test/widget.test.ts", 5)] == (
+        sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
+    )
     # A call in a file that never names the class is the one row the
     # receiver label is for.
-    assert rows[("src/other.ts", 2)] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+    assert rows[("src/other.ts", 2)] == (
+        sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
+    )
     swept = _all(root, capsys)
     assert swept[ACTIVE] == Counter(rows.values())
 
@@ -316,3 +321,40 @@ def test_nested_same_named_types_agree_across_modes(
     for target, causes in rows.items():
         single = Counter(_single(root, target, capsys).values())
         assert single == causes, target
+
+
+def test_a_method_and_a_struct_sharing_a_name_agree_across_modes(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a/src/lib.rs": (
+                "pub struct A;\n"
+                "impl A {\n"
+                "    pub fn node(&self) -> u8 {\n"
+                "        1\n"
+                "    }\n"
+                "}\n"
+                "pub fn use_a(a: &A) -> u8 {\n"
+                "    a.node()\n"
+                "}\n"
+            ),
+            "b/src/lib.rs": (
+                "pub struct node(pub u8);\n"
+                "pub fn make() -> node {\n"
+                "    node(3)\n"
+                "}\n"
+            ),
+            "c/src/lib.rs": (
+                "pub fn f(x: Option<node>) -> u8 {\n"
+                "    let node = 1;\n"
+                "    node\n"
+                "}\n"
+            ),
+        }
+    )
+    swept = _all(root, capsys)
+    for target in ("a/src/lib.rs::A.node", "b/src/lib.rs::node"):
+        assert target in swept, target
+        single = Counter(_single(root, target, capsys).values())
+        assert swept[target] == single, target

@@ -9,6 +9,34 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.14] — 2026-10-08
+
+### Fixed
+- **A bare identifier no longer reads as a missed method call in Rust,
+  Python, JS/TS or Go.** Those languages reach a method only through a
+  receiver or a path, so on a method target a line whose occurrences
+  are all bare (`harden: bool` for a method `bool`, `app_state.client`
+  for a method `app_state`) now reads `bare identifier, not the method`.
+  zed: `WorkflowInput.bool` 2,394 unexplained rows → 0,
+  `Workspace.app_state` 474 → 0. A Python hit inside the method's own
+  class is left alone (`@name.setter`), and Java, Kotlin, C++ and C#,
+  where a bare call can be a method, are not judged.
+- **Rust type positions read as type mentions.** On a Rust struct, enum,
+  trait or alias, a line with no `Name {` or `Name(` (`Task<()>`,
+  `Task::ready(..)`, `(SharedString, usize)`) now reads `names the type
+  without constructing it`, as Java and Kotlin lines already did. zed:
+  `scheduler::Task` 989 → 6 (match patterns). Unit structs are skipped.
+- **A line in another language says so.** A JS `throw new Error(..)`
+  against a Java `Error`, a Python or shell line against a TS method:
+  `a <hit lang> line, the target is <target lang>: dekko never links
+  calls across languages`, with the two grammars as `languages` on the
+  row, and a note that a binding layer (pybind, JNI, FFI) may still
+  reach the target.
+- Text mode now appends a row's `external_callee` (from 1.8.13) and
+  `languages`.
+- `sanity --all`'s `aggregate_causes` gains the bare-identifier and
+  other-language keys, and the type-mention key's text changed.
+
 ## [1.8.13] — 2026-10-08
 
 ### Fixed

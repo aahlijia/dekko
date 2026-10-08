@@ -529,12 +529,20 @@ def test_sanity_data_driven_collision_flags_uncurated_name(
     # a real, measurable ambiguous call-graph collision the moment a
     # bare, receiverless call to it exists -- ambiguous.collision_names
     # must surface that collision as CAUSE_GENERIC_NAME here, not
-    # CAUSE_UNEXPLAINED, even absent any curation.
+    # CAUSE_UNEXPLAINED, even absent any curation. Java, where a bare
+    # call can be a method (implicit ``this``); in Python it can't, and
+    # the line reads as a bare identifier instead.
     root = make_mapped_repo(
         {
-            "a.py": "class A:\n    def dispose(self):\n        pass\n",
-            "b.py": "class B:\n    def dispose(self):\n        pass\n",
-            "c.py": "def caller(x):\n    return dispose(x)\n",
+            "A.java": "class A {\n    void dispose() {}\n}\n",
+            "B.java": "class B {\n    void dispose() {}\n}\n",
+            "C.java": (
+                "class C {\n"
+                "    void caller() {\n"
+                "        dispose();\n"
+                "    }\n"
+                "}\n"
+            ),
         }
     )
     _force_no_dekko_hits(monkeypatch)
@@ -3877,19 +3885,26 @@ def test_sanity_receiver_mismatch_flags_unrelated_collision(
     # same-named zero-arg call in a different file with no import of
     # the defining class and no receiver identifier on the same line
     # (so it doesn't already match the higher-precedence
-    # CAUSE_QUALIFIED_CALL check -- see _QUALIFIED_CALL_TEMPLATE).
+    # CAUSE_QUALIFIED_CALL check -- see _QUALIFIED_CALL_TEMPLATE). Java,
+    # where a bare call can be a method; in Python it can't.
     root = make_mapped_repo(
         {
-            "a.py": (
-                "class Widget:\n"
-                "    def isTrue(self):\n"
-                "        return True\n"
-                "\n\n"
-                "def caller():\n"
-                "    w = Widget()\n"
-                "    return w.isTrue()\n"
+            "Widget.java": (
+                "class Widget {\n"
+                "    boolean isTrue() { return true; }\n"
+                "    boolean caller() {\n"
+                "        Widget w = new Widget();\n"
+                "        return w.isTrue();\n"
+                "    }\n"
+                "}\n"
             ),
-            "b.py": ("def unrelated():\n    return isTrue()\n"),
+            "U.java": (
+                "class U {\n"
+                "    boolean unrelated() {\n"
+                "        return isTrue();\n"
+                "    }\n"
+                "}\n"
+            ),
         }
     )
     _force_no_dekko_hits(monkeypatch)
@@ -3903,7 +3918,7 @@ def test_sanity_receiver_mismatch_flags_unrelated_collision(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     causes = {row["file"]: row["cause"] for row in doc["grep_only"]}
-    assert causes["b.py"] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+    assert causes["U.java"] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
     assert doc["receiver_mismatch_declaring_type"] == "Widget"
     assert doc["receiver_mismatch_count"] >= 1
     assert "Widget" in doc["receiver_mismatch_note"]

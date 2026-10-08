@@ -456,11 +456,27 @@ count: `matches`, `dekko-only` and `grep-only` are untouched, only the
 cause on a grep-only row changes. `--fail-on-unexplained` will fail
 less often as a result.
 
+**Language rules, since 1.8.14.** Three causes follow from a language
+itself, per target. A line in another language family than the target
+(JVM = Java/Kotlin/Groovy/Scala, JS = JS/TS/TSX, C = C/C++, every other
+grammar alone) reads `a <hit lang> line, the target is <target lang>:
+dekko never links calls across languages ...`, the two grammars on the
+row as `languages`; a binding layer (pybind, JNI) may still reach the
+target, and the label says so. On a method target in Rust, Python,
+JS/TS or Go, a line whose only occurrences are bare identifiers reads
+`bare identifier, not the method`: those languages reach a method only
+through a receiver or a path (`x.name(..)`, `T::name`; any `.name` in
+the non-Rust ones), and a Python hit inside the method's own class is
+never judged (`@name.setter`). On a Rust struct, enum, trait or alias,
+a line with no `Name {` / `Name(` reads as a type mention (below); a
+unit struct is skipped, since a bare `Marker` is a value. An unparsed
+file keeps its own label under all three.
+
 **Java and Kotlin type mentions, since 1.6.10.** On a type target, or
 a constructor of one, a Java or Kotlin line that names the type without
-constructing it reads `names the type without constructing it
-(declaration, parameter or return type, generic argument, static member
-access, cast or class literal) — not a call site`: `ConfigurationPropertyName
+constructing it reads `names the type without constructing it (a type
+position, path, generic argument, static member access, cast or class
+literal) — not a call site`: `ConfigurationPropertyName
 oldName = property.getName();`, `List<Name> all`, `Name.of("a")`,
 `Name.class`, `(Name) o`, `o instanceof Name`, `new Name[3]`. It holds
 only when no occurrence of the name on the line could construct it:

@@ -460,10 +460,14 @@ CAUSE_PROPERTY_ACCESS_SHAPE = (
 # A Java constructor can't run without ``Name(``, ``Name<..>(`` or
 # ``Name::new``, so a missed construction never lands here. spring-boot:
 # 17,589 of 18,349 unexplained rows were this shape.
+# Rust, type targets too (``_rust_type_mention``): no ``Name {`` /
+# ``Name(`` on the line, so ``Task<()>``, ``Task::ready(..)`` and
+# ``(SharedString, usize)`` name the type without building one. zed:
+# ``Task`` 989, ``SharedString`` 698 unexplained rows were this.
 CAUSE_TYPE_MENTION = (
-    "names the type without constructing it (declaration, parameter "
-    "or return type, generic argument, static member access, cast or "
-    "class literal) — not a call site"
+    "names the type without constructing it (a type position, path, "
+    "generic argument, static member access, cast or class literal) — "
+    "not a call site"
 )
 # Java and Kotlin, per target: the target is private to its file or
 # package (``Symbol.visibility``) and the line is outside it, so the
@@ -483,6 +487,45 @@ CAUSE_OTHER_PACKAGE = (
     "written through another package's or type's qualified name, so it "
     "names a different type — not a miss"
 )
+# Per target: the hit's file and the target are in different language
+# families, and dekko never links a call across languages, so the row
+# can't be a resolver miss. Not "no use": a binding layer (pybind, JNI,
+# FFI) may still reach the target. The two grammar names ride on the
+# row as ``languages``, so the cause string stays one ``--all`` bucket.
+CAUSE_OTHER_LANGUAGE = (
+    "a <hit lang> line, the target is <target lang>: dekko never links "
+    "calls across languages, so this is not a resolver miss; a binding "
+    "layer (pybind, JNI, FFI) may still reach it (see languages)"
+)
+# Per method target: no occurrence on the line can reach a method. In
+# these languages a method is only reached through a receiver
+# (``x.name(..)``) or a path (``T::name``), so a bare ``name`` is a
+# local, parameter, field or type. Not Java, Kotlin, C++ or C#, where an
+# implicit ``this`` makes a bare ``name(..)`` a real method call. zed:
+# most of its 15,224 unexplained rows were this (``harden: bool`` for a
+# method ``bool``, ``app_state.client`` for a method ``app_state``).
+# Fixed text: a per-language variant would split the ``--all`` bucket.
+CAUSE_BARE_IDENTIFIER_NOT_METHOD = (
+    "bare identifier, not the method: a method in this language is only "
+    "reached through a receiver (`x.name(..)`) or a path (`T::name`) — "
+    "this names a local, parameter, field or type"
+)
+_BARE_NOT_METHOD_GRAMMARS = frozenset(
+    {"rust", "python", "javascript", "typescript", "tsx", "go"}
+)
+# Grammars one call can cross between. Every other grammar is a family
+# of its own; a file with no grammar has none and is never compared.
+_LANGUAGE_FAMILIES = {
+    "java": "jvm",
+    "kotlin": "jvm",
+    "groovy": "jvm",
+    "scala": "jvm",
+    "javascript": "js",
+    "typescript": "js",
+    "tsx": "js",
+    "c": "c",
+    "cpp": "c",
+}
 # Every cause at or below ``_classify_miss_remaining``: the rungs the
 # per-target tier-1 facts (self-recursion, import bound elsewhere) sit
 # above. A row under one of these is re-decided by them; a row with a
@@ -1383,6 +1426,7 @@ def _reset_file_caches() -> None:
     _file_states.clear()
     _shadow_decl_lines.clear()
     _external_callees.clear()
+    _row_languages.clear()
 
 
 def _cached_lines(root: Path, path: str) -> list[str]:
@@ -3624,6 +3668,136 @@ def _jvm_target_cause(
 _JVM_NEW_PATH = re.compile(r"\bnew\s+([A-Za-z_][\w.]*)")
 
 
+def _language_family(path: str) -> str | None:
+    """The language family of ``path``'s grammar, or ``None`` when
+    dekko has no grammar for it."""
+    grammar = _grammar_for_path(path)
+    if grammar is None:
+        return None
+
+    return _LANGUAGE_FAMILIES.get(grammar, grammar)
+
+
+def _language_rule_cause(
+    index: MapIndex,
+    sym: Symbol,
+    loc: tuple[str, int],
+    snippet: str,
+    cause: str | None,
+    root: Path,
+) -> str | None:
+    """A cause that follows from the languages alone, or ``None``.
+
+    Applies only to a row that could still read as a miss (a
+    qualified-call label or one in ``_REMAINING_CAUSES``); a row
+    already labelled a comment, string or import says "not a miss" on
+    its own and keeps its words.
+    """
+    if cause not in _REMAINING_CAUSES and cause not in _QUALIFIED_FAMILY:
+        return None
+
+    # A file dekko can't parse keeps saying so: the rules below read
+    # code, and its lines were never code to dekko.
+    if cause == CAUSE_UNSUPPORTED_LANGUAGE:
+        return None
+
+    line_family = _language_family(loc[0])
+    target_family = _language_family(sym.path)
+    if line_family and target_family and line_family != target_family:
+        _row_languages[loc] = {
+            "line": _grammar_for_path(loc[0]) or "",
+            "target": _grammar_for_path(sym.path) or "",
+        }
+        return CAUSE_OTHER_LANGUAGE
+
+    if _bare_identifier_only(index, sym, loc, snippet):
+        return CAUSE_BARE_IDENTIFIER_NOT_METHOD
+
+    if _rust_type_mention(root, sym, snippet):
+        return CAUSE_TYPE_MENTION
+
+    return None
+
+
+_RUST_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+
+
+def _rust_constructs(snippet: str, name: str) -> bool:
+    """Whether some occurrence of the type ``name`` on a Rust line
+    could build one: a struct literal ``Name {`` or a tuple-struct
+    call ``Name(`` (a match pattern has the same shape and stays)."""
+    code = _RUST_STRING.sub('""', snippet)
+    return re.search(rf"\b{re.escape(name)}\s*[({{]", code) is not None
+
+
+def _is_rust_unit_struct(root: Path, sym: Symbol) -> bool:
+    """Whether ``sym``'s definition line is ``struct Name;``: a bare
+    ``Name`` is then a value, which one line can't tell from a type."""
+    lines = _cached_lines(root, sym.path)
+    if not 0 < sym.start_line <= len(lines):
+        return False
+
+    pattern = rf"\bstruct\s+{re.escape(sym.name)}\s*;"
+    return re.search(pattern, lines[sym.start_line - 1]) is not None
+
+
+def _rust_type_mention(root: Path, sym: Symbol, snippet: str) -> bool:
+    """Whether a Rust line names the Rust type target ``sym`` without
+    any occurrence that could construct it."""
+    if sym.kind not in TYPE_KINDS or _grammar_for_path(sym.path) != "rust":
+        return False
+
+    if not _word(sym.name).search(snippet):
+        return False
+
+    if _rust_constructs(snippet, sym.name):
+        return False
+
+    return not _is_rust_unit_struct(root, sym)
+
+
+def _reaches_method(snippet: str, name: str, grammar: str) -> bool:
+    """Whether some occurrence of ``name`` on the line could reach a
+    method: a receiver call or a path in Rust, where ``x.name`` with no
+    call is a field (Rust has no method values); any ``.name`` in the
+    others, where it may be a bound method value."""
+    n = re.escape(name)
+    if grammar == "rust":
+        pattern = rf"\.\s*{n}\s*(?:::\s*<[^>]*>\s*)?\(|::\s*{n}\b"
+    else:
+        pattern = rf"\.\s*{n}\b"
+    return re.search(pattern, snippet) is not None
+
+
+def _bare_identifier_only(
+    index: MapIndex, sym: Symbol, loc: tuple[str, int], snippet: str
+) -> bool:
+    """Whether a method target's name appears on the line only as a
+    bare identifier, in a language where that can't be the method.
+
+    A Python class body is the one place a bare name does mean the
+    method (``@name.setter``, ``property(name)``), so a hit inside the
+    target's own class is never judged.
+    """
+    grammar = _grammar_for_path(loc[0])
+    if sym.kind != "method" or grammar not in _BARE_NOT_METHOD_GRAMMARS:
+        return False
+
+    if not _word(sym.name).search(snippet):
+        return False
+
+    if _reaches_method(snippet, sym.name, grammar):
+        return False
+
+    if grammar == "python":
+        owner = sym.qualname.rpartition(".")[0]
+        chain = _enclosing_chain(index.symbols_by_path.get(loc[0], []), loc[1])
+        if any(s.path == sym.path and s.qualname == owner for s in chain):
+            return False
+
+    return True
+
+
 def _written_off_path(sym: Symbol, path: str, snippet: str) -> bool:
     """Whether a JVM line reaches ``sym``'s name only through a written
     type path ``sym`` isn't on.
@@ -3700,9 +3874,11 @@ def _apply_target_facts(
     for loc in locs:
         cause = causes.get(loc)
         snippet = snippets.get(loc, "")
-        jvm = _jvm_target_cause(sym, loc[0], snippet, cause)
-        if jvm is not None:
-            causes[loc] = jvm
+        ruled = _jvm_target_cause(
+            sym, loc[0], snippet, cause
+        ) or _language_rule_cause(index, sym, loc, snippet, cause, root)
+        if ruled is not None:
+            causes[loc] = ruled
             continue
         if cause not in _REMAINING_CAUSES:
             continue
@@ -4408,6 +4584,9 @@ _shadow_decl_lines: dict[tuple[str, int], int] = {}
 # callee text the map recorded there (``_apply_map_verdict``), read by
 # ``_grep_row``. Process-global for the same reason as above.
 _external_callees: dict[tuple[str, int], str] = {}
+# ``(path, line)`` of a ``CAUSE_OTHER_LANGUAGE`` row → the hit's and the
+# target's grammar (``_language_rule_cause``), read by ``_grep_row``.
+_row_languages: dict[tuple[str, int], dict[str, str]] = {}
 
 
 # --- tier 2: same-named locals ----------------------------------------
@@ -4700,6 +4879,9 @@ def _grep_row(
     callee = _external_callees.get((hit.path, hit.line))
     if callee is not None and cause == CAUSE_RECORDED_EXTERNAL:
         row["external_callee"] = callee
+    langs = _row_languages.get((hit.path, hit.line))
+    if langs is not None and cause == CAUSE_OTHER_LANGUAGE:
+        row["languages"] = langs
     if resolved_to:
         row["resolved_to"] = resolved_to
     if bound_to is not None and cause == CAUSE_IMPORT_BOUND_ELSEWHERE:
@@ -4913,21 +5095,30 @@ def _build_json_doc(
     return doc
 
 
+def _cause_text(row: dict) -> str:
+    """A grep-only row's cause plus whatever facts ride on the row."""
+    cause = row["cause"]
+    if "decl_line" in row:
+        cause = f"{cause} (declared at line {row['decl_line']})"
+    if "resolved_to" in row:
+        cause = f"{cause} (resolved to {', '.join(row['resolved_to'])})"
+    if "bound_to" in row:
+        cause = f"{cause} (bound to {row['bound_to']})"
+    if "external_callee" in row:
+        cause = f"{cause} (external: {row['external_callee']})"
+    if "languages" in row:
+        langs = row["languages"]
+        cause = f"{cause} ({langs['line']} line, {langs['target']} target)"
+    return cause
+
+
 def _print_bucket_text(title: str, rows: list[dict], meter: Meter) -> None:
     total = meter.total
     print(f"  {title}: {total}")
     for row in rows:
         loc = f"{row['file']}:{row['line']}"
         if "cause" in row:
-            cause = row["cause"]
-            if "decl_line" in row:
-                cause = f"{cause} (declared at line {row['decl_line']})"
-            if "resolved_to" in row:
-                targets = ", ".join(row["resolved_to"])
-                cause = f"{cause} (resolved to {targets})"
-            if "bound_to" in row:
-                cause = f"{cause} (bound to {row['bound_to']})"
-            print(f"    {loc}  [{cause}]")
+            print(f"    {loc}  [{_cause_text(row)}]")
             print(f"      {row['snippet']}")
         else:
             print(f"    {loc}")
