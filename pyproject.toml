@@ -1,6 +1,6 @@
 [project]
 name = "dekko"
-version = "1.8.22"
+version = "1.8.23"
 description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
 readme = "README.md"
 license = "MIT"

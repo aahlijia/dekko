@@ -109,8 +109,9 @@ _DOC_LIMIT = 80
 # Natural-language question words a symbol's own name/doc would never
 # contain. Deliberately separate from relevance._STOPWORDS, which is
 # shared with --task blending elsewhere (workset/context/lean) and is
-# kept minimal on purpose — this overlay only ever applies here.
-_SEARCH_STOPWORDS = frozenset(
+# kept minimal on purpose — this overlay applies to free-text queries
+# only: here and the prompt-submit hook's file pins.
+QUESTION_STOPWORDS = frozenset(
     {
         "what",
         "how",
@@ -176,7 +177,7 @@ def _query_terms(query_text: str) -> tuple[str, ...]:
     return tuple(
         t
         for t in relevance.normalize_terms(query_text)
-        if t not in _SEARCH_STOPWORDS
+        if t not in QUESTION_STOPWORDS
     )
 
 

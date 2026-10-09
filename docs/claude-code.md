@@ -150,6 +150,11 @@ dekko hooks uninstall                      # remove all dekko hooks
   A symbol the prompt names in code form (`generateBones`, `load_map`,
   `Foo.bar`, `run()`, or any name in backticks) lists the file defining
   it first, marked `(defines <name>)`; a plain English word never does.
+  The rest of the list is files whose names or docs share a word with
+  the prompt (question words like "what" and "how" don't count);
+  recently changed files rank higher but are never listed on that
+  alone, and a copy under a `fixtures/` directory ranks after the real
+  definitions.
 - **`pre-read`** — a non-blocking advisory to `outline` a large file
   first, before a whole-file `Read`.
 - **`pre-bash`** — the enforcement tier, off by default even when other

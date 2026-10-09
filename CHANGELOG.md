@@ -9,6 +9,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.23] — 2026-10-09
+
+### Fixed
+- **The prompt-submit hook lists files only through the prompt's
+  words.** Recently changed files got a relevance score of their own
+  (1,108 on cline, 831 on zed), so every prompt, code or not, listed
+  the busiest of them: "tell me a joke" pinned five hubs. Recent and
+  diff files now only rank the files a prompt word matches, and the
+  question words `search` ignores ("what", "how", ...) don't match.
+- **Fixture copies rank after the real definitions** in the hook's
+  `(defines ...)` lines: zed's `evals/fixtures/.../before.rs` copy of
+  `editor.rs` no longer comes before the gpui example.
+
 ## [1.8.22] — 2026-10-09
 
 ### Fixed
