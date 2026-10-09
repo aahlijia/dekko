@@ -42,6 +42,7 @@ from dekko.textutil import (
     clip_middle,
     fit_to_budget,
     signature,
+    strip_dot_slash,
     token_footer,
 )
 from dekko.core.resolver import (
@@ -107,6 +108,17 @@ DEFAULT_MIN_SHARED = 2
 # discipline).
 DEFAULT_THROWS_DEPTH = 2
 
+# Actions whose target isn't a symbol, so ``--lang`` has nothing to
+# narrow (``catches`` reads it as a result filter instead).
+_LANG_IGNORED_ACTIONS = (
+    "file",
+    "uses",
+    "type",
+    "importers",
+    "env",
+    "cohesion",
+)
+
 _BUDGETED_ACTIONS = (
     "callers",
     "callees",
@@ -148,6 +160,7 @@ def paths_matching(
             ``deps.py``'s ``_run_file``.
     """
     universe = index.symbols_by_path if pool is None else pool
+    path = strip_dot_slash(path)
     if path in universe:
         return [path]
     suffix = "/" + path
@@ -215,6 +228,7 @@ def resolve_target(
         candidates considered. No candidates means not found; several
         with no match means ambiguous.
     """
+    target = strip_dot_slash(target)
     by_id = index.symbols_by_id.get(target)
     if by_id is not None:
         return by_id, [by_id]
@@ -288,6 +302,11 @@ def _type_over_own_constructors(
     return cls
 
 
+# The ``#N`` suffix ``_make_symbol`` gives the second and later symbols
+# sharing one ``path::qualname`` id.
+_OVERLOAD_SUFFIX = re.compile(r"#\d+$")
+
+
 def _resolve_exact(
     index: MapIndex, target: str
 ) -> tuple[Symbol | None, list[Symbol]]:
@@ -315,6 +334,16 @@ def _resolve_exact(
             body, line = head, int(tail)
     if ":" in body:
         path_part, _, qual = body.rpartition(":")
+        if _OVERLOAD_SUFFIX.search(qual):
+            # ``path:Q.f#2`` is an id written with one colon: printed
+            # ids use ``::``, but agents copy the ``path:qualname`` form
+            # and keep the overload suffix.
+            by_id = [
+                index.symbols_by_id[sid]
+                for p in paths_matching(index, path_part)
+                if (sid := f"{p}::{qual}") in index.symbols_by_id
+            ]
+            return (by_id[0] if len(by_id) == 1 else None), by_id
         in_files = [
             s
             for p in paths_matching(index, path_part)
@@ -4406,6 +4435,59 @@ def _dispatch_scan(
     return None
 
 
+def _narrow_to_lang(
+    target: str, lang: str, candidates: list[Symbol]
+) -> list[Symbol] | None:
+    """Keep the ``lang`` candidates of a target, for ``--lang``.
+
+    Args:
+        target: The target string, for the message.
+        lang: The language to keep.
+        candidates: Every symbol the target named.
+
+    Returns:
+        The ``lang`` candidates, possibly empty when the target named
+        nothing at all; ``None``, with the reason printed, when it named
+        symbols but none in ``lang``.
+    """
+    kept = [c for c in candidates if c.language == lang]
+    if kept or not candidates:
+        return kept
+    others = sorted({c.language for c in candidates})
+    print(
+        f"dekko: no {lang} symbol matches '{target}' "
+        f"({len(candidates)} in other languages: {', '.join(others)})",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _resolve_symbol_target(
+    index: MapIndex, action: str, target: str, lang: str | None
+) -> tuple[Symbol | None, list[Symbol]] | None:
+    """Resolve a symbol-target action's target, honoring ``--lang``.
+
+    ``throws`` keeps a unique target in another language: there
+    ``lang`` filters the results, and the mismatch gets its own note.
+
+    Returns:
+        ``(match, candidates)`` as ``resolve_target`` gives them, or
+        ``None`` when ``lang`` ruled out every candidate (already
+        reported).
+    """
+    sym, candidates = resolve_target(index, target)
+    if lang is not None and not (action == "throws" and sym is not None):
+        narrowed = _narrow_to_lang(target, lang, candidates)
+        if narrowed is None:
+            return None
+        sym = narrowed[0] if len(narrowed) == 1 else None
+        candidates = narrowed
+    if sym is None and action in ("supertypes", "subtypes"):
+        sym = _sole_type_candidate(target, candidates)
+
+    return sym, candidates
+
+
 def _dispatch(
     index: MapIndex,
     action: str,
@@ -4430,9 +4512,10 @@ def _dispatch(
     if scanned is not None:
         return scanned
 
-    sym, candidates = resolve_target(index, target)
-    if sym is None and action in ("supertypes", "subtypes"):
-        sym = _sole_type_candidate(target, candidates)
+    resolved = _resolve_symbol_target(index, action, target, lang)
+    if resolved is None:
+        return EXIT_NOT_FOUND, None
+    sym, candidates = resolved
     if sym is None:
         return report_unresolved(target, candidates, index), None
     if action == "symbol":
@@ -4517,13 +4600,20 @@ def run(
             env-var key read anywhere (``env --list``) instead of
             looking up one ``target`` key. Ignored for every other
             action.
-        lang: For ``catches``/``throws``, restrict results to one
-            language (e.g. ``"java"``) — cuts cross-language noise on
-            a multi-language repo. Ignored for every other action.
+        lang: Keep only this language's symbols when the target names
+            several (every symbol-target action); for ``catches``/
+            ``throws``, also restrict the results to it. The actions in
+            ``_LANG_IGNORED_ACTIONS`` ignore it, with a note.
 
     Returns:
         Process exit code.
     """
+    if lang is not None and action in _LANG_IGNORED_ACTIONS:
+        print(
+            f"dekko: note: --lang doesn't apply to '{action}'; it narrows "
+            "a symbol target, and the results of throws/catches",
+            file=sys.stderr,
+        )
     effective_budget = budget
     if budget is None and action in _BUDGETED_ACTIONS:
         effective_budget = DEFAULT_RELATION_BUDGET

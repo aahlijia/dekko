@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.17] — 2026-10-09
+
+### Fixed
+- **A leading `./` names the same file.** `outline ./src/a.py`, `query
+  file ./src/a.py` and `query callers ./src/a.py:helper` used to say
+  "no mapped file"; every path and target now drops it.
+- **An id's `#N` works after a single colon.** `path:Foo.run#2` used to
+  find nothing while `path::Foo.run#2` worked.
+- **`query --lang` narrows any symbol target.** It took only the six
+  throws/catches languages and only filtered those two actions, so
+  `query symbol main --lang python` still listed every `main`. It now
+  takes every mapped language, keeps only that language's candidates
+  on every symbol action, and says which languages a name does have
+  when none is in the one asked for. `throws`/`catches` still exit 2 on
+  a language they have no data for.
+- **A mistyped command exits 2.** `dekko serach` printed the help and
+  exited 0; it now says `unknown command 'serach'`, suggests `search`,
+  and exits 2.
+
 ## [1.8.16] — 2026-10-08
 
 ### Fixed

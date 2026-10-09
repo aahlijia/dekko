@@ -6,6 +6,7 @@ writes a human-readable MAP.md plus a machine-readable map.json.
 """
 
 import argparse
+import difflib
 import json
 import shutil
 import subprocess
@@ -47,7 +48,7 @@ from dekko.analysis import summary
 from dekko.core.model import Symbol
 from dekko.analysis import trace
 from dekko.analysis import unused
-from dekko.core import walker
+from dekko.core import tier2, walker
 from dekko.analysis import workset as workset_mod
 
 
@@ -79,15 +80,33 @@ SUBCOMMANDS = (
     "deps",
 )
 
-# Languages 'query throws'/'query catches' extract data for -- derived
-# from the language registry (not hardcoded) so a future language
-# gaining throw_query/catch_query support automatically becomes a
-# valid --lang value with no CLI change needed.
-_THROWS_CATCHES_LANGS = sorted(
-    name
-    for name in languages.SPEC_BY_NAME
-    if languages.exception_handling_supported(name)
-)
+# Every language a map can hold, Tier 1 and Tier 2, from the registries
+# (not hardcoded) so a new grammar is a valid --lang value with no CLI
+# change.
+_QUERY_LANGS = frozenset(languages.SPEC_BY_NAME) | frozenset(tier2.TIER2_SPECS)
+
+
+def _lang_name(value: str) -> str:
+    """Parse ``query --lang``: any language a map can hold.
+
+    Not argparse ``choices``: the full list is fifty-odd names, too long
+    for ``--help`` and the usage line, so it is printed only on a miss.
+
+    Args:
+        value: The raw command-line value.
+
+    Returns:
+        The language name.
+
+    Raises:
+        argparse.ArgumentTypeError: For a name no grammar uses.
+    """
+    if value in _QUERY_LANGS:
+        return value
+    raise argparse.ArgumentTypeError(
+        f"unknown language {value!r} (one of: "
+        f"{', '.join(sorted(_QUERY_LANGS))})"
+    )
 
 
 class _DeprecatedScopeAction(argparse.Action):
@@ -615,12 +634,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_query.add_argument(
         "--lang",
-        choices=_THROWS_CATCHES_LANGS,
+        type=_lang_name,
         default=None,
-        help="for 'catches'/'throws': restrict results to one language "
-        "(e.g. 'java') — cuts cross-language noise on a multi-language "
-        "repo where a small amount of incidental/vendored code in "
-        "another language would otherwise pollute the match list",
+        metavar="LANG",
+        help="keep only LANG symbols (e.g. 'python') when a target name "
+        "matches several; for 'catches'/'throws', also restrict the "
+        "results to LANG — cuts cross-language noise on a "
+        "multi-language repo",
     )
     _add_read_options(
         p_query,
@@ -2011,6 +2031,34 @@ def _read_index(
     return index, 0
 
 
+def _lang_has_no_exception_data(action: str, lang: str | None) -> bool:
+    """Reject ``throws``/``catches --lang L`` for a language with no data.
+
+    Those actions read ``--lang`` as a result filter, and a language
+    whose throws and catches dekko never extracts (Rust, Go) would
+    answer with an always-empty list instead of saying it can't.
+
+    Returns:
+        ``True`` (with the reason printed) when the call should exit 2.
+    """
+    if action not in ("throws", "catches") or lang is None:
+        return False
+    if languages.exception_handling_supported(lang):
+        return False
+    supported = sorted(
+        name
+        for name in languages.SPEC_BY_NAME
+        if languages.exception_handling_supported(name)
+    )
+    print(
+        f"dekko: '{action}' has no {lang} data (throws and catches are "
+        f"extracted for {', '.join(supported)} only)",
+        file=sys.stderr,
+    )
+
+    return True
+
+
 def run_query(args: argparse.Namespace) -> int:
     """Handle ``dekko query``.
 
@@ -2027,6 +2075,8 @@ def run_query(args: argparse.Namespace) -> int:
             "(only 'env --list' can omit it)",
             file=sys.stderr,
         )
+        return query.EXIT_USAGE_ERROR
+    if _lang_has_no_exception_data(args.action, args.lang):
         return query.EXIT_USAGE_ERROR
     index, code = _read_index(args)
     if index is None:
@@ -2804,6 +2854,30 @@ def _reject_stray_dry_run(
         )
 
 
+def _unknown_command(word: str) -> int:
+    """Reject a bare word that isn't a subcommand, and exit 2.
+
+    The legacy parser takes one bare positional (``--map DIR SUBPATH``),
+    so a mistyped command (``dekko serach``) used to land there and
+    print the help with exit 0, which reads as success to a script.
+
+    Args:
+        word: The word as typed.
+
+    Returns:
+        ``2``.
+    """
+    print(f"dekko: unknown command '{word}'", file=sys.stderr)
+    close = difflib.get_close_matches(word, SUBCOMMANDS, n=1, cutoff=0.6)
+    if close:
+        print(f"  did you mean '{close[0]}'?", file=sys.stderr)
+    elif Path(word).is_dir():
+        print(f"  to map it: dekko map {word}", file=sys.stderr)
+    print("  commands: dekko --help", file=sys.stderr)
+
+    return 2
+
+
 def _legacy_map_dispatch(args: argparse.Namespace) -> int:
     """``_legacy_main``'s tail: the ``--map``/bare-map dispatch.
 
@@ -2811,6 +2885,8 @@ def _legacy_map_dispatch(args: argparse.Namespace) -> int:
     Ruff-enforced cyclomatic-complexity cap -- unrelated to the
     preceding install/uninstall dispatch chain otherwise.
     """
+    if args.map_dir is None and args.subpath is not None:
+        return _unknown_command(args.subpath)
     if args.map_dir is None:
         build_subcommand_parser().print_help()
         return 0

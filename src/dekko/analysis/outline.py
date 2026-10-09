@@ -21,7 +21,13 @@ from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.analysis.query import NO_ROW_LIMIT, paths_matching
 from dekko.source import read_lines
-from dekko.textutil import Meter, estimate_tokens, fit_to_budget, oneline
+from dekko.textutil import (
+    Meter,
+    estimate_tokens,
+    fit_to_budget,
+    oneline,
+    strip_dot_slash,
+)
 
 EXIT_OK = 0
 EXIT_NOT_FOUND = 3
@@ -418,6 +424,7 @@ def run(
     Returns:
         Process exit code.
     """
+    target = strip_dot_slash(target)
     matches = paths_matching(index, target)
     if len(matches) > 1:
         print(f"dekko: '{target}' is ambiguous; candidates:", file=sys.stderr)

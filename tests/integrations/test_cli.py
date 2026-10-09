@@ -36,6 +36,36 @@ def test_bare_invocation_prints_help(capsys: pytest.CaptureFixture) -> None:
     assert "--claude-install" in out
 
 
+def test_a_mistyped_command_exits_2_with_a_suggestion(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    assert cli.main(["serach"]) == 2
+    captured = capsys.readouterr()
+    assert "unknown command 'serach'" in captured.err
+    assert "did you mean 'search'?" in captured.err
+    assert "--claude-install" not in captured.out
+
+
+def test_an_unknown_word_with_no_close_command_exits_2(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    assert cli.main(["zzzqqq"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown command 'zzzqqq'" in err
+    assert "did you mean" not in err
+
+
+def test_a_directory_word_points_at_dekko_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["proj"]) == 2
+    assert "dekko map proj" in capsys.readouterr().err
+
+
 def test_sanity_smoke(tmp_path: Path) -> None:
     """``dekko sanity`` is wired into the subcommand dispatch (not left
     routing into the legacy flag parser — see ``SUBCOMMANDS``) and

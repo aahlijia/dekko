@@ -55,13 +55,17 @@ dekko daemon start                   # warm-cache background process (see below)
 Symbol targets accept a bare `name`, `Class.method`, a qualified
 `file.py:name` or `file.py:Class.method`, a trailing `:LINE` to pick
 one overload (`Foo.java:Foo.run:12`), or a symbol id exactly as any
-command prints it (`Foo.java::Foo.run#2`). An id always names its own
-symbol. In `file:name`, a symbol whose full qualname is `name` wins
+command prints it (`Foo.java::Foo.run#2`, also accepted with one colon
+as `Foo.java:Foo.run#2`). An id always names its own symbol. A leading
+`./` on any path or target is ignored. In `file:name`, a symbol whose full qualname is `name` wins
 over ones that only share the bare name, so `ErrorPage.java:ErrorPage`
 is the class, not the class plus its constructors. A bare name shared
 only by one class and that class's own constructors resolves to the
 class, with a note on stderr (its callers are every construction).
-Other ambiguous names list their candidates instead of guessing.
+Other ambiguous names list their candidates instead of guessing;
+`query --lang LANG` keeps only the LANG ones (`dekko query symbol main
+--lang go`), and a name with none in LANG says which languages it does
+have. A mistyped command (`dekko serach`) exits 2 with a suggestion.
 Every read command takes `--json` for structured output.
 Most also regenerate a stale map automatically (`--no-regen` to fail
 instead) — `diff`, `affected`, `status`, and `ledger` don't accept
@@ -1664,12 +1668,11 @@ dekko query catches ConfigurationPropertiesBindException --lang java
 dekko query throws handleRequest --transitive --lang java
 ```
 
-`--lang` accepts any language `throws`/`catches` extracts data for
-(currently `cpp`, `java`, `javascript`, `python`, `tsx`, `typescript`
-— derived from the language registry, so it stays in sync with
-coverage automatically); an unsupported value (`rust`, `go`, ...) is
-rejected by the CLI with a clear error rather than silently accepted
-and producing an always-empty result. For `catches`, filtering is by
+For `throws`/`catches`, `--lang` must be a language they extract
+data for (currently `cpp`, `java`, `javascript`, `python`, `tsx`,
+`typescript`, derived from the language registry, so it stays in sync
+with coverage automatically); any other value (`rust`, `go`, ...)
+exits 2 with that list rather than producing an always-empty result. For `catches`, filtering is by
 each catch clause's own file language; the excluded count and its
 per-language breakdown are disclosed (`note: --lang java filter
 applied — 30 catch clause(s) in another language excluded (28

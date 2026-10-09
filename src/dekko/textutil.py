@@ -100,6 +100,29 @@ def clip_middle(text: str, limit: int = LABEL_CHAR_CAP) -> str:
     return flat[:head] + marker + flat[-tail:]
 
 
+def strip_dot_slash(text: str) -> str:
+    """Drop any leading ``./`` (or ``.\\``) from a typed path or target.
+
+    Map paths are repo-relative with no prefix, but shells and agents
+    write ``./src/a.py`` out of habit, and that must name the same
+    file. A bare ``.`` is left alone: it means the repository root.
+
+    Args:
+        text: A path, path suffix, or ``path:qualname`` target.
+
+    Returns:
+        ``text`` without its leading ``./`` runs; ``.`` when nothing
+        else was left.
+    """
+    stripped = text
+    while stripped.startswith(("./", ".\\")):
+        stripped = stripped[2:]
+    if text and not stripped:
+        return "."
+
+    return stripped
+
+
 def dir_of(path: str) -> str:
     """Directory portion of a repo-relative path (``.`` for the root).
 
