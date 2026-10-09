@@ -4145,6 +4145,7 @@ class _NameInputs:
     is_known_collision_name: bool
     external_sites: dict[tuple[str, int], str] = field(default_factory=dict)
     ambiguous_spans: tuple[tuple[str, int, int], ...] = ()
+    test_calls: frozenset[tuple[str, int]] = frozenset()
 
 
 def _name_inputs(
@@ -4152,6 +4153,7 @@ def _name_inputs(
     bare_name: str,
     collision_names: frozenset[str],
     ambiguous_spans_by_name: dict[str, tuple[tuple[str, int, int], ...]],
+    full: MapIndex | None = None,
 ) -> _NameInputs:
     """Build the shared classification inputs for ``bare_name``.
 
@@ -4162,13 +4164,19 @@ def _name_inputs(
         index: The query index.
         bare_name: The bare name.
         collision_names: ``ambiguous.collision_names(index)``.
-        ambiguous_spans_by_name: ``_ambiguous_spans_by_name(index)``,
-            built once per run by the caller.
+        ambiguous_spans_by_name: ``_ambiguous_spans_by_name`` of the
+            unfiltered map, built once per run by the caller.
+        full: The unfiltered map when ``index`` is its test-free view.
+            The map's verdict on a line (an external call, an ambiguous
+            one, a call the test filter hid) comes from it: the view
+            has dropped every test file's rows, so a test file's call
+            read as one the map had no record of.
 
     Returns:
         The inputs.
     """
     symbols = index.symbols_by_name.get(bare_name, [])
+    whole = full if full is not None else index
 
     return _NameInputs(
         own_def_locs=frozenset((s.path, s.start_line) for s in symbols),
@@ -4176,9 +4184,34 @@ def _name_inputs(
         target_kinds=_name_kinds(index, bare_name),
         read_sites=_read_sites(index, bare_name),
         is_known_collision_name=bare_name in collision_names,
-        external_sites=_external_sites(index, bare_name),
+        external_sites=_external_sites(whole, bare_name),
         ambiguous_spans=ambiguous_spans_by_name.get(bare_name, ()),
+        test_calls=(
+            _test_call_sites(whole, bare_name)
+            if whole is not index
+            else frozenset()
+        ),
     )
+
+
+def _test_call_sites(
+    index: MapIndex, bare_name: str
+) -> frozenset[tuple[str, int]]:
+    """Every test-code ``(path, line)`` the map records a call of a
+    ``bare_name`` symbol at: the rows a ``--no-tests`` query hides."""
+    sites: set[tuple[str, int]] = set()
+    for sym in index.symbols_by_name.get(bare_name, []):
+        for caller in index.calls_in.get(sym.id, []):
+            caller_sym = index.symbols_by_id.get(caller)
+            path = _caller_path(index, caller)
+            if not (caller_sym is not None and caller_sym.test) and not (
+                is_test_path(path)
+            ):
+                continue
+            for line in index.edge_lines.get((caller, sym.id), []):
+                sites.add((path, line))
+
+    return frozenset(sites)
 
 
 def _external_sites(
@@ -4461,6 +4494,7 @@ def _classify_grep_hits(
     read_sites: frozenset[tuple[str, int]] = frozenset(),
     external_sites: dict[tuple[str, int], str] | None = None,
     ambiguous_spans: tuple[tuple[str, int, int], ...] = (),
+    test_calls: frozenset[tuple[str, int]] = frozenset(),
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -4631,7 +4665,9 @@ def _classify_grep_hits(
                 not_mapped=scope is not None and scope.is_unmapped(h.path),
             ),
         )
-    _apply_map_verdict(causes, external_sites or {}, ambiguous_spans)
+    _apply_map_verdict(
+        causes, external_sites or {}, ambiguous_spans, test_calls
+    )
     if symbols_by_path:
         _explain_shadowing_locals(
             causes, hits, bare_name, root, own_def_locs, symbols_by_path
@@ -4685,10 +4721,14 @@ def _apply_map_verdict(
     causes: dict[tuple[str, int], str],
     external_sites: dict[tuple[str, int], str],
     ambiguous_spans: tuple[tuple[str, int, int], ...],
+    test_calls: frozenset[tuple[str, int]] = frozenset(),
 ) -> None:
     """Relabel qualified-call rows the resolver did decide, in place.
 
-    A line the map records as an external call of the name gets
+    A test-code line the map records as a call of a symbol of the name
+    gets ``CAUSE_TEST_FILTER``: the map has it, the ``--no-tests``
+    query hid it. A line the map records as an external call of the
+    name gets
     ``CAUSE_RECORDED_EXTERNAL`` (exact to the line, its callee kept for
     the row); a line inside a caller with an ambiguous call of the name
     gets ``CAUSE_RECORDED_AMBIGUOUS``. A row the map has no record of
@@ -4696,6 +4736,9 @@ def _apply_map_verdict(
     """
     for loc, cause in causes.items():
         if cause != CAUSE_QUALIFIED_CALL:
+            continue
+        if loc in test_calls:
+            causes[loc] = CAUSE_TEST_FILTER
             continue
         callee = external_sites.get(loc)
         if callee is not None:
@@ -6126,7 +6169,8 @@ def run(
             query_index,
             sym.name,
             ambiguous.collision_names(query_index),
-            _ambiguous_spans_by_name(query_index),
+            _ambiguous_spans_by_name(index),
+            full=index,
         )
         declaring_type = _resolve_declaring_type(query_index, sym)
         attributed = _attributed_sites(query_index, sym.name)
@@ -6576,6 +6620,7 @@ def _run_all_sweeps(
     tests_excluded: bool,
     workers: int,
     scope: _MapScope | None = None,
+    full_index: MapIndex | None = None,
 ) -> tuple[
     dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]],
     str | None,
@@ -6594,13 +6639,17 @@ def _run_all_sweeps(
     re-computation across a large ``--all`` sweep, since
     ``collision_names`` itself is bounded by the map's own
     already-computed ambiguous-edge count, not by sweep size.
+
+    ``full_index`` is the unfiltered map when ``query_index`` is its
+    test-free view; each line's map verdict comes from it (see
+    ``_name_inputs``).
     """
     plan = _plan_sweep(root, names)
     if plan.error is not None:
         return {}, plan.error
 
     collision = ambiguous.collision_names(query_index)
-    ambiguous_spans = _ambiguous_spans_by_name(query_index)
+    ambiguous_spans = _ambiguous_spans_by_name(full_index or query_index)
 
     def _sweep_one(
         name: str,
@@ -6608,7 +6657,9 @@ def _run_all_sweeps(
         sweep, causes = _sweep_bare_name(
             root,
             name,
-            _name_inputs(query_index, name, collision, ambiguous_spans),
+            _name_inputs(
+                query_index, name, collision, ambiguous_spans, full_index
+            ),
             tests_excluded=tests_excluded,
             symbols_by_path=query_index.symbols_by_path,
             scope=scope,
@@ -6744,6 +6795,7 @@ def run_all(
         tests_excluded=not include_tests,
         workers=workers,
         scope=_map_scope(index),
+        full_index=index,
     )
     if sweep_error is None:
         sweep_error = _first_sweep_error(names, sweeps)

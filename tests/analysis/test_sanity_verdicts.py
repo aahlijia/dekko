@@ -159,3 +159,55 @@ def test_text_mode_names_the_external_callee(
     root = make_mapped_repo(VERDICT_REPO)
     assert cli.main(["sanity", "c.ts::C.entries", "--root", str(root)]) == 0
     assert "(external: Object.entries)" in capsys.readouterr().out
+
+
+TEST_FILE_REPO = {
+    "src/core.ts": (
+        "export class Core {\n"
+        "  static create(): Core {\n"
+        "    return new Core();\n"
+        "  }\n"
+        "}\n"
+    ),
+    "src/app.ts": (
+        'import { Core } from "./core";\nexport const core = Core.create();\n'
+    ),
+    "tests/core.test.ts": (
+        'import { Core } from "../src/core";\n'
+        'import { Request } from "proto";\n'
+        'it("builds", () => {\n'
+        "  const core = Core.create();\n"
+        "  Request.create();\n"
+        "});\n"
+    ),
+}
+
+
+def test_a_test_files_recorded_call_says_the_filter_hid_it(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # The default query drops test files, and the map's verdict used to
+    # come from that view: a call the map has read as "no record".
+    root = make_mapped_repo(TEST_FILE_REPO)
+    rows = _sanity_json(root, "src/core.ts::Core.create", capsys)
+
+    assert rows[("tests/core.test.ts", 4)]["cause"] == (
+        sanity.CAUSE_TEST_FILTER
+    )
+    assert rows[("tests/core.test.ts", 5)]["cause"] == (
+        sanity.CAUSE_RECORDED_EXTERNAL
+    )
+
+
+def test_test_file_verdicts_agree_across_modes(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TEST_FILE_REPO)
+    assert cli.main(["sanity", "--all", "--root", str(root), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {r["target"]: r["causes"] for r in doc["symbols"]}
+
+    assert causes["src/core.ts::Core.create"] == {
+        sanity.CAUSE_TEST_FILTER: 1,
+        sanity.CAUSE_RECORDED_EXTERNAL: 1,
+    }

@@ -9,6 +9,20 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.26] — 2026-10-09
+
+### Fixed
+- **`sanity` reads a test file's calls from the whole map.** By default
+  the dekko side of `sanity` leaves test files out, and the map's
+  verdict on each line (an external call, an ambiguous one) was read
+  from that same test-free view, so every qualified call in a test file
+  said "qualified call the map has no record of", even a call of the
+  target itself that the map recorded. Those rows now carry the map's
+  verdict, and a recorded call of the target says "likely filtered by
+  default --no-tests". cline `--all`: "no record" rows 5,967 → 257
+  (+3,341 recorded ambiguous, +1,575 recorded external, +794 filtered
+  by the test default); the unexplained count is unchanged.
+
 ## [1.8.25] — 2026-10-09
 
 ### Fixed
