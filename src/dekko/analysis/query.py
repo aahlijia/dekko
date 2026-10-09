@@ -1227,6 +1227,9 @@ def _print_relation_json(
         kept_refs, ref_meter = _fit_entries(referenced, budget, limit)
         doc["referenced_not_called"] = kept_refs
         doc["referenced_meta"] = ref_meter.as_dict()
+        # ``meta`` counts call rows only; a script that stops at
+        # ``total == 0`` must still see that the symbol is used.
+        meta["referenced"] = len(referenced)
     elif action == "callers" and not entries and not modules and build_logic:
         doc["build_script_warning"] = build_logic
     print(json.dumps(doc, indent=2))
@@ -2677,15 +2680,31 @@ def _uses_numbers(
     files = {e.caller.split("::", 1)[0] for e in exts}
     members: Counter[str] = Counter()
     for e in exts:
-        parts = callee_segments(e.callee)
-        if len(parts) >= 2:
-            members[parts[1].split("(", 1)[0]] += len(e.lines) or 1
+        member = _uses_member(target, callee_segments(e.callee))
+        if member:
+            members[member] += len(e.lines) or 1
     importing = sum(
         1
         for path, imps in index.imports_by_path.items()
         if any(_imports_target(index, path, i, target) for i in imps)
     )
     return sites, len(files), importing, members
+
+
+def _uses_member(target: str, parts: list[str]) -> str | None:
+    """The member of ``target`` a ``uses`` row calls, or ``None``.
+
+    ``path.join(..)`` calls ``join``; so does a bare ``join(..)`` from
+    ``import { join } from 'path'``, which is how most of a Node
+    module's calls are written. A bare call of the target itself
+    (``uses run`` matching ``run(..)``) names no member.
+    """
+    if len(parts) >= 2:
+        return parts[1].split("(", 1)[0]
+    if parts and parts[0] != target:
+        return parts[0].split("(", 1)[0]
+
+    return None
 
 
 def _imports_target(
@@ -3174,9 +3193,31 @@ def _type_usage_entry(index: MapIndex, row: TypeUsageRow) -> dict:
     return entry
 
 
+def _type_reference_count(index: MapIndex, name: str) -> int:
+    """Callers plus value references of every type named ``name``.
+
+    ``query type`` reads signatures only, so a type built in literals
+    and stored in fields has none; these edges are where it shows up.
+    """
+    return sum(
+        len(index.calls_in.get(s.id, []))
+        + len(index.referenced_in.get(s.id, []))
+        for s in index.symbols_by_name.get(name, [])
+        if s.kind in TYPE_KINDS
+    )
+
+
 def _run_type_not_found(index: MapIndex, needle: str) -> int:
     """Report a ``type`` target with zero matching functions/methods."""
     print(f"dekko: no results for type '{needle}'", file=sys.stderr)
+    used = _type_reference_count(index, needle)
+    if used:
+        print(
+            "  fields, locals and literals aren't recorded as type uses "
+            f"(signatures only); 'dekko query callers {needle}' lists "
+            f"{used} caller(s) and reference(s)",
+            file=sys.stderr,
+        )
     type_names = [
         s.name for s in index.symbols_by_id.values() if s.kind in TYPE_KINDS
     ]

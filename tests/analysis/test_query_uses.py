@@ -410,3 +410,35 @@ def test_mcp_find_usages_reads_a_rust_crate_path(
     assert "serde_json: 2 call sites in 1 files" in text
     assert "imported by 1 files" in text
     assert "[serde_json::to_string]" in text
+
+
+NAMED_IMPORTS = {
+    "src/a.ts": (
+        "import { join, resolve } from 'path'\n"
+        "import * as p from 'path'\n"
+        "export function go(a: string): string {\n"
+        "  join(a, 'x')\n"
+        "  join(a, 'y')\n"
+        "  join(a, 'z')\n"
+        "  resolve(a)\n"
+        "  return p.dirname(a)\n"
+        "}\n"
+    ),
+}
+
+
+def test_named_imports_called_bare_count_as_members(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(NAMED_IMPORTS)
+    assert _uses(root, "path", "--json") == 0
+    members = dict(_json(capsys)["summary"]["members"])
+    assert members == {"join": 3, "resolve": 1, "dirname": 1}
+
+
+def test_named_import_members_lead_the_text_header(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(NAMED_IMPORTS)
+    assert _uses(root, "path") == 0
+    assert "top members: join 3, " in capsys.readouterr().out

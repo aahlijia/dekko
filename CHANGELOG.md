@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.18] — 2026-10-09
+
+### Fixed
+- **`query uses <module>` counts named imports as members.** A bare
+  `join(..)` after `import { join } from 'path'` is a call of
+  `path.join`, but the header's `top members` only counted
+  `path.join(..)`-shaped calls: claude-code `uses path` said `join 41`
+  for 687 such calls.
+- **`query callers --json` counts references in `meta`.** A symbol with
+  no callers but some value references (a callback passed by name)
+  had `meta.total 0` and its references only under `referenced_meta`;
+  `meta.referenced` now carries their total.
+- **`--transitive`/`--depth` on `callers` and the other non-walking
+  actions say they're ignored**, pointing at `trace` and `workset`,
+  instead of answering one hop as if they'd been read.
+- **An empty `query type` points at the type's references.** A type
+  used only in fields, locals and literals has no signature uses, so
+  `query type` found nothing; the reply now says those positions
+  aren't recorded and how many callers and references `query callers`
+  lists.
+
 ## [1.8.17] — 2026-10-09
 
 ### Fixed

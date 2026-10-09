@@ -358,3 +358,25 @@ def test_a_method_and_a_struct_sharing_a_name_agree_across_modes(
         assert target in swept, target
         single = Counter(_single(root, target, capsys).values())
         assert swept[target] == single, target
+
+
+def test_callers_meta_counts_references_when_nothing_calls(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    files = {
+        "src/cb.ts": "export function cb(): void {}\n",
+        "src/w.ts": (
+            'import { cb } from "./cb";\n'
+            "export function w(): void {\n"
+            "  setTimeout(cb, 1);\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(
+        ["query", "callers", "src/cb.ts::cb", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    meta = json.loads(capsys.readouterr().out)["meta"]
+    assert meta["total"] == 0
+    assert meta["referenced"] == 1

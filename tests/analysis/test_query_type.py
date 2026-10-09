@@ -583,3 +583,35 @@ def test_go_receiver_alone_does_not_make_a_type_used(
     )
     names = query.type_usage_name_index(load_map(root))
     assert "Config" not in names
+
+
+FIELD_ONLY_TYPE = {
+    "main.go": (
+        "package main\n"
+        "\n"
+        "type Link struct {\n"
+        "\tURL string\n"
+        "}\n"
+        "\n"
+        "type Page struct {\n"
+        "\tLinks []Link\n"
+        "}\n"
+        "\n"
+        "func build() Page {\n"
+        '\tl := Link{URL: "x"}\n'
+        "\treturn Page{Links: []Link{l}}\n"
+        "}\n"
+    ),
+}
+
+
+def test_an_empty_type_answer_points_at_its_references(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(FIELD_ONLY_TYPE)
+    code = cli.main(["query", "type", "Link", "--root", str(root)])
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "no results for type 'Link'" in err
+    assert "fields, locals and literals aren't recorded" in err
+    assert "'dekko query callers Link'" in err

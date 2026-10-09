@@ -602,7 +602,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "--depth",
         type=int,
-        default=query.DEFAULT_THROWS_DEPTH,
+        default=None,
         metavar="N",
         help="for 'throws --transitive': call-graph walk depth cap "
         f"(default: {query.DEFAULT_THROWS_DEPTH})",
@@ -2059,6 +2059,21 @@ def _lang_has_no_exception_data(action: str, lang: str | None) -> bool:
     return True
 
 
+def _note_ignored_walk_flags(args: argparse.Namespace) -> None:
+    """Say so when ``--transitive``/``--depth`` ride on an action that
+    doesn't walk, instead of answering one hop as if they'd been read."""
+    if args.action in ("supertypes", "subtypes", "throws"):
+        return
+    if not args.transitive and args.depth is None:
+        return
+    print(
+        f"dekko: note: --transitive/--depth doesn't apply to "
+        f"'{args.action}'; it walks supertypes, subtypes and throws. For "
+        "call chains use 'dekko trace' or 'dekko workset'",
+        file=sys.stderr,
+    )
+
+
 def run_query(args: argparse.Namespace) -> int:
     """Handle ``dekko query``.
 
@@ -2078,6 +2093,7 @@ def run_query(args: argparse.Namespace) -> int:
         return query.EXIT_USAGE_ERROR
     if _lang_has_no_exception_data(args.action, args.lang):
         return query.EXIT_USAGE_ERROR
+    _note_ignored_walk_flags(args)
     index, code = _read_index(args)
     if index is None:
         return code
@@ -2094,7 +2110,9 @@ def run_query(args: argparse.Namespace) -> int:
         transitive=args.transitive,
         relation=args.relation,
         min_shared=args.min_shared,
-        depth=args.depth,
+        depth=(
+            query.DEFAULT_THROWS_DEPTH if args.depth is None else args.depth
+        ),
         env_list=args.env_list,
         lang=args.lang,
     )

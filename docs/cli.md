@@ -161,7 +161,10 @@ enclosing definition (`app.ts:31  function type in Options  [param:
 config]`), or `(module level)` when there is none. It does not see
 struct/class **fields** typed with the target type, generic arguments,
 or JSX — those aren't function-shaped, so a clean result set from
-`query type` doesn't mean the type is otherwise unused.
+`query type` doesn't mean the type is otherwise unused. When it finds
+nothing but the type has callers or value references (built in a
+literal, stored in a field), the reply says so and points at `query
+callers <T>`.
 Default matching is identifier-token based (`Config` matches
 `Optional[Config]`, `Vec<Config>`, `Config | None`, but not
 `ConfigManager`); pass `--exact` to match the stored type text
@@ -210,8 +213,9 @@ counted; and **module**, the bare import source (`uses numpy`, `uses
 fs`, `uses node:path`) reaching calls through whatever the file bound
 it to, including bare named imports (`existsSync(...)` after
 `import { existsSync } from 'fs'`). Output leads with a summary
-(`chalk: 284 call sites in 44 files`, the top members used, and
-`imported by 47 files`). That last number is the honest denominator:
+(`chalk: 284 call sites in 44 files`, the top members used, counting
+a bare call through a named import as that member, and `imported by
+47 files`). That last number is the honest denominator:
 `uses` sees *calls*, and a name used only in type position, JSX, or
 as a property read never lands in the call bucket, so on a React
 codebase the importing-file count is much larger than the call-site
