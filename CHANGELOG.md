@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.21] — 2026-10-09
+
+### Fixed
+- **The MCP unknown-argument error lists every argument that works.**
+  It suggested `limit` for `get_callers {"limt": 3}` while its
+  `accepted:` list left `limit` out, so an agent could drop a working
+  argument. Arguments a tool honors without advertising them, and the
+  target aliases, now follow as `also honored: ...`; the schemas are
+  unchanged.
+- **MCP booleans are booleans.** `"false"` was read as true. A JSON
+  boolean or the string `"true"`/`"false"` (any case) is accepted;
+  anything else is an error naming the argument.
+- **A `root` that doesn't exist is an MCP error.** `map_status {"root":
+  "/nonexistent"}` answered "no map.json ... (call refresh_map)" as a
+  normal result; every tool now says the root doesn't exist (or isn't
+  a directory).
+
 ## [1.8.20] — 2026-10-09
 
 ### Fixed
