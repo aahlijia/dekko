@@ -969,6 +969,24 @@ def test_stale_new_side_note_names_the_reuse(
     assert "dekko map" in err
 
 
+def test_stale_new_side_note_says_the_map_is_updated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A call that writes its re-map doesn't send the user to ``map``."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 7\n")
+    capsys.readouterr()
+
+    assert cli.main(["diff", "--root", str(root)]) == diff.EXIT_DIFFERENT
+
+    err = capsys.readouterr().err
+    assert "but 1 of 2 mapped files and updating the map" in err
+    assert "dekko map" not in err
+
+
 def test_stale_new_side_note_when_nothing_can_be_reused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -999,3 +1017,61 @@ def test_stale_new_side_note_silent_on_small_repos(
     diff.snapshot_new_side(root, None, (), 1_000_000, index)
 
     assert capsys.readouterr().err == ""
+
+
+def _many_added(root: Path, count: int) -> None:
+    (root / "many.py").write_text(
+        "".join(
+            f"def added_function_number_{i}(value: int) -> int:\n"
+            f"    return value + {i}\n\n\n"
+            for i in range(count)
+        )
+    )
+
+
+def test_diff_budget_trims_rows_and_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _many_added(root, 40)
+    assert cli.main(["diff", "--root", str(root), "--budget", "100"]) == 1
+    out = capsys.readouterr().out
+    assert "0 changed, 40 added, 0 removed" in out
+    rows = [line for line in out.splitlines() if line.startswith("+ ")]
+    assert 0 < len(rows) < 40
+    assert f"{40 - len(rows)} of 40 omitted · raise --budget" in out
+
+
+def test_diff_budget_zero_prints_everything(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _many_added(root, 40)
+    assert cli.main(["diff", "--root", str(root), "--budget", "0"]) == 1
+    out = capsys.readouterr().out
+    assert len([ln for ln in out.splitlines() if ln.startswith("+ ")]) == 40
+    assert "omitted" not in out
+
+
+def test_diff_has_a_default_budget(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _many_added(root, 400)
+    assert cli.main(["diff", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "of 400 omitted · raise --budget" in out
+
+
+def test_diff_json_budget_carries_meta(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _many_added(root, 40)
+    code = cli.main(["diff", "--root", str(root), "--json", "--budget", "100"])
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert 0 < len(doc["added"]) < 40
+    assert doc["meta"]["total"] == 40
+    assert doc["meta"]["returned"] == len(doc["added"])
+    assert doc["meta"]["truncated_by"] == "budget"

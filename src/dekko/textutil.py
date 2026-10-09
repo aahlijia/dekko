@@ -26,7 +26,11 @@ def signature(sym: Symbol) -> str:
         # promoted out of contextpack's module-caller bucket; it has no
         # real params/returns to render.
         return f"<anonymous> ({sym.path})"
-    parts = [f"{p.name}: {p.type}" if p.type else p.name for p in sym.params]
+    parts = [
+        f"{p.name}: {p.type}" if p.type else p.name
+        for p in sym.params
+        if not p.receiver
+    ]
     sig = f"{sym.qualname}({', '.join(parts)})"
     if sym.returns:
         sig += f" -> {sym.returns}"
@@ -94,6 +98,29 @@ def clip_middle(text: str, limit: int = LABEL_CHAR_CAP) -> str:
     head = room * 2 // 3
     tail = room - head
     return flat[:head] + marker + flat[-tail:]
+
+
+def strip_dot_slash(text: str) -> str:
+    """Drop any leading ``./`` (or ``.\\``) from a typed path or target.
+
+    Map paths are repo-relative with no prefix, but shells and agents
+    write ``./src/a.py`` out of habit, and that must name the same
+    file. A bare ``.`` is left alone: it means the repository root.
+
+    Args:
+        text: A path, path suffix, or ``path:qualname`` target.
+
+    Returns:
+        ``text`` without its leading ``./`` runs; ``.`` when nothing
+        else was left.
+    """
+    stripped = text
+    while stripped.startswith(("./", ".\\")):
+        stripped = stripped[2:]
+    if text and not stripped:
+        return "."
+
+    return stripped
 
 
 def dir_of(path: str) -> str:

@@ -437,8 +437,12 @@ def render(
     provenance: dict | None = None,
     possible: list[PossibleImpact] | None = None,
     show_possible: bool = False,
+    changed: tuple[int, int] | None = None,
 ) -> None:
     """Emit the impacted-test report as text or JSON.
+
+    ``changed`` is ``(files, symbols)`` changed since ``rev``, when
+    known, so an empty answer can say whether anything changed at all.
 
     ``possible`` (see ``_possible_impacts``) is always counted, in a
     note line (text) or ``possible_total``/``possible_example`` (JSON),
@@ -458,11 +462,18 @@ def render(
     possible = possible or []
     if as_json:
         _render_json(
-            impacts, rev, root, budget, coverage, possible, show_possible
+            impacts,
+            rev,
+            root,
+            budget,
+            coverage,
+            possible,
+            show_possible,
+            changed,
         )
         return
     if not impacts:
-        print(f"dekko: no impacted tests vs {rev[:12]}")
+        print(_no_impact_headline(rev, len(possible), changed))
         if coverage:
             print(
                 f"  note: {coverage} — this answer may be incomplete",
@@ -482,6 +493,30 @@ def render(
     _print_possible(possible, show_possible, budget)
 
 
+def _no_impact_headline(
+    rev: str, possible: int, changed: tuple[int, int] | None
+) -> str:
+    """The first line of an answer with no certain impacted test.
+
+    "no impacted tests" alone read as "safe" when tests may call the
+    changed code through an ambiguous call, and as "nothing changed"
+    when a file changed but none of its symbols did.
+    """
+    if possible:
+        return (
+            f"dekko: no certain impacted tests vs {rev[:12]}; {possible} "
+            "possible ('--possible' lists them)"
+        )
+    line = f"dekko: no impacted tests vs {rev[:12]}"
+    if changed is not None and changed[0] and not changed[1]:
+        line += (
+            f" ({changed[0]} file(s) changed, no symbol in them changed: "
+            "comments, whitespace, or top-level code)"
+        )
+
+    return line
+
+
 def _render_json(
     impacts: list[TestImpact],
     rev: str,
@@ -490,6 +525,7 @@ def _render_json(
     coverage: str | None,
     possible: list[PossibleImpact],
     show_possible: bool,
+    changed: tuple[int, int] | None = None,
 ) -> None:
     """``render``'s JSON form."""
     entries = [_impact_json(i) for i in impacts]
@@ -514,6 +550,8 @@ def _render_json(
         doc["possible_meta"] = possible_meter.as_dict()
     if coverage:
         doc["coverage_warning"] = coverage
+    if changed is not None:
+        doc["changed_files"], doc["changed_symbols"] = changed
     print(json.dumps(doc, indent=2))
 
 
@@ -726,6 +764,7 @@ def changes(
     rev: str | None,
     index: mapfile.MapIndex | None = None,
     jobs: int = 1,
+    persist: bool = False,
 ) -> tuple[list[TestImpact], diff.DiffResult, diff.Snapshot, str, dict] | None:
     """Impacted tests plus the underlying diff for worktree-vs-rev.
 
@@ -749,6 +788,8 @@ def changes(
             ``diff.snapshot``. This is the dominant cost on a
             first-touch/cold-rev-cache call, a separate code path
             ``dekko map --full``'s own ``--jobs`` fix never reached.
+        persist: Write a stale map's in-memory re-map as the map; see
+            ``diff.snapshot_pair``.
 
     Returns:
         ``(impacts, result, new, target_rev, provenance)``, or ``None``
@@ -764,7 +805,9 @@ def changes(
         current = repo_ops.current_side_from_index(root, index)
     prov = current.provenance
     target_rev = rev or prov.get("git_commit") or "HEAD"
-    pair = diff.snapshot_pair(root, target_rev, current, jobs=jobs)
+    pair = diff.snapshot_pair(
+        root, target_rev, current, jobs=jobs, persist=persist
+    )
     if pair is None:
         return None
 
@@ -782,6 +825,7 @@ def run(
     budget: int | None = None,
     jobs: int = 1,
     show_possible: bool = False,
+    no_regen: bool = False,
 ) -> int:
     """Execute ``dekko affected`` against a repository.
 
@@ -794,6 +838,8 @@ def run(
         jobs: Resolved worker count — see ``changes``.
         show_possible: List the possible impacts too, not just their
             count (``--possible``).
+        no_regen: Leave a stale map on disk as it is; the re-map
+            answers this call only.
 
     Returns:
         ``0`` no impact, ``1`` impacted tests found, ``2`` bad rev.
@@ -803,11 +849,12 @@ def run(
     if rev and not diff.check_rev(root, rev):
         return EXIT_ERROR
 
-    outcome = changes(root, rev, jobs=jobs)
+    outcome = changes(root, rev, jobs=jobs, persist=not no_regen)
     if outcome is None:
         return EXIT_ERROR
     impacts, result, new, target_rev, prov = outcome
     possible = possible_from_diff(result, new, impacts)
+    files = diff.changed_source_paths(root, target_rev)
     render(
         impacts,
         target_rev,
@@ -818,5 +865,13 @@ def run(
         prov,
         possible=possible,
         show_possible=show_possible,
+        changed=(
+            None
+            if files is None
+            else (
+                len(files),
+                len(result.changed) + len(result.added) + len(result.removed),
+            )
+        ),
     )
     return EXIT_IMPACTED if impacts else EXIT_NONE

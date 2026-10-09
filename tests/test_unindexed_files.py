@@ -375,3 +375,90 @@ def test_a_comment_in_an_unindexed_file_is_still_a_comment(
     # grammar behind them.
     assert sanity._looks_like_comment_line("// calls runIt later", path)
     assert not sanity._looks_like_comment_line("runIt()", path)
+
+
+def _outline_err(
+    root: Path, target: str, capsys: pytest.CaptureFixture
+) -> str:
+    assert cli.main(["outline", target, "--root", str(root)]) == 3
+    return capsys.readouterr().err
+
+
+def test_a_file_no_grammar_maps_says_so(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {"a.py": "def f():\n    pass\n", "README.md": "#\n"}
+    )
+    err = _outline_err(root, "README.md", capsys)
+    assert "(exists, but no grammar maps .md files)" in err
+    assert cli.main(["query", "file", "README.md", "--root", str(root)]) == 3
+    assert "(exists, but no grammar maps .md files)" in capsys.readouterr().err
+
+
+def test_a_directory_with_nothing_mapped_says_so(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {"a.py": "def f():\n    pass\n", "docs/guide.md": "#\n"}
+    )
+    assert "(exists, but holds no mapped files)" in _outline_err(
+        root, "docs", capsys
+    )
+
+
+def test_a_file_over_the_size_cap_names_the_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "small.py").write_text("def f():\n    pass\n")
+    (tmp_path / "big.py").write_text("def g():\n    pass\n" * 200)
+    assert (
+        cli.main(["map", str(tmp_path), "--quiet", "--max-file-size", "100"])
+        == 0
+    )
+    err = _outline_err(tmp_path, "big.py", capsys)
+    assert "exceeded the size cap" in err
+    assert "--max-file-size" in err
+
+
+def test_a_symlink_names_the_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "real.py").write_text("def f():\n    pass\n")
+    (tmp_path / "link.py").symlink_to(tmp_path / "real.py")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    err = _outline_err(tmp_path, "link.py", capsys)
+    assert "(a symlink; pass --follow-symlinks to map it)" in err
+
+
+def test_an_excluded_file_says_it_exists(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": "def f():\n    pass\n",
+            "node_modules/pkg/index.js": "function g() {}\n",
+        }
+    )
+    err = _outline_err(root, "node_modules/pkg/index.js", capsys)
+    assert "(exists, but isn't mapped: ignored, vendored, or excluded)" in err
+
+
+def test_a_missing_path_keeps_the_plain_message(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def f():\n    pass\n"})
+    err = _outline_err(root, "nope.py", capsys)
+    assert "no mapped file or directory 'nope.py'" in err
+    assert "exists" not in err
+
+
+def test_a_symlink_to_a_file_no_grammar_maps_says_no_grammar(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "a.py").write_text("def f():\n    pass\n")
+    (tmp_path / "notes.md").write_text("#\n")
+    (tmp_path / "rules.md").symlink_to(tmp_path / "notes.md")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    err = _outline_err(tmp_path, "rules.md", capsys)
+    assert "(exists, but no grammar maps .md files)" in err

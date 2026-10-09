@@ -349,14 +349,32 @@ def test_spec_fingerprint_covers_the_binding_query(
     assert languages.spec_fingerprint() != baseline
 
 
-def test_binding_queries_cover_exactly_the_shadowable_languages() -> None:
-    # Go's references are type identifiers and Java's are
-    # `Type::method`: a value local can't shadow either, so they carry
-    # no binding query, the same line `_REF_VISIBILITY_LANGUAGES` draws.
+def test_binding_queries_cover_the_value_and_field_shadowing_languages() -> (
+    None
+):
+    # Two jobs, two sets. A local shadows a bare reference or call only
+    # where a function name is a value (Python, JS, TS). Java, Kotlin
+    # and C++ use a field without `this`, so a local there shadows a
+    # field receiver; their tables are read for calls only. Go's and
+    # Rust's receivers are always written out, so they need neither.
     with_query = {
         spec.name for spec in languages.TIER1_SPECS if spec.binding_query
     }
-    assert with_query == {"python", "javascript", "typescript", "tsx"}
+    assert with_query == {
+        "python",
+        "javascript",
+        "typescript",
+        "tsx",
+        "java",
+        "kotlin",
+        "cpp",
+    }
+    assert languages.VALUE_NAMESPACE_LANGUAGES == {
+        "python",
+        "javascript",
+        "typescript",
+        "tsx",
+    }
 
 
 def test_spec_fingerprint_changes_with_callee_text_canonical_version(

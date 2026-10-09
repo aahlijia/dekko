@@ -226,7 +226,7 @@ def test_a_specific_cause_is_never_rewritten(tmp_path: Path) -> None:
     assert causes[("f.ts", 3)] == sanity.CAUSE_COMMENT_MENTION
 
 
-def test_python_files_are_untouched(tmp_path: Path) -> None:
+def test_python_local_assignment_shadows(tmp_path: Path) -> None:
     src = "def f():\n    count = 3\n    return {'n': count}\n"
     (tmp_path / "f.py").write_text(src)
     hit = sanity.GrepHit(path="f.py", line=3, snippet=src.splitlines()[2])
@@ -244,7 +244,8 @@ def test_python_files_are_untouched(tmp_path: Path) -> None:
     sanity._explain_shadowing_locals(
         causes, [hit], "count", tmp_path, frozenset(), {"f.py": [sym]}
     )
-    assert causes[("f.py", 3)] == sanity.CAUSE_UNEXPLAINED
+    assert causes[("f.py", 3)] == sanity.CAUSE_SHADOWING_LOCAL
+    assert sanity._shadow_decl_lines[("f.py", 3)] == 2
 
 
 def test_module_level_block_local_with_no_enclosing_symbol(
@@ -300,3 +301,145 @@ def test_ide_ts_617_reads_as_a_shadowing_local(
     text = capsys.readouterr().out
     assert "same-named local declared earlier" in text
     assert "(declared at line 6)" in text
+
+
+def _shadow_rows(
+    root: Path,
+    target: str,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[tuple[str, int], dict]:
+    # A small fixture's bare call resolves by its unique name; take
+    # every hit as grep-only so the classification itself is tested.
+    monkeypatch.setattr(
+        sanity, "_dekko_hits_callers", lambda *_a, **_kw: ([], [])
+    )
+    code = cli.main(
+        ["sanity", target, "--root", str(root), "--json", "--include-tests"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+
+    return {(row["file"], row["line"]): row for row in doc["grep_only"]}
+
+
+RUST_SHADOW_REPO = {
+    "src/cb.rs": "pub fn callback(n: u8) -> u8 {\n    n\n}\n",
+    "src/use.rs": (
+        "pub fn run(items: Vec<u8>) {\n"
+        "    let callback = make();\n"
+        "    callback(1);\n"
+        "    items.iter().map(|callback| callback(1));\n"
+        "}\n"
+        "pub fn other() {\n"
+        "    callback(2);\n"
+        "}\n"
+    ),
+}
+
+
+def test_rust_local_and_closure_param_shadow_a_free_function(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = _shadow_rows(
+        make_mapped_repo(RUST_SHADOW_REPO),
+        "src/cb.rs::callback",
+        capsys,
+        monkeypatch,
+    )
+    for line, decl in ((3, 2), (4, 4)):
+        row = rows[("src/use.rs", line)]
+        assert row["cause"] == sanity.CAUSE_SHADOWING_LOCAL, line
+        assert row["decl_line"] == decl, line
+
+
+def test_rust_bare_call_with_no_binding_in_scope_stays(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = _shadow_rows(
+        make_mapped_repo(RUST_SHADOW_REPO),
+        "src/cb.rs::callback",
+        capsys,
+        monkeypatch,
+    )
+    loc = ("src/use.rs", 7)
+    assert loc not in rows or (
+        rows[loc]["cause"] != sanity.CAUSE_SHADOWING_LOCAL
+    )
+
+
+PY_SHADOW_REPO = {
+    "pkg/cmd.py": "def command():\n    return 1\n",
+    "pkg/run.py": (
+        "def go(cmds):\n"
+        "    for command in cmds:\n"
+        "        run(command)\n"
+        "\n"
+        "\n"
+        "def other():\n"
+        "    run(command)\n"
+    ),
+}
+
+
+def test_python_for_target_shadows_a_free_function(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = _shadow_rows(
+        make_mapped_repo(PY_SHADOW_REPO),
+        "pkg/cmd.py::command",
+        capsys,
+        monkeypatch,
+    )
+    row = rows[("pkg/run.py", 3)]
+    assert row["cause"] == sanity.CAUSE_SHADOWING_LOCAL
+    assert row["decl_line"] == 2
+    assert rows[("pkg/run.py", 7)]["cause"] != sanity.CAUSE_SHADOWING_LOCAL
+
+
+def _shadow_one(tmp_path: Path, path: str, src: str, line: int) -> str:
+    (tmp_path / path).write_text(src)
+    text = src.splitlines()[line - 1]
+    hit = sanity.GrepHit(path=path, line=line, snippet=text)
+    causes = {(path, line): sanity.CAUSE_UNEXPLAINED}
+    sanity._explain_shadowing_locals(
+        causes, [hit], "callback", tmp_path, frozenset(), {}
+    )
+    return causes[(path, line)]
+
+
+@pytest.mark.parametrize(
+    ("path", "src"),
+    [
+        (
+            "a.rs",
+            "fn f(items: Vec<u8>) {\n"
+            "    items.iter().for_each(|callback| drop(callback));\n"
+            "    callback(1);\n"
+            "}\n",
+        ),
+        (
+            "b.rs",
+            "fn g(a: bool, b: bool) {\n"
+            "    let z = a || callback(2) > 0 || b;\n"
+            "    callback(3);\n"
+            "}\n",
+        ),
+        (
+            "c.py",
+            "def h(xs, s):\n"
+            "    ys = [f(callback) for callback in xs if callback in s]\n"
+            "    callback(1)\n",
+        ),
+    ],
+)
+def test_a_closed_closure_or_comprehension_binds_nothing_below(
+    tmp_path: Path, path: str, src: str
+) -> None:
+    assert _shadow_one(tmp_path, path, src, 3) == sanity.CAUSE_UNEXPLAINED

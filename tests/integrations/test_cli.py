@@ -1,8 +1,10 @@
 """CLI surface tests: flags, output resolution, plugin install."""
 
 import contextlib
+import errno
 import json
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -34,6 +36,36 @@ def test_bare_invocation_prints_help(capsys: pytest.CaptureFixture) -> None:
     out = capsys.readouterr().out
     assert "--map" in out
     assert "--claude-install" in out
+
+
+def test_a_mistyped_command_exits_2_with_a_suggestion(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    assert cli.main(["serach"]) == 2
+    captured = capsys.readouterr()
+    assert "unknown command 'serach'" in captured.err
+    assert "did you mean 'search'?" in captured.err
+    assert "--claude-install" not in captured.out
+
+
+def test_an_unknown_word_with_no_close_command_exits_2(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    assert cli.main(["zzzqqq"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown command 'zzzqqq'" in err
+    assert "did you mean" not in err
+
+
+def test_a_directory_word_points_at_dekko_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["proj"]) == 2
+    assert "dekko map proj" in capsys.readouterr().err
 
 
 def test_sanity_smoke(tmp_path: Path) -> None:
@@ -1200,3 +1232,55 @@ def test_load_or_regen_concurrent_callers_regen_exactly_once(
     assert len(regen_calls) == 1
     assert len(results) == 3
     assert all(code == 0 and index is not None for index, code in results)
+
+
+def test_a_closed_pipe_exits_quietly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            f"pkg/m{i}.py": "".join(
+                f"def fn_{i}_{j}(x: int) -> int:\n    return x\n\n\n"
+                for j in range(40)
+            )
+            for i in range(30)
+        }
+    )
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from dekko.integrations.cli import main; "
+            "sys.exit(main(sys.argv[1:]))",
+            "outline",
+            "pkg",
+            "--budget",
+            "0",
+            "--limit",
+            "100000",
+            "--root",
+            str(root),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    proc.stdout.readline()
+    proc.stdout.close()
+    err = proc.stderr.read().decode()
+    proc.wait(timeout=60)
+    assert "Traceback" not in err
+    assert "BrokenPipeError" not in err
+    assert proc.returncode == 141
+
+
+def test_einval_reads_as_a_closed_pipe_only_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    einval = OSError(errno.EINVAL, "Invalid argument")
+    monkeypatch.setattr(cli.os, "name", "nt")
+    assert cli._is_closed_pipe(einval)
+    monkeypatch.setattr(cli.os, "name", "posix")
+    assert not cli._is_closed_pipe(einval)
+    assert cli._is_closed_pipe(BrokenPipeError())

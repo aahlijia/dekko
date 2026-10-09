@@ -315,6 +315,30 @@ def _as_int(key: str, raw: Any) -> int:
     return value
 
 
+def _bool_arg(args: dict, key: str, default: bool) -> bool:
+    """A boolean tool argument: ``default`` when absent or null.
+
+    ``bool(args.get(..))`` read the string ``"false"`` as true. A JSON
+    boolean is taken as is, and ``"true"``/``"false"`` in any case for
+    clients that send every value as a string (the same leniency
+    ``_as_int`` gives numeric strings); anything else is an error, not
+    a guess.
+
+    Raises:
+        ToolError: For any other value.
+    """
+    raw = args.get(key)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.lower() in ("true", "false"):
+        return raw.lower() == "true"
+    raise ToolError(
+        f"argument '{key}' must be a boolean (true or false), got {raw!r}"
+    )
+
+
 def _int_arg(
     args: dict,
     key: str,
@@ -441,6 +465,27 @@ def _allowed_args(tool_name: str) -> set[str]:
     return allowed
 
 
+def _also_accepted(tool_name: str, advertised: list[str]) -> str:
+    """The error's tail naming what works without being in the schema.
+
+    The did-you-mean draws on every accepted name, so one it suggests
+    (``limit`` on ``get_callers``) must appear in the message, or the
+    agent drops a working argument after reading the hint. The schema
+    stays lean: each property costs tokens in every session.
+    """
+    extra = [
+        k for k in _UNADVERTISED_ARGS.get(tool_name, ()) if k not in advertised
+    ]
+    parts = [f"also honored: {', '.join(extra)}"] if extra else []
+    primary = _TARGET_PARAM.get(tool_name)
+    if primary is not None:
+        aliases = [a for a in _TARGET_ALIASES if a != primary]
+        names = ", ".join(f"'{a}'" for a in aliases)
+        parts.append(f"{names} work for '{primary}'")
+
+    return f"; {'; '.join(parts)}" if parts else ""
+
+
 def _reject_unknown_args(tool_name: str, args: dict) -> None:
     """Raise ``ToolError`` for an argument the tool doesn't accept.
 
@@ -466,6 +511,7 @@ def _reject_unknown_args(tool_name: str, args: dict) -> None:
     message = (
         f"unknown {noun} {names} for {tool_name}; "
         f"accepted: {', '.join(advertised) or '(none)'}"
+        f"{_also_accepted(tool_name, advertised)}"
     )
     hints = {
         k: match[0]
@@ -485,10 +531,22 @@ def _reject_unknown_args(tool_name: str, args: dict) -> None:
 
 
 def _root_of(ctx: Context, args: dict) -> Path:
-    """Resolve the target root from a tool's ``root`` argument."""
+    """Resolve the target root from a tool's ``root`` argument.
+
+    A ``root`` that isn't a directory is an error: answering "no
+    map.json under /nonexistent (call refresh_map)" as a normal result
+    sent the agent to regenerate a map for a path with nothing there.
+
+    Raises:
+        ToolError: When the given root isn't an existing directory.
+    """
     root = args.get("root")
     if isinstance(root, str) and root:
-        return Path(root).resolve()
+        path = Path(root).resolve()
+        if not path.is_dir():
+            what = "is not a directory" if path.exists() else "does not exist"
+            raise ToolError(f"root '{root}' {what}")
+        return path
     return ctx.default_root
 
 
@@ -577,12 +635,12 @@ def _relation_tool(
         requested, not implicit.
     """
     explicit_include_tests = "include_tests" in args
-    include_tests = bool(args.get("include_tests", default_include_tests))
+    include_tests = _bool_arg(args, "include_tests", default_include_tests)
     full = _index_for(ctx, args)
     index = full if include_tests else full.without_tests()
     target = _require(args, "symbol")
     limit = _limit_arg(args)
-    sites = bool(args.get("sites", False))
+    sites = _bool_arg(args, "sites", False)
     budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     code, out, err = _capture(
         lambda: query.run(
@@ -667,7 +725,7 @@ def tool_find_type_usages(ctx: Context, args: dict) -> str:
     """Symbols that use a type as a parameter or return type."""
     index = _index_for(ctx, args)
     name = _require(args, "type")
-    exact = bool(args.get("exact", False))
+    exact = _bool_arg(args, "exact", False)
     limit = _limit_arg(args)
     budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     code, out, err = _capture(
@@ -714,11 +772,11 @@ def _heritage_tool(
         ``note:`` line says how many.
     """
     explicit_include_tests = "include_tests" in args
-    include_tests = bool(args.get("include_tests", default_include_tests))
+    include_tests = _bool_arg(args, "include_tests", default_include_tests)
     full = _index_for(ctx, args)
     index = full if include_tests else full.without_tests()
     target = _require(args, "symbol")
-    transitive = bool(args.get("transitive", False))
+    transitive = _bool_arg(args, "transitive", False)
     relation = args.get("relation")
     budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     code, out, err = _capture(
@@ -766,7 +824,7 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     target = _require(args, "target")
     hops = _int_arg(args, "hops", 1)
     budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
-    with_source = bool(args.get("with_source", False))
+    with_source = _bool_arg(args, "with_source", False)
     root = _root_of(ctx, args)
     task = _task_of(ctx, args)
     code, out, err = _capture(
@@ -835,7 +893,7 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     # suspects section's own cap, which any explicit limit replaces.
     given = _int_arg(args, "limit", None) is not None or budget is not None
     limit = _limit_arg(args) if given else None
-    suspect = bool(args.get("suspect", False))
+    suspect = _bool_arg(args, "suspect", False)
     code, out, err = _capture(
         lambda: unused.run(
             index,
@@ -866,6 +924,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
             limit=limit,
             budget=budget,
             jobs=_COLD_REV_JOBS,
+            no_regen=ctx.no_regen,
         )
     )
     if code == affected.EXIT_ERROR:
@@ -876,7 +935,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
 def tool_search_code(ctx: Context, args: dict) -> str:
     """Free-text relevance search over symbol names, docs, signatures."""
     query_text = _require(args, "query")
-    include_tests = bool(args.get("include_tests", False))
+    include_tests = _bool_arg(args, "include_tests", False)
     # Load unfiltered first so a not-``include_tests`` call can report
     # how many test-path symbols ``.without_tests()`` dropped before
     # ranking ever saw them (the exclusion hint) — mirrors
@@ -920,7 +979,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
     symbol = symbol if isinstance(symbol, str) and symbol else None
     if rev is not None and symbol is not None:
         raise ToolError("give 'rev' or 'symbol', not both")
-    type_impact = bool(args.get("type_impact", False))
+    type_impact = _bool_arg(args, "type_impact", False)
     if type_impact and symbol is None:
         raise ToolError(
             "'type_impact' requires 'symbol' (a rev diff has no single "
@@ -937,7 +996,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             budget=budget,
             packs=packs,
             as_json=False,
-            no_regen=False,
+            no_regen=ctx.no_regen,
             task=task,
             type_impact=type_impact,
             jobs=_COLD_REV_JOBS,
@@ -1011,7 +1070,7 @@ def tool_lean(ctx: Context, args: dict) -> str:
     root = _root_of(ctx, args)
     budget = _budget_arg(args, None)
     task = _task_of(ctx, args)
-    dense = bool(args.get("dense", False))
+    dense = _bool_arg(args, "dense", False)
     code, out, err = _capture(
         lambda: render_lean.run(
             index,
@@ -1199,7 +1258,7 @@ def tool_refresh_map(ctx: Context, args: dict) -> str:
     covers the disclosure.
     """
     root = _root_of(ctx, args)
-    full = bool(args.get("full", False))
+    full = _bool_arg(args, "full", False)
     code, out, err = _capture(
         lambda: repo_ops.regen_map(root, full=full, quiet=False)
     )

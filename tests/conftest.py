@@ -19,25 +19,7 @@ os.environ["DEKKO_TOKENIZER"] = "chars4"
 
 from dekko import selfcheck as _selfcheck_mod
 from dekko.analysis import diff as _diff_mod
-from dekko.core import resolver as _resolver_mod
 from dekko.integrations import cli
-
-
-@pytest.fixture(autouse=True)
-def _reset_pool_mp_context_cache() -> Iterator[None]:
-    """Clear ``resolver``'s process-wide pool-context verdict per test.
-
-    The fork/spawn decision is cached at first pool
-    build for the life of the process (see ``_pool_mp_context``).
-    Correct for real dekko processes, but the pytest process runs
-    thousands of tests in one process, some of which hold helper
-    threads -- without a reset, whichever test builds the first pool
-    would pin the verdict for every later test, making pool-context
-    behavior depend on suite ordering.
-    """
-    _resolver_mod._pool_ctx_cache = None
-    yield
-    _resolver_mod._pool_ctx_cache = None
 
 
 @pytest.fixture(autouse=True)

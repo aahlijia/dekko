@@ -94,9 +94,14 @@ class LanguageSpec:
             ``@global``/``@nonlocal``/``@import``. Destructuring nests
             to any depth and a query can't recurse, so the query finds
             the pattern's root and ``extractor._pattern_identifiers``
-            walks it. ``None`` for languages whose reference shapes
-            can't be shadowed by a value local (Go's type identifiers,
-            Java's ``Type::method``).
+            walks it. Calls read it too (``RawCall.bound``): in Java,
+            Kotlin and C++ it is what tells a local receiver from a
+            field used without ``this``, and there it is read for calls
+            only, since their references (``Type::method``) name
+            nothing a local shadows (see ``VALUE_NAMESPACE_LANGUAGES``).
+            C++ adds ``@funcparams``: a parameter list that binds in
+            the nearest function scope rather than its parent. ``None``
+            for Go, Rust and C, whose receivers are written out.
         binding_function_scopes: Node types that open a function-level
             scope for ``binding_query``. For Python this includes
             ``class_definition``: a class body binds its own
@@ -189,6 +194,15 @@ class LanguageSpec:
             (see ``model.TypeUse``). ``None`` for languages whose
             parameter lists carry no annotations the read side could
             match (plain JS) or that have no measurement yet.
+        field_query: Query capturing each field a type declares, read
+            by ``extractor._collect_fields`` into ``Symbol.fields``.
+            Captures: ``@field`` (the declaration), ``@name``, and
+            optionally ``@type`` (the declared type), ``@init`` (an
+            initializer to infer a type from), ``@self`` (the receiver
+            of a ``this.x = ..`` / ``self.x = ..`` assignment), ``@decl``
+            (a C/C++ declarator to dig the name out of) or ``@tuple``
+            (a Rust tuple-struct body, one field per type). ``None``
+            for languages without one.
     """
 
     name: str
@@ -209,6 +223,7 @@ class LanguageSpec:
     env_read_query: str | None = None
     type_alias_query: str | None = None
     type_use_query: str | None = None
+    field_query: str | None = None
     enum_variant_query: str | None = None
     binding_query: str | None = None
     binding_function_scopes: tuple[str, ...] = ()
@@ -268,8 +283,29 @@ _PY_BINDING_QUERY = """
 (import_from_statement) @import
 """
 
+# Fields a Python class declares: a class-body assignment (annotated or
+# not), and a ``self.x = ..`` / ``cls.x = ..`` assignment in any method
+# (``extractor._collect_fields`` checks the receiver's name).
+_PY_FIELD_QUERY = """
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @name
+        type: (type)? @type
+        right: (_)? @init) @field)))
+
+(assignment
+  left: (attribute
+    object: (identifier) @self
+    attribute: (identifier) @name)
+  type: (type)? @type
+  right: (_)? @init) @field
+"""
+
 PYTHON = LanguageSpec(
     name="python",
+    field_query=_PY_FIELD_QUERY,
     grammar="python",
     extensions=(".py", ".pyi"),
     definition_query="""
@@ -390,8 +426,19 @@ _RUST_ENUM_VARIANT_QUERY = """
       body: (ordered_field_declaration_list))))
 """
 
+# A Rust struct's named fields, and a tuple struct's positional ones.
+_RUST_FIELD_QUERY = """
+(field_declaration
+  name: (field_identifier) @name
+  type: (_) @type) @field
+
+(struct_item
+  body: (ordered_field_declaration_list) @tuple) @field
+"""
+
 RUST = LanguageSpec(
     name="rust",
+    field_query=_RUST_FIELD_QUERY,
     grammar="rust",
     extensions=(".rs",),
     definition_query="""
@@ -504,8 +551,17 @@ _C_ENV_READ_QUERY = """
   arguments: (argument_list . (string_literal) @key)) @call
 """
 
+# A C/C++ struct or class member; the extractor digs the declarator
+# for the name and drops a method declaration.
+_C_FIELD_QUERY = """
+(field_declaration
+  type: (_) @type
+  declarator: (_) @decl) @field
+"""
+
 C = LanguageSpec(
     name="c",
+    field_query=_C_FIELD_QUERY,
     grammar="c",
     extensions=(".c", ".h"),
     definition_query=_C_DEFINITIONS,
@@ -519,9 +575,32 @@ C = LanguageSpec(
     env_read_query=_C_ENV_READ_QUERY,
 )
 
+# Where C++ binds a local name (see ``LanguageSpec.binding_query``).
+# A method reads its type's fields bare (``delegate_->Run()``), so the
+# resolver asks this table whether a bare receiver is a local before
+# typing it as a field. A ``parameter_list`` hangs off a
+# ``function_declarator``, whose span stops before the body, so it binds
+# in the nearest function scope (``@funcparams``); a prototype's list
+# outside any body binds nothing.
+_CPP_BINDING_QUERY = """
+(parameter_list) @funcparams
+(declaration declarator: (_) @local)
+(for_range_loop declarator: (_) @scoped) @scope
+(catch_clause parameters: (parameter_list) @scoped) @scope
+"""
+
 CPP = LanguageSpec(
     name="cpp",
+    field_query=_C_FIELD_QUERY,
     grammar="cpp",
+    binding_query=_CPP_BINDING_QUERY,
+    binding_function_scopes=("function_definition", "lambda_expression"),
+    binding_block_scopes=(
+        "compound_statement",
+        "for_statement",
+        "for_range_loop",
+        "catch_clause",
+    ),
     extensions=(".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"),
     definition_query="""
 (function_definition
@@ -838,6 +917,54 @@ _JS_ENV_READ_QUERY = """
   index: (string) @key) @call
 """
 
+# Fields a JS class declares: a class-body field, and a ``this.x = ..``
+# assignment in any method (``extractor._collect_fields`` keeps the
+# latter only inside a method of a class).
+_JS_THIS_ASSIGN_FIELD = """
+(assignment_expression
+  left: (member_expression
+    object: (this) @self
+    property: (property_identifier) @name)
+  right: (_) @init) @field
+"""
+
+_JS_FIELD_QUERY = (
+    """
+(field_definition
+  property: (property_identifier) @name
+  value: (_)? @init) @field
+"""
+    + _JS_THIS_ASSIGN_FIELD
+)
+
+# TS adds the annotated class field, a constructor parameter property
+# (a parameter carrying ``private``/``public``/``protected``,
+# ``readonly`` or ``override``), and an interface member.
+_TS_FIELD_QUERY = (
+    """
+(public_field_definition
+  name: (property_identifier) @name
+  type: (type_annotation)? @type
+  value: (_)? @init) @field
+
+(required_parameter
+  [(accessibility_modifier) "readonly" (override_modifier)]
+  pattern: (identifier) @name
+  type: (type_annotation)? @type) @field
+
+(optional_parameter
+  [(accessibility_modifier) "readonly" (override_modifier)]
+  pattern: (identifier) @name
+  type: (type_annotation)? @type) @field
+
+(interface_body
+  (property_signature
+    name: (property_identifier) @name
+    type: (type_annotation)? @type) @field)
+"""
+    + _JS_THIS_ASSIGN_FIELD
+)
+
 JAVASCRIPT = LanguageSpec(
     name="javascript",
     grammar="javascript",
@@ -958,6 +1085,7 @@ JAVASCRIPT = LanguageSpec(
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
     env_read_query=_JS_ENV_READ_QUERY,
+    field_query=_JS_FIELD_QUERY,
 )
 
 _TS_DEFINITIONS = """
@@ -1143,6 +1271,7 @@ TYPESCRIPT = LanguageSpec(
     env_read_query=_JS_ENV_READ_QUERY,
     type_alias_query=_TS_TYPE_ALIAS_QUERY,
     type_use_query=_TS_TYPE_USE_QUERY,
+    field_query=_TS_FIELD_QUERY,
 )
 
 TSX = LanguageSpec(
@@ -1167,6 +1296,7 @@ TSX = LanguageSpec(
     env_read_query=_JS_ENV_READ_QUERY,
     type_alias_query=_TS_TYPE_ALIAS_QUERY,
     type_use_query=_TS_TYPE_USE_QUERY,
+    field_query=_TS_FIELD_QUERY,
 )
 
 # Type-reference edges: a struct/interface type used only
@@ -1214,8 +1344,21 @@ _GO_REFERENCE_QUERY = """
 (channel_type value: (type_identifier) @ref)
 """
 
+# A Go struct's named fields, and its embedded ones (no name: the
+# extractor names them after their type, as Go does).
+_GO_FIELD_QUERY = """
+(field_declaration
+  name: (field_identifier) @name
+  type: (_) @type) @field
+
+(field_declaration
+  !name
+  type: (_) @type) @field
+"""
+
 GO = LanguageSpec(
     name="go",
+    field_query=_GO_FIELD_QUERY,
     grammar="go",
     extensions=(".go",),
     definition_query="""
@@ -1276,18 +1419,74 @@ GO = LanguageSpec(
 # passed to a functional-interface parameter) was indistinguishable
 # from dead code to ``dekko unused``. The ``"::"`` anchor requires the
 # captured ``@ref`` node to immediately follow the literal ``::``
-# token; Java's ``Class::new`` constructor-reference form has ``new``
-# as an anonymous keyword token in that position, not an
-# ``identifier`` node, so it never matches this pattern -- no separate
-# exclusion predicate needed. Verified live against the pinned
-# tree-sitter-java grammar for ``this::baz``/``Foo::staticMethod``/
-# ``java.util.Objects::requireNonNull``/``Class::new``.
+# token. Verified live against the pinned tree-sitter-java grammar for
+# ``this::baz``/``Foo::staticMethod``/``java.util.Objects::
+# requireNonNull``.
+#
+# A constructor reference, ``Class::new``, has ``new`` as an anonymous
+# keyword token where the first pattern wants an ``identifier``, so it
+# needs its own: ``@ctorref`` hands the whole node to
+# ``extractor._java_constructor_ref_type``, which reads the type it
+# names off the head. Like ``Foo::bar`` it is a reference, not a call:
+# the constructor runs when the functional interface is invoked, and
+# that interface, not the site, picks the overload.
 _JAVA_REFERENCE_QUERY = """
 (method_reference "::" (identifier) @ref)
+(method_reference "new") @ctorref
+"""
+
+# A record is the one Java type whose implicit constructor takes
+# arguments: ``record R(int a, int b)`` has a canonical ``R(int, int)``
+# whether or not its body writes one. The two ``record_declaration``
+# patterns in the definition query below make that constructor the
+# symbol ``R.R``, its parameters the header's components, the way a
+# Kotlin primary constructor is one: on the header when nothing in the
+# body declares it, on a compact constructor (whose body is then its
+# own) when one does. ``extractor._collect_definitions`` drops the
+# header match when the body already declares the canonical
+# constructor, so a record never has two.
+# Java fields (one per declarator), record components, and enum
+# constants (typed as their enum by the extractor).
+_JAVA_FIELD_QUERY = """
+(field_declaration
+  type: (_) @type
+  declarator: (variable_declarator
+    name: (identifier) @name
+    value: (_)? @init)) @field
+
+(record_declaration
+  parameters: (formal_parameters
+    (formal_parameter
+      type: (_) @type
+      name: (identifier) @name) @field))
+
+(enum_body
+  (enum_constant
+    name: (identifier) @name) @field)
+"""
+
+# Where Java binds a local name (see ``LanguageSpec.binding_query``).
+# Read for calls only: a method uses its type's fields without
+# ``this``, so ``repository.findAll()`` is typed through the field
+# unless a parameter or local of that name is in scope. References
+# never read it (``Foo::bar`` names a method, which no local shadows).
+_JAVA_BINDING_QUERY = """
+(formal_parameters) @params
+(inferred_parameters) @params
+(lambda_expression parameters: (identifier) @param)
+(local_variable_declaration
+  declarator: (variable_declarator name: (_) @local))
+(enhanced_for_statement name: (_) @scoped) @scope
+(catch_clause (catch_formal_parameter name: (_) @scoped)) @scope
+(resource name: (_) @local)
+(instanceof_expression name: (identifier) @local)
+(type_pattern (identifier) @local)
+(record_pattern_component (identifier) @local)
 """
 
 JAVA = LanguageSpec(
     name="java",
+    field_query=_JAVA_FIELD_QUERY,
     grammar="java",
     extensions=(".java",),
     definition_query="""
@@ -1304,6 +1503,15 @@ JAVA = LanguageSpec(
 (interface_declaration name: (identifier) @classname) @classdef
 (enum_declaration name: (identifier) @classname) @classdef
 (record_declaration name: (identifier) @classname) @classdef
+
+(record_declaration
+  name: (identifier) @name
+  parameters: (formal_parameters) @params @def)
+
+(record_declaration
+  name: (identifier) @name
+  parameters: (formal_parameters) @params
+  body: (class_body (compact_constructor_declaration) @def))
 """,
     call_query="""
 (method_invocation arguments: (_)? @args) @callee @call
@@ -1326,6 +1534,22 @@ JAVA = LanguageSpec(
     ),
     param_style="generic",
     reference_query=_JAVA_REFERENCE_QUERY,
+    binding_query=_JAVA_BINDING_QUERY,
+    binding_function_scopes=(
+        "method_declaration",
+        "constructor_declaration",
+        "compact_constructor_declaration",
+        "lambda_expression",
+    ),
+    binding_block_scopes=(
+        "block",
+        "for_statement",
+        "enhanced_for_statement",
+        "catch_clause",
+        "try_with_resources_statement",
+        "switch_block_statement_group",
+        "switch_rule",
+    ),
     heritage_query="""
 (class_declaration
   name: (identifier) @classname
@@ -1401,8 +1625,50 @@ JAVA = LanguageSpec(
 # ``call_expression`` that must not count as another call. An object
 # expression with a superclass (``object : Base(x) { ... }``) constructs
 # ``Base``, the way Java's ``new Base(x) { ... }`` does.
+#
+# tree-sitter-kotlin reads a generic call with exactly one argument and
+# a plain or dotted type argument, ``runApplication<App>(*args)``, as
+# the comparison ``(runApplication < App) > (*args)``. Zero or several
+# arguments, a trailing lambda, a chained call or a generic type
+# argument all parse as calls. Kotlin's compiler reads the shape as a
+# call, and as a comparison it would compare a ``Boolean`` with ``>``,
+# so the ``@gcall`` pattern records it as one.
+# Kotlin class-body properties, primary-constructor ``val``/``var``
+# parameters, and enum entries; the extractor checks the first two
+# shapes (a class body, a ``val``/``var``).
+_KOTLIN_FIELD_QUERY = """
+(property_declaration
+  (variable_declaration
+    (identifier) @name
+    (_)? @type)
+  (_)? @init) @field
+
+(class_parameter
+  (identifier) @name
+  (_) @type) @field
+
+(enum_class_body
+  (enum_entry
+    (identifier) @name) @field)
+"""
+
+# Where Kotlin binds a local name (see ``LanguageSpec.binding_query``),
+# read for calls only, as Java's is. A class-level
+# ``property_declaration`` is a field, not a local: no function or
+# block scope encloses it, so it binds nothing here.
+_KOTLIN_BINDING_QUERY = """
+(function_value_parameters) @params
+(lambda_parameters) @params
+(property_declaration (variable_declaration) @local)
+(property_declaration (multi_variable_declaration) @local)
+(for_statement (variable_declaration) @scoped) @scope
+(for_statement (multi_variable_declaration) @scoped) @scope
+(catch_block (identifier) @scoped) @scope
+"""
+
 KOTLIN = LanguageSpec(
     name="kotlin",
+    field_query=_KOTLIN_FIELD_QUERY,
     grammar="kotlin",
     extensions=(".kt", ".kts"),
     definition_query="""
@@ -1434,6 +1700,13 @@ KOTLIN = LanguageSpec(
 (object_literal
   (delegation_specifiers
     (delegation_specifier (constructor_invocation) @ctor)))
+(binary_expression
+  (binary_expression
+    [(identifier) (navigation_expression)] @gfn
+    "<"
+    [(identifier) (navigation_expression)])
+  ">"
+  (parenthesized_expression) @garg) @gcall
 """,
     import_query="""
 (import (qualified_identifier) @module (identifier)? @alias)
@@ -1450,6 +1723,14 @@ KOTLIN = LanguageSpec(
         "lambda_literal",
         "anonymous_function",
     ),
+    binding_query=_KOTLIN_BINDING_QUERY,
+    binding_function_scopes=(
+        "function_declaration",
+        "secondary_constructor",
+        "lambda_literal",
+        "anonymous_function",
+    ),
+    binding_block_scopes=("block", "for_statement", "catch_block"),
     # Kotlin writes a superclass as a constructor call (``: Base(p)``)
     # and an interface bare (``: Iface``), and a class has at most one
     # superclass, so the clause says which relation each entry is.
@@ -1479,6 +1760,15 @@ KOTLIN = LanguageSpec(
 # propagation and Go's returned-``error``-value convention are
 # type-inference problems, not syntax a tree-sitter query can point at;
 # C has no exception concept to extract at all.
+
+# Languages where a function's name is a value a local binding can
+# shadow: a bare reference or a bare call to a parameter named ``run``
+# means that parameter, not a repo function ``run``. Java keeps method
+# names apart from locals (``Foo::bar`` and ``bar()`` never mean a
+# local ``bar``), so its binding table types receivers only.
+VALUE_NAMESPACE_LANGUAGES = frozenset(
+    {"python", "javascript", "typescript", "tsx"}
+)
 
 TIER1_SPECS: tuple[LanguageSpec, ...] = (
     PYTHON,
@@ -1634,6 +1924,28 @@ _JVM_VISIBILITY_VERSION = 1
 # query.
 _JAVA_NEW_QUALIFIER_VERSION = 1
 
+# Bump when ``extractor._collect_definitions`` changes when a Java
+# record's header stands for its canonical constructor (the body
+# declaring one drops it), or ``extractor._jvm_visibility`` changes the
+# access that header constructor gets. Code outside the query.
+_JAVA_RECORD_CANONICAL_VERSION = 1
+
+# Bump when ``extractor._java_constructor_ref_type`` changes which
+# ``X::new`` heads name a type (simple, generic, ``Outer.X``) and which
+# it skips (arrays, package paths). Read off the node outside the query.
+_JAVA_CTOR_REF_VERSION = 1
+
+# Bump when ``extractor._collect_kotlin_calls`` changes the ``RawCall``
+# it builds from a Kotlin ``f<T>(x)`` misparsed as a comparison (its
+# head, receiver, or the one-or-unknown argument count). Code outside
+# the query.
+_KOTLIN_GENERIC_CALL_VERSION = 1
+
+# Bump when ``extractor._imports_rust`` changes which Rust ``use``
+# records it keeps (globs) or how it re-bases a ``use`` written inside
+# an inline ``mod``. Code outside the query.
+_RUST_USE_SCOPE_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every extraction spec, both tiers, into one invalidation key.
@@ -1651,8 +1963,10 @@ def spec_fingerprint() -> str:
     ``_CPP_CONSTRUCTION_VERSION``, ``_CPP_QUALIFIED_PATH_VERSION``,
     ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION``,
     ``_TIER2_ENGINE_VERSION``, ``_PY_IMPORT_REBIND_VERSION``,
-    ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION`` and
-    ``_JAVA_NEW_QUALIFIER_VERSION``, which
+    ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION``,
+    ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``,
+    ``_JAVA_CTOR_REF_VERSION``, ``_KOTLIN_GENERIC_CALL_VERSION`` and
+    ``_RUST_USE_SCOPE_VERSION``, which
     each cover one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
     Tier-2 row (``tier2.TIER2_SPECS``), so editing a row re-extracts
@@ -1683,6 +1997,10 @@ def spec_fingerprint() -> str:
         f"call_arg_count={_CALL_ARG_COUNT_VERSION}",
         f"jvm_visibility={_JVM_VISIBILITY_VERSION}",
         f"java_new_qualifier={_JAVA_NEW_QUALIFIER_VERSION}",
+        f"java_record_canonical={_JAVA_RECORD_CANONICAL_VERSION}",
+        f"java_ctor_ref={_JAVA_CTOR_REF_VERSION}",
+        f"kotlin_generic_call={_KOTLIN_GENERIC_CALL_VERSION}",
+        f"rust_use_scope={_RUST_USE_SCOPE_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

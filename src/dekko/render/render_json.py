@@ -236,8 +236,9 @@ def _symbol_row(sym: Symbol) -> dict:
     ``in_literal``/``literal_consumer`` are set on a small minority of
     symbols (object-literal members), and ``visibility`` on JVM
     methods only, so writing their defaults on every row would grow
-    the symbol table for nothing. The loader's ``.get`` defaults make
-    the absence mean the default.
+    the symbol table for nothing. ``fields`` is on type-kind symbols
+    only, and ``receiver`` on Go receivers only, so they go the same
+    way. The loaders' defaults make the absence mean the default.
     """
     row = asdict(sym)
     if not row["in_literal"]:
@@ -245,5 +246,12 @@ def _symbol_row(sym: Symbol) -> dict:
     for key in ("literal_consumer", "visibility"):
         if row[key] is None:
             del row[key]
+
+    if not row["fields"]:
+        del row["fields"]
+
+    for param in row["params"]:
+        if not param["receiver"]:
+            del param["receiver"]
 
     return row

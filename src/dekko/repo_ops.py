@@ -154,7 +154,7 @@ def _extract_misses(
             results = _run_pool_bounded(pool, futures)
             return dict(zip(misses, results))
         finally:
-            pool.shutdown(wait=False)
+            resolver_mod.close_pool(pool)
 
     return run_pooled_with_retry(_run, workers, "file extraction")
 
@@ -712,6 +712,51 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
         root=root,
         reuse=_reuse_plan(root, args, cache, files),
     )
+    outputs = write_map(root, args, files, graph, cache, skipped, elapsed_ms)
+
+    if not args.quiet:
+        print(
+            _summary(
+                files,
+                edges=len(graph.edges),
+                ambiguous=len(graph.ambiguous),
+                external=len(graph.external),
+                skipped=skipped,
+                outputs=outputs,
+            )
+        )
+    return 0
+
+
+def write_map(
+    root: Path,
+    args: argparse.Namespace,
+    files: list[FileMap],
+    graph: CallGraph,
+    cache: cache_mod.IncrementalCache | None,
+    skipped: list[tuple[str, str]],
+    elapsed_ms: int,
+) -> list[Path]:
+    """Write an extracted, resolved tree as the map: pages, JSON, caches.
+
+    ``run_map``'s output half, shared with a stale-map ``diff`` or
+    ``affected``, which re-map the tree anyway and write it here rather
+    than leaving the next call to re-map it again.
+
+    Args:
+        root: Repository root.
+        args: ``dekko map`` arguments (outputs, options recorded in the
+            provenance).
+        files: Every mapped file.
+        graph: The resolved call graph for ``files``.
+        cache: The extraction cache ``files`` came through, or ``None``
+            with ``--no-json``.
+        skipped: ``(path, reason)`` pairs from discovery.
+        elapsed_ms: Extraction wall time, for MAP.md's run line.
+
+    Returns:
+        Every path written, for the run summary.
+    """
     label = root.name + (f"/{args.subpath}" if args.subpath else "")
 
     md_path, json_path = resolve_outputs(root, args.output, args.json_output)
@@ -754,18 +799,7 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
             root, resolver_mod.partition_resolution(files, graph), cache
         )
 
-    if not args.quiet:
-        print(
-            _summary(
-                files,
-                edges=len(graph.edges),
-                ambiguous=len(graph.ambiguous),
-                external=len(graph.external),
-                skipped=skipped,
-                outputs=outputs,
-            )
-        )
-    return 0
+    return outputs
 
 
 def _write_json_output(
@@ -1241,14 +1275,15 @@ def load_current_side(root: Path) -> CurrentSide:
     """Judge the current-tree map, loading it only when it is fresh.
 
     ``diff.run``/``affected.changes`` are the one partial exception to
-    ``load_or_regen`` being the single daemon-cache chokepoint: a
-    stale map makes ``load_or_regen`` write a fresh ``map.json``
-    (``regen_map``), a side effect ``diff``/``affected`` have never
-    had. They re-map a stale tree in memory instead
-    (``diff.snapshot_new_side`` -> ``diff.snapshot()``), so this only
-    ever *reads*. It checks the same ``_daemon_cache_get``/``_put``
-    hooks ``load_or_regen`` uses, so a daemon-routed ``diff`` shares
-    the warm index a prior ``query`` left.
+    ``load_or_regen`` being the single daemon-cache chokepoint. They
+    don't need a ``MapIndex`` of a stale tree, only a snapshot, so
+    instead of ``load_or_regen``'s regen-then-reload they re-map the
+    tree in memory (``diff.snapshot_new_side`` -> ``diff.snapshot()``)
+    and write that re-map as the map (``persist_remap``), skipping the
+    reload. This call itself only reads. It checks the same
+    ``_daemon_cache_get``/``_put`` hooks ``load_or_regen`` uses, so a
+    daemon-routed ``diff`` shares the warm index a prior ``query``
+    left.
 
     Freshness comes from the provenance sidecar first
     (``mapfile.load_sidecar_provenance``, a few KB), and ``map.json``
@@ -1262,8 +1297,8 @@ def load_current_side(root: Path) -> CurrentSide:
         root: Repository root containing map.json.
 
     Returns:
-        The map's verdict, provenance and (when fresh) index; never
-        regenerated as a side effect of this call.
+        The map's verdict, provenance and (when fresh) index; this
+        call never regenerates anything.
     """
     if _daemon_cache_get is not None:
         cached = _daemon_cache_get(root)
@@ -1369,7 +1404,28 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
     # The provenance alone: the options are four fields of it, and the
     # sidecar holds them without parsing the whole map.
     prov = mapfile.load_provenance(root) or {}
-    regen_args = argparse.Namespace(
+    return run_map(
+        regen_args(root, prov, full=full, quiet=quiet),
+        persist_excludes=False,
+    )
+
+
+def regen_args(
+    root: Path, prov: dict, full: bool = False, quiet: bool = True
+) -> argparse.Namespace:
+    """``dekko map`` arguments that rebuild a map with its recorded options.
+
+    Args:
+        root: Repository root to map.
+        prov: The existing map's provenance, ``{}`` for a whole-repo
+            map with default options.
+        full: Ignore the ``.dekko`` cache and re-parse every file.
+        quiet: Suppress the one-line summary on stdout.
+
+    Returns:
+        A namespace ``run_map`` and ``write_map`` accept.
+    """
+    return argparse.Namespace(
         map_dir=str(root),
         subpath=prov.get("subpath"),
         exclude=list(prov.get("excludes", [])),
@@ -1393,4 +1449,46 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         # from-scratch --full remap because of exactly this.
         jobs=0,
     )
-    return run_map(regen_args, persist_excludes=False)
+
+
+def persist_remap(
+    root: Path,
+    prov: dict,
+    files: list[FileMap],
+    graph: CallGraph,
+    cache: cache_mod.IncrementalCache | None,
+    skipped: list[tuple[str, str]],
+    elapsed_ms: int,
+) -> None:
+    """Write a stale map's in-memory re-map over it.
+
+    A stale-map ``diff``/``affected`` has already extracted and resolved
+    the whole working tree; writing it costs the render alone (~14 s on
+    tensorflow against ~22 s for the re-map), and every later call then
+    takes the fresh path instead of re-mapping again (27 s each there).
+
+    Skipped while another process holds the regen lock, since that
+    process is writing this map already. A failed write (a read-only
+    checkout) costs one note; the caller's answer stands either way.
+
+    Args:
+        root: Repository root.
+        prov: The stale map's provenance, for its recorded options.
+        files: Every mapped file of the working tree.
+        graph: The resolved call graph for ``files``.
+        cache: The extraction cache ``files`` came through.
+        skipped: ``(path, reason)`` pairs from discovery.
+        elapsed_ms: Extraction wall time, for MAP.md's run line.
+    """
+    args = regen_args(root, prov)
+    with filelock.try_regen_lock(root) as acquired:
+        if not acquired:
+            return
+        try:
+            write_map(root, args, files, graph, cache, skipped, elapsed_ms)
+        except OSError as exc:
+            print(
+                f"note: could not update the map ({exc}); the next call "
+                "re-maps the tree again",
+                file=sys.stderr,
+            )

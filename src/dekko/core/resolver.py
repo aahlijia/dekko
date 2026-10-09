@@ -121,7 +121,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass, field, fields, replace
 from multiprocessing.context import BaseContext
 from pathlib import Path, PurePosixPath
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from dekko.classify import is_test_path
 from dekko.core import languages, walker
@@ -131,6 +131,7 @@ from dekko.core.model import (
     CatchSite,
     Edge,
     ExternalCall,
+    Field,
     FileMap,
     HeritageEdge,
     Import,
@@ -144,6 +145,7 @@ from dekko.core.model import (
     Reexport,
     Symbol,
     ThrowEdge,
+    go_embedded_name,
 )
 
 _SELF_RECEIVERS = {"self", "this", "Self", "cls"}
@@ -335,6 +337,14 @@ _POOL_RETRY_DELAY_S = 1.5
 # deadline across a whole batch -- see each call site's own
 # ``.result(timeout=POOL_RESULT_TIMEOUT_S)`` usage.
 POOL_RESULT_TIMEOUT_S = 600
+
+# How long ``close_pool`` waits for a finished pool's manager thread
+# (which itself joins every worker) before killing the workers, and
+# how long it then waits for the manager to notice. A healthy pool has
+# already handed back every result, so its workers only have to exit;
+# the first bound is only ever reached by a wedged worker.
+POOL_CLOSE_TIMEOUT_S = 30
+POOL_CLOSE_KILL_GRACE_S = 5
 
 _PoolResultT = TypeVar("_PoolResultT")
 
@@ -597,13 +607,15 @@ def reexport_delta_names(
     old_reexports: list[dict] | None,
     old_imports: list[dict] | None,
 ) -> set[str] | None:
-    """Names one edited JS/TS file's exports and imports can re-point.
+    """Names one edited JS/TS or Rust file's exports and imports can
+    re-point.
 
     A name is followed from an import through every file that
-    re-exports it (``_OriginLookup``), and neither a re-export record
-    nor an import binding is part of any symbol. So an edit to either
-    changes what a call in an *unchanged* file resolves to, and the
-    symbol delta cannot see it.
+    re-exports it (``_OriginLookup``, and ``_RustPaths`` through a
+    Rust ``pub use``), and neither a re-export record nor an import
+    binding is part of any symbol. So an edit to either changes what a
+    call in an *unchanged* file resolves to, and the symbol delta
+    cannot see it.
 
     Args:
         fm: The file as extracted now.
@@ -616,9 +628,11 @@ def reexport_delta_names(
         or re-pointed (a file's own import is a hop when it exports
         the name again). An import of a bare package name leads
         nowhere in the repo and is skipped. ``None`` when a star
-        re-export was gained or lost: what a star exposes is no
-        bounded set of names. Empty for a non-JS/TS file.
+        re-export (or a Rust glob) was gained or lost: what a star
+        exposes is no bounded set of names. Empty for any other file.
     """
+    if fm.path.endswith(".rs"):
+        return _rust_use_delta_names(fm, old_imports)
     if not fm.path.endswith(_JS_TS_EXTENSIONS):
         return set()
     before = {
@@ -640,6 +654,24 @@ def reexport_delta_names(
     return names
 
 
+def _rust_use_delta_names(
+    fm: FileMap, old_imports: list[dict] | None
+) -> set[str] | None:
+    """``reexport_delta_names`` for a Rust file: the local and original
+    name of every ``use`` binding gained, lost or re-pointed, or
+    ``None`` when a glob was gained or lost."""
+    before = {(d["name"], d["source"]) for d in old_imports or ()}
+    now = {(i.name, i.source) for i in fm.imports}
+    names: set[str] = set()
+    for local, source in before ^ now:
+        if local == "*":
+            return None
+        names.update((local, source.rsplit("::", 1)[-1]))
+    names.discard("")
+
+    return names
+
+
 def reexport_closure(files: list[FileMap], names: set[str]) -> set[str]:
     """``names``, plus every name a JS/TS file passes one of them on as.
 
@@ -647,9 +679,9 @@ def reexport_closure(files: list[FileMap], names: set[str]) -> set[str]:
     depend on ``helper``, and ``import { helper as h }`` does the same
     for ``h``. A call resolved through such a hop is written under the
     far name, so a change to ``helper`` has to reach the files that
-    say ``assist`` or ``h``. Which file each record sits in is
-    ignored: this over-approximates, and is only ever used to widen a
-    re-resolve.
+    say ``assist`` or ``h``; so does a Rust ``pub use point::Point as
+    P``. Which file each record sits in is ignored: this
+    over-approximates, and is only ever used to widen a re-resolve.
 
     Args:
         files: Every mapped file.
@@ -659,7 +691,9 @@ def reexport_closure(files: list[FileMap], names: set[str]) -> set[str]:
         The closure of ``names`` under renaming re-exports and import
         aliases.
     """
-    renames: list[tuple[str, str]] = []
+    renames: list[tuple[str, str]] = [
+        (original, name) for name, original in rust_renames(files)
+    ]
     for fm in files:
         if not fm.path.endswith(_JS_TS_EXTENSIONS):
             continue
@@ -900,40 +934,7 @@ def _pool_workers(workers: int, items: int) -> int:
     return chosen if chosen >= 2 else 1
 
 
-# Process-wide cached verdict of ``_choose_pool_mp_context`` -- see
-# ``_pool_mp_context`` for why the decision is made exactly once.
-_pool_ctx_cache: BaseContext | None = None
-
-
 def _pool_mp_context() -> BaseContext:
-    """The (cached) start method for dekko's process pools.
-
-    Decided once per process, at the first pool build, and reused for
-    every later one. The cache is not an optimization -- it is what
-    makes the thread gate sound: ``ProcessPoolExecutor.shutdown(
-    wait=False)`` (every call site's teardown, deliberately) can
-    leave the executor's manager/feeder threads alive
-    for a moment after a pool finishes, so a naive per-pool check
-    would see the *extraction* pool's harmless ghost threads and
-    silently downgrade every *resolve* pass to ``spawn`` in the exact
-    single-threaded CLI path fork exists for. At first-pool time the
-    check is honest: the CLI/MCP parent has one thread, and the daemon
-    has already started its status thread before any request can
-    build a pool, so each process caches the verdict that is correct
-    for its whole lifetime.
-
-    Returns:
-        The multiprocessing context every pool build should pass as
-        ``mp_context=``.
-    """
-    global _pool_ctx_cache
-    if _pool_ctx_cache is None:
-        _pool_ctx_cache = _choose_pool_mp_context()
-
-    return _pool_ctx_cache
-
-
-def _choose_pool_mp_context() -> BaseContext:
     """Start method for dekko's process pools: ``fork`` when provably safe.
 
     ``fork`` gives workers copy-on-write access to the parent's memory:
@@ -947,22 +948,26 @@ def _choose_pool_mp_context() -> BaseContext:
     (``forkserver`` re-pickles initargs per worker, so it has
     ``spawn``'s transfer cost -- it buys nothing here).
 
-    ``fork`` is only safe from a single-threaded parent, so the gate is
-    a runtime thread-count check at pool-build time -- the daemon (its
-    status thread is always running while a request executes) can never
-    pass it, with no plumbing to forget. Windows has no ``fork`` at
-    all. ``DEKKO_POOL_START_METHOD`` is the escape hatch, consulted
-    only when the safety gates would allow ``fork``: ``spawn`` opts a
-    problem host back out, ``fork`` is an explicit default. A
-    first-attempt failure under ``fork`` is retried under ``spawn`` by
-    ``run_pooled_with_retry``, so a host where ``fork`` misbehaves
-    degrades to exactly the spawn-only behavior at the cost of one
-    wasted attempt.
+    ``fork`` is only safe from a single-threaded parent: a child
+    inherits every lock another thread held at the fork, held, with
+    no thread left to release it. So the gate is a thread-count check
+    at every pool build. It is not cached: ``close_pool`` joins each
+    pool's threads before the next build, so the CLI/MCP parent is
+    single-threaded at every build and keeps ``fork``, while a pool
+    whose teardown timed out leaves a thread behind and sends the next
+    build to ``spawn`` instead of into an inherited lock. The daemon
+    (its status thread runs for the whole request) never passes the
+    gate. Windows has no ``fork`` at all. ``DEKKO_POOL_START_METHOD``
+    is the escape hatch, consulted only when the safety gates would
+    allow ``fork``: ``spawn`` opts a problem host back out, ``fork`` is
+    an explicit default. A first-attempt failure under ``fork`` is
+    retried under ``spawn`` by ``run_pooled_with_retry``, so a host
+    where ``fork`` misbehaves degrades to exactly the spawn-only
+    behavior at the cost of one wasted attempt.
 
     Returns:
-        The freshly chosen context. Callers go through
-        ``_pool_mp_context``, which caches the first verdict for the
-        life of the process -- including this function's env-var read.
+        The multiprocessing context the next pool build should pass as
+        ``mp_context=``.
     """
     if sys.platform == "win32":
         return multiprocessing.get_context("spawn")
@@ -1185,6 +1190,52 @@ def _run_pool_bounded(
         raise
 
 
+def close_pool(pool: ProcessPoolExecutor) -> None:
+    """Shut a pool down and wait, bounded, for its threads and workers.
+
+    Every pool call site's ``finally``. A bare ``shutdown(wait=False)``
+    returns while the pool's manager thread is still joining workers
+    and closing its wakeup pipe under ``_ThreadWakeup._lock``; if the
+    next pool forks inside that window, each child inherits the lock
+    held and blocks on it forever at its own exit (``_python_exit``
+    wakes every manager it inherited). The new manager then waits on
+    that child, and the parent hangs at interpreter exit, after its
+    work is done. Joining the manager here leaves the parent
+    single-threaded before the next fork, and leaves nothing for
+    interpreter exit to wait on.
+
+    Not ``shutdown(wait=True)``: that is unbounded, and a wedged worker
+    would trade the exit hang for a mid-run one. Past
+    ``POOL_CLOSE_TIMEOUT_S`` the workers are killed, which ends the
+    manager's ``waitpid``; if the manager still lives after
+    ``POOL_CLOSE_KILL_GRACE_S``, it is left behind and
+    ``_pool_mp_context``'s thread gate sends the next pool to
+    ``spawn``. Never raises, since it runs in a ``finally`` that must
+    not mask the pass's own exception.
+
+    The manager thread and worker handles are read before
+    ``shutdown()``, which sets both attributes to ``None`` whatever
+    ``wait`` is. They are private ``concurrent.futures.process``
+    attributes, read without a fallback so a rename fails the real-pool
+    tests loudly instead of silently restoring the hang.
+
+    Args:
+        pool: The pool to close; it may have run nothing at all.
+    """
+    manager = pool._executor_manager_thread
+    procs = list((pool._processes or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    if manager is None:
+        return
+    manager.join(timeout=POOL_CLOSE_TIMEOUT_S)
+    if not manager.is_alive():
+        return
+    for proc in procs:
+        if proc.is_alive():
+            proc.kill()
+    manager.join(timeout=POOL_CLOSE_KILL_GRACE_S)
+
+
 # Worker-process-local copies of the shared, read-only indices every
 # resolution pass needs. Populated once per worker process (not once
 # per submitted chunk) by ``_init_resolve_worker``, so that
@@ -1241,6 +1292,7 @@ def _init_resolve_worker(
     _worker_imports_by_file = imports_by_file
     _worker_repo_stems = repo_stems
     _worker_symbols_by_id = symbols_by_id
+    _reset_walk_memo()
 
 
 def resolve(
@@ -1280,6 +1332,7 @@ def resolve(
     Returns:
         The resolved ``CallGraph`` with bidirectional adjacency.
     """
+    _reset_walk_memo()
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
     # One discovery pass feeds both the symbol-level passes (name ->
@@ -1297,6 +1350,9 @@ def resolve(
         _OriginLookup(import_ctx, by_name_path, files),
         _rust_crates(files, crates),
         _python_modules(files),
+        _RustPaths(
+            files, load_cargo_lib_roots(root) if root is not None else {}
+        ),
     )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
@@ -1477,6 +1533,7 @@ def _resolve_files_chunk(
                 external=external,
                 raw_imports=raw_imports,
                 stars=stars,
+                imports_by_file=imports_by_file,
             )
     return edges, ambiguous, external
 
@@ -1624,7 +1681,7 @@ def _resolve_all(
                 for key, lines in chunk_external.items():
                     external.setdefault(key, set()).update(lines)
         finally:
-            pool.shutdown(wait=False)
+            close_pool(pool)
         return edges, ambiguous, external
 
     return run_pooled_with_retry(_run, pool_workers, "call resolution")
@@ -1763,7 +1820,7 @@ def resolve_refs(
                 for key, lines in result.items():
                     edges.setdefault(key, set()).update(lines)
         finally:
-            pool.shutdown(wait=False)
+            close_pool(pool)
         return edges
 
     edges = run_pooled_with_retry(_run, pool_workers, "reference resolution")
@@ -1836,13 +1893,50 @@ def _resolve_ref(
         )
     ):
         edges.setdefault((caller_id, target.id), set()).add(ref.line)
+        ctor = _sole_referenced_constructor(ref, target, index, by_name_path)
+        if ctor is not None and ctor.id != caller_id:
+            edges.setdefault((caller_id, ctor.id), set()).add(ref.line)
+
+
+def _sole_referenced_constructor(
+    ref: RawRef,
+    target: Symbol,
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+) -> Symbol | None:
+    """The one constructor a Java ``X::new`` reference can mean.
+
+    A Java reference lands on a type only from ``X::new`` (``Foo::bar``
+    names a method). When ``X`` has exactly one constructor the site
+    can reach (an explicit one, or a record's canonical one), that is
+    the constructor the reference runs; with several, the functional
+    interface it is passed to picks, so only the type is referenced.
+
+    Args:
+        ref: The reference.
+        target: The symbol it resolved to.
+        index: Bare name → every symbol with it.
+        by_name_path: ``(bare name, file path)`` → same-file symbols.
+
+    Returns:
+        The constructor, or ``None``.
+    """
+    if target.language != "java" or not ref.path.endswith(".java"):
+        return None
+    ctors = [
+        c
+        for c in constructors_of(target, index, by_name_path)
+        if not jvm_unreachable(ref.path, c)
+    ]
+
+    return ctors[0] if len(ctors) == 1 else None
 
 
 _CONFTEST = "conftest.py"
 
 
 def _fixture_param_target(
-    ref: RawRef, candidates: list[Symbol]
+    ref: _Referable, candidates: list[Symbol]
 ) -> Symbol | None:
     """The pytest fixture a bound parameter stands for, if any.
 
@@ -1886,9 +1980,7 @@ def _fixture_param_target(
 # kind a local binding can shadow. Java's references are syntactic
 # ``Type::method`` and Go's are type identifiers: a wrong edge there is
 # an ordinary name collision, not this bug, and is left to the ladder.
-_REF_VISIBILITY_LANGUAGES = frozenset(
-    {"python", "javascript", "typescript", "tsx"}
-)
+_REF_VISIBILITY_LANGUAGES = languages.VALUE_NAMESPACE_LANGUAGES
 _JS_FAMILY = _LANGUAGE_FAMILIES["javascript"]
 _CPP_FAMILY = _LANGUAGE_FAMILIES["cpp"]
 
@@ -1965,6 +2057,47 @@ def _ref_target_visible(
         return is_script or target.path.endswith(".d.ts")
 
     return any(_module_matches(s.source, target.path) for s in stars or ())
+
+
+def _bare_call_is_param(call: RawCall) -> bool:
+    """Whether a bare call names one of its function's parameters.
+
+    ``makeC(requestCapability)`` returning ``() =>
+    requestCapability(..)`` calls whatever was passed in, never the
+    repo's own ``requestCapability``, so the call is external. Only
+    where a function's name is a value a parameter can shadow; Java's
+    ``run()`` beside a ``Runnable run`` parameter is still the method.
+    A called local is left alone: it usually holds the very function
+    it is named after (``const { run } = helpers; run()``), so the
+    ladder's by-name answer is often the right one.
+    """
+    return (
+        call.receiver is None
+        and call.bound == "param"
+        and _site_language(call.path) in _REF_VISIBILITY_LANGUAGES
+    )
+
+
+def _resolve_param_call(
+    call: RawCall,
+    caller_id: str,
+    index: dict[str, list[Symbol]],
+    edges: dict[tuple[str, str], set[int]],
+    external: dict[tuple[str, str], set[int]],
+) -> None:
+    """Record a bare call to a parameter: the pytest fixture the
+    parameter stands for, else external.
+
+    ``def test_b(make_repo): make_repo()`` calls what the
+    ``make_repo`` fixture returned; the edge to the fixture is how
+    ``affected`` reaches a test through it.
+    """
+    candidates = _language_filtered(call, index.get(call.name, []))
+    fixture = _fixture_param_target(call, candidates)
+    if fixture is not None and fixture.id != caller_id:
+        edges.setdefault((caller_id, fixture.id), set()).add(call.line)
+        return
+    external.setdefault((caller_id, call.text), set()).add(call.line)
 
 
 def _call_target_visible(
@@ -2789,7 +2922,7 @@ def resolve_throws(
                     external.setdefault(key, set()).update(lines)
                 bare.extend(c_bare)
         finally:
-            pool.shutdown(wait=False)
+            close_pool(pool)
         return edges, ambiguous, external, bare
 
     edges, ambiguous, external, bare = run_pooled_with_retry(
@@ -2925,7 +3058,7 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
             for chunk_sites in _run_pool_bounded(pool, futures):
                 sites.extend(chunk_sites)
         finally:
-            pool.shutdown(wait=False)
+            close_pool(pool)
         return sites
 
     sites = run_pooled_with_retry(_run, pool_workers, "catch resolution")
@@ -2945,15 +3078,23 @@ def _resolve_call(
     external: dict[tuple[str, str], set[int]],
     raw_imports: list[Import] | None = None,
     stars: list[Import] | None = None,
+    imports_by_file: dict[str, dict[str, Import]] | None = None,
 ) -> None:
     """Resolve one call and record it in the right bucket.
 
     ``stars`` is the calling file's Python star imports, for
-    ``_call_target_visible``.
+    ``_call_target_visible``. ``imports_by_file`` is every file's
+    import table, read by the receiver walk (``_call_walk``) to type a
+    field declared in another file.
     """
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
-    if _receiver_is_external(call, file_imports, repo_stems):
-        external.setdefault((caller_id, call.text), set()).add(call.line)
+    call = _rust_call_rewritten(call, symbols_by_id)
+    caller = symbols_by_id.get(call.caller_id or "")
+    ctx = _WalkCtx(index, by_name_path, imports_by_file or {}, repo_stems)
+    walk = _call_walk(call, caller, ctx)
+    if _settled_before_lookup(
+        call, caller_id, walk, index, file_imports, repo_stems, edges, external
+    ):
         return
 
     candidates = _language_filtered(call, index.get(call.name, []))
@@ -2979,7 +3120,7 @@ def _resolve_call(
         return
 
     same_file = by_name_path.get((call.name, call.path), [])
-    scoped = _written_scope_match(call, candidates, index)
+    scoped = _written_scope_match(call, candidates, index, same_file)
     if scoped is not None:
         if scoped.trusted and len(scoped.candidates) == 1:
             # The written path names the target's scopes outright; see
@@ -2996,14 +3137,17 @@ def _resolve_call(
             return
         candidates = scoped.candidates
         same_file = [s for s in same_file if s in candidates]
-    target = _within_scope(
+    walked, candidates, same_file = _walk_verdict(
+        walk, call, caller, candidates, same_file, ctx
+    )
+    target = walked or _within_scope(
         scoped,
         _pick_candidate(
             call,
             candidates,
             same_file,
             file_imports,
-            symbols_by_id.get(call.caller_id or ""),
+            caller,
             index,
             repo_stems,
             raw_imports,
@@ -3220,6 +3364,37 @@ def _resolution_language(language: str) -> str:
     return _RESOLUTION_LANGUAGE.get(language, language)
 
 
+def can_link_across(
+    line_language: str, target_language: str, target_kind: str
+) -> bool:
+    """Whether a call written in ``line_language`` may resolve to a
+    ``target_kind`` symbol in ``target_language``.
+
+    The same boundary ``_language_filtered`` applies to candidates,
+    for a caller that has to say why a line *can't* reach a symbol:
+    the language's family (``_LANGUAGE_FAMILIES``), narrowed to the
+    kinds a family's other languages may supply
+    (``_FAMILY_FOREIGN_KINDS``, Swift reaching only C functions).
+
+    Args:
+        line_language: The calling line's language.
+        target_language: The symbol's language.
+        target_kind: The symbol's kind.
+
+    Returns:
+        ``True`` when the resolver could link the two.
+    """
+    if line_language == target_language:
+        return True
+
+    family = _LANGUAGE_FAMILIES.get(line_language, frozenset({line_language}))
+    if target_language not in family:
+        return False
+
+    kinds = _FAMILY_FOREIGN_KINDS.get(line_language)
+    return kinds is None or target_kind in kinds
+
+
 def _language_filtered(
     call: _Referable, candidates: list[Symbol]
 ) -> list[Symbol]:
@@ -3415,9 +3590,15 @@ def _param_arity(params: list[Param]) -> tuple[int, int | None]:
         A parameter with ``has_default=True`` lowers the minimum
         without affecting the maximum; a plain required parameter
         raises both. Python's bare ``*``/``/`` syntax-marker params
-        are excluded entirely (see ``_ARITY_SYNTAX_MARKER_NAMES``).
+        are excluded entirely (see ``_ARITY_SYNTAX_MARKER_NAMES``), and so
+        is a Go receiver (``Param.receiver``): it is never written as an
+        argument.
     """
-    relevant = [p for p in params if p.name not in _ARITY_SYNTAX_MARKER_NAMES]
+    relevant = [
+        p
+        for p in params
+        if p.name not in _ARITY_SYNTAX_MARKER_NAMES and not p.receiver
+    ]
     min_count = sum(
         1 for p in relevant if not p.has_default and not p.variadic
     )
@@ -3493,6 +3674,44 @@ def _arity_plausible(
     if arg_count < min_count:
         return False
     return max_count is None or arg_count <= max_count
+
+
+def _rust_ufcs_arity_fits(candidate: Symbol, call: _Referable) -> bool:
+    """Whether a Rust path call's argument count fits ``candidate`` with
+    its ``self`` passed as the first argument.
+
+    ``_candidate_arity`` reads ``Type::name(..)`` as an associated
+    function, dropping a method's ``self``. That is the common case and
+    the reading that tells ``Store::update_global(cx, f)`` (an
+    associated fn) from a same-named ``&self`` method. A sole candidate
+    has no rival to tell apart, and a trait path passes ``self``
+    explicitly: ``text::ToOffset::to_offset(&anchor, snapshot)`` is two
+    arguments for ``to_offset(&self, snapshot)``.
+
+    Args:
+        candidate: The one remaining candidate.
+        call: The raw call being resolved.
+
+    Returns:
+        True for a Rust ``::`` path call whose count fits the
+        candidate's parameters, ``self`` included.
+    """
+    arg_count = getattr(call, "arg_count", None)
+    params = candidate.params
+    if (
+        arg_count is None
+        or candidate.language != "rust"
+        or not getattr(call, "receiver", None)
+        or _rust_is_dot_call(call)
+        or not params
+        or not _is_receiver_param(params[0], "rust")
+    ):
+        return False
+    min_count, max_count = _param_arity(params)
+
+    return min_count <= arg_count and (
+        max_count is None or arg_count <= max_count
+    )
 
 
 class _Noise:
@@ -3658,6 +3877,95 @@ def _pick_candidate_ladder(
 
 
 def _pick_candidate(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    file_imports: dict[str, Import],
+    caller: Symbol | None,
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None = None,
+    raw_imports: list[Import] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | _Noise | None:
+    """Pick a candidate, then let Java's package scope settle a tie.
+
+    ``_pick_candidate_retried`` runs the ladder. When it can't decide,
+    a Java construction or reference may still name its own package's
+    type (``_java_same_package_type``). See ``_pick_candidate_vetoed``
+    for every parameter.
+    """
+    picked = _pick_candidate_retried(
+        call,
+        candidates,
+        same_file,
+        file_imports,
+        caller,
+        index,
+        repo_stems,
+        raw_imports,
+        crate_roots,
+        tiebreak_hits,
+    )
+    if picked is not None:
+        return picked
+
+    return _java_same_package_type(call, candidates, file_imports)
+
+
+def _java_same_package_type(
+    call: _Referable,
+    candidates: list[Symbol],
+    file_imports: dict[str, Import],
+) -> Symbol | None:
+    """The one top-level type a Java ``new X(..)`` or reference names
+    through its own package, when the ladder left it undecided.
+
+    A simple type name in Java is, in order, a type in scope from the
+    enclosing classes, a single-type import, a type in the file's own
+    package, then an on-demand import (JLS 6.4.1, 7.5). No rung read
+    the third, so spring-boot's duplicated module copies (the ``jdbc``
+    and ``r2dbc`` ``MySqlEnvironment``, two ``JSONException``) left
+    785 constructions ambiguous between a type in the caller's package
+    and one elsewhere. Only a tie is settled: no pick the ladder makes
+    contradicts the rule, so a rung would decide nothing more. An
+    import of the name means the import rung already had its say.
+
+    Args:
+        call: The raw call or reference.
+        candidates: The candidates the ladder was given.
+        file_imports: The file's bound import names.
+
+    Returns:
+        The type, or ``None`` when the call isn't a Java construction
+        or reference, its file has no package dekko can read, or not
+        exactly one top-level Java type of the name is in its package.
+    """
+    if not call.path.endswith(".java") or call.name in file_imports:
+        return None
+    construction = (
+        isinstance(call, RawCall)
+        and call.receiver is None
+        and call.text.startswith("new ")
+    )
+    if not (construction or isinstance(call, RawRef)):
+        return None
+    package = jvm_package_dir(call.path)
+    if package is None:
+        return None
+    types = [
+        c
+        for c in candidates
+        if c.kind in TYPE_KINDS
+        and c.language == "java"
+        and "." not in c.qualname
+        and jvm_package_dir(c.path) == package
+    ]
+
+    return types[0] if len(types) == 1 else None
+
+
+def _pick_candidate_retried(
     call: _Referable,
     candidates: list[Symbol],
     same_file: list[Symbol],
@@ -3989,8 +4297,8 @@ def jvm_unreachable(site_path: str, candidate: Symbol) -> bool:
         return site_path != candidate.path
     if visibility != "package" or candidate.language != "java":
         return False
-    site_package = _jvm_package_dir(site_path)
-    own_package = _jvm_package_dir(candidate.path)
+    site_package = jvm_package_dir(site_path)
+    own_package = jvm_package_dir(candidate.path)
     return (
         site_package is not None
         and own_package is not None
@@ -4430,10 +4738,113 @@ class _Scoped:
     trusted: bool
 
 
+def _rust_inline_scope(caller_id: str | None) -> str:
+    """The inline modules a caller sits in, ``.``-joined: ``tests``
+    for ``app.rs::tests.t`` and ``app.rs::tests.Stub.make``; empty at
+    file level."""
+    qualname = (caller_id or "").split("::", 1)[-1] if caller_id else ""
+    scope: list[str] = []
+    for seg in qualname.split(".")[:-1]:
+        if not (seg.isidentifier() and seg[:1].islower()):
+            break
+        scope.append(seg)
+
+    return ".".join(scope)
+
+
+def _rust_written_path(call: _Referable) -> list[str] | None:
+    """The segments of a Rust ``a::B::name(..)`` call's written path
+    (``["a", "B"]``), or ``None`` for any other shape, or one rooted
+    at ``crate``/``self``/``super``/``Self``."""
+    receiver = getattr(call, "receiver", None)
+    if not receiver or not call.path.endswith(".rs"):
+        return None
+    if getattr(call, "text", None) != f"{receiver}::{call.name}":
+        return None
+    segs = receiver.split("::")
+    if segs[0] in ("crate", "self", "super", "Self"):
+        return None
+    if not all(_RUST_IDENT.fullmatch(seg) for seg in segs):
+        return None
+
+    return segs
+
+
+def _qualname_rest(qualname: str, tail: str) -> str | None:
+    """What precedes ``tail`` in ``qualname`` (``tests`` of
+    ``tests.Stub.make`` for ``Stub.make``), ``""`` when they are equal,
+    ``None`` when ``qualname`` doesn't end in ``tail``."""
+    if qualname == tail:
+        return ""
+    if qualname.endswith("." + tail):
+        return qualname[: -len(tail) - 1]
+
+    return None
+
+
+def _rust_same_file_path_match(
+    call: _Referable,
+    same_file: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> Symbol | None:
+    """The symbol of the caller's own file a Rust ``a::B::name`` path
+    names, among ``same_file`` (its same-named symbols).
+
+    A written path whose segments, plus the name, end a qualname in
+    the calling file names that symbol when the rest of the qualname
+    is an inline module the caller sits in (or nothing):
+    ``sys::DisplayLink::new`` is ``sys.DisplayLink.new`` though a macro
+    made ``DisplayLink`` and no type symbol carries it, and inside
+    ``mod tests`` a ``StubAgentServer::new`` is the test module's own
+    ``tests.StubAgentServer.new``. The innermost such symbol wins, as
+    an item shadows a glob import of its name. A one-segment type path
+    counts only when the file declares the type: ``String::from(..)``
+    next to the file's own ``impl From<X> for String`` is std's.
+
+    Returns:
+        The one symbol, or ``None``.
+    """
+    segs = _rust_written_path(call)
+    if segs is None:
+        return None
+    tail = ".".join([*segs, call.name])
+    scope = _rust_inline_scope(getattr(call, "caller_id", None))
+    found: dict[int, list[Symbol]] = {}
+    for cand in same_file:
+        rest = _qualname_rest(cand.qualname, tail)
+        if rest is None:
+            continue
+        if rest and scope != rest and not scope.startswith(rest + "."):
+            continue
+        one_type = len(segs) == 1 and segs[0][:1].isupper()
+        if one_type and not _rust_file_declares(
+            call.path, rest, segs[0], index
+        ):
+            continue
+        found.setdefault(len(rest), []).append(cand)
+    innermost = found[max(found)] if found else []
+
+    return innermost[0] if len(innermost) == 1 else None
+
+
+def _rust_file_declares(
+    path: str, scope: str, name: str, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether the file at ``path`` declares a type ``name`` in the
+    inline module ``scope`` (``""`` for file level)."""
+    qualname = f"{scope}.{name}" if scope else name
+
+    return any(
+        s.path == path and s.qualname == qualname and s.kind in TYPE_KINDS
+        for s in index.get(name, [])
+    )
+
+
 def _written_scope_match(
     call: _Referable,
     candidates: list[Symbol],
     index: dict[str, list[Symbol]],
+    same_file: list[Symbol] | None = None,
 ) -> _Scoped | None:
     """Narrow a C/C++ call by the scopes it's written through.
 
@@ -4447,9 +4858,16 @@ def _written_scope_match(
     is trusted, an outer-type path is not, and either rules out a pick
     off the path.
 
+    A Rust path that names a symbol of the caller's own file
+    (``_rust_same_file_path_match``, over ``same_file``: the
+    candidates in the calling file) is trusted too.
+
     Returns:
         ``None`` when no rule applies.
     """
+    local = _rust_same_file_path_match(call, same_file or [], index)
+    if local is not None:
+        return _Scoped([local], None, True)
     jvm = _jvm_written_type_match(call, candidates)
     if jvm is not None:
         return jvm
@@ -4616,7 +5034,7 @@ def _on_jvm_type_path(candidate: Symbol, path: _JvmTypePath) -> bool:
 
     return (
         candidate.language in ("java", "kotlin")
-        and _jvm_package_dir(candidate.path) == path.package
+        and jvm_package_dir(candidate.path) == path.package
         and qual == path.types
     )
 
@@ -4836,7 +5254,10 @@ def _sole_candidate_match(
         (only.kind in TYPE_KINDS and _class_named_constructors(only, index))
         or _constructed_by_count(only, call, index, file_imports or {})
         or (
-            _arity_plausible(only, call, index)
+            (
+                _arity_plausible(only, call, index)
+                or _rust_ufcs_arity_fits(only, call)
+            )
             and not _rust_name_is_also_a_variant(call, only, index)
         )
     ):
@@ -5602,6 +6023,1164 @@ def _typed_param_token_candidates(
     return tokens
 
 
+# ---------------------------------------------------------------------
+# The receiver walk
+#
+# The structural rungs type a receiver at depth zero only: ``self`` is
+# the caller's container, a typed parameter is its annotation, a
+# written ``Type`` is that type. A chained receiver (``self.hub.call()``,
+# ``ctl.hub.call()``, ``Type.field.call()``) is typed here by walking
+# its segments: hop zero is that same evidence, and each later segment
+# is a field (``Symbol.fields``) of the type reached so far. The walk
+# says ``typed`` (the types the receiver can be, outermost wrapper
+# first), ``foreign`` (a type outside the repo: the call is external)
+# or ``unknown`` (the ladder decides, as it did before).
+
+
+@dataclass(frozen=True)
+class WalkResult:
+    """What walking a chained receiver found.
+
+    Attributes:
+        kind: ``"typed"``, ``"foreign"`` or ``"unknown"``.
+        layers: For ``typed``, the in-repo types the receiver can be,
+            one tuple per layer of a wrapper chain (``Entity<View>`` is
+            ``Entity`` then ``View``), outermost first; each tuple holds
+            the same-named types the name could mean.
+        open: Whether a deeper layer is a type the walk can't read (a
+            type parameter), so a member missing from ``layers`` may
+            still be there.
+    """
+
+    kind: str
+    layers: tuple[tuple[Symbol, ...], ...] = ()
+    open: bool = False
+
+
+_WALK_UNKNOWN = WalkResult("unknown")
+_WALK_FOREIGN = WalkResult("foreign")
+
+_WALK_SEGMENT_SPLIT = re.compile(r"->|::|\.")
+# Languages whose methods use a field without ``this``; C has no
+# methods.
+_BARE_FIELD_LANGUAGES = frozenset({"java", "kotlin", "cpp"})
+_WALK_PLAIN_NAME = re.compile(r"[A-Za-z_$][\w$]*\Z")
+_WALK_SEGMENT = re.compile(r"[A-Za-z_$][\w$]*(?:\(\))?\Z|\d+\Z")
+# Calls that hand back what they're called on (a lock guard, a cell
+# borrow, an unwrap, an awaited future), so the type walks through.
+_WALK_TRANSPARENT_CALLS = frozenset(
+    {
+        "lock",
+        "read",
+        "write",
+        "borrow",
+        "borrow_mut",
+        "unwrap",
+        "expect",
+        "as_ref",
+        "as_mut",
+        "clone",
+        "deref",
+        "deref_mut",
+        "get_mut",
+        "unwrap_or_default",
+        "as_deref",
+    }
+)
+# A declared return type meaning "the type it's called on": Rust
+# ``Self``, TS ``this``, and the conventional self-bound type
+# parameter of a Java fluent builder.
+_WALK_SELF_RETURN = re.compile(r"\b(?:Self|this|SELF)\b")
+# A field type named by a nested-type path, ``ZipContent.Entry``.
+_WALK_DOTTED_TYPE = re.compile(r"[A-Z]\w*(?:\.[A-Z]\w*)+\Z")
+# The first generic or indexed head in a type text: ``list[`` /
+# ``std::vector<`` / ``map[``.
+_WALK_GENERIC_HEAD = re.compile(r"([A-Za-z_]\w*)\s*[<\[]")
+# A TS/JS/Python/Go type under a module binding, ``vscode.Uri``.
+_WALK_MODULE_HEAD = re.compile(r"([a-z_]\w*)\.([A-Z]\w*)")
+# A Rust type under a path, ``serde_json::Value``.
+_WALK_RUST_HEAD = re.compile(r"([a-z_]\w*)::(?:[a-z_]\w*::)*([A-Z]\w*)")
+_WALK_RUST_LOCAL_HEADS = frozenset({"crate", "self", "super"})
+_WALK_MODULE_HEAD_LANGUAGES = frozenset(
+    {"python", "go", "javascript", "typescript", "tsx"}
+)
+# Lowercase smart pointers whose methods are reached through ``->``.
+_WALK_LOWER_WRAPPERS = frozenset(
+    {"unique_ptr", "shared_ptr", "optional", "reference_wrapper"}
+)
+# Type texts that say nothing: the receiver could be anything.
+_WALK_OPEN_TEXTS = frozenset({"any", "unknown", "object", "Any", "dyn"})
+_WALK_SUPER_DEPTH = 4
+# The names a method's own receiver goes by, per language. ``this`` is
+# an ordinary identifier in Rust and Python (zed names closure
+# parameters ``this``), and Go names its receiver like a parameter.
+_WALK_SELF_NAMES: dict[str, frozenset[str]] = {
+    "python": frozenset({"self", "cls"}),
+    "rust": frozenset({"self", "Self"}),
+    "go": frozenset(),
+}
+_WALK_DEFAULT_SELF_NAMES = frozenset({"this"})
+# Members can live outside their type's file in these languages: a
+# Rust ``impl`` or Go method anywhere in the crate or package, a C++
+# out-of-line definition, a Kotlin extension.
+_WALK_SPREAD_MEMBER_LANGUAGES = frozenset({"c", "cpp", "kotlin"})
+
+# Reserved ``index`` namespace: ``_SUPERS_KEY + type id`` holds one
+# stand-in per supertype name the type declares, and ``_SUPERS_KEY +
+# "@" + name`` the same for a Rust ``impl Trait for Name`` the extractor
+# couldn't attach to a symbol (``RawHeritage.subtype_name``).
+_SUPERS_KEY = "::supers::"
+# Reserved ``index`` namespace: ``_SUBS_KEY + name`` holds every type
+# that declares a supertype called ``name`` (its implementors).
+_SUBS_KEY = "::subs::"
+
+# Per-process memos for the walk's lookups. Cleared at the start of
+# every ``resolve()`` and in each pool worker (``_reset_walk_memo``), so
+# none outlives the index it read.
+_WALK_FIELDS: dict[tuple[str, str], list[tuple[Field, Symbol]]] = {}
+_WALK_SUPERS: dict[str, list[Symbol]] = {}
+_WALK_TEXTS: dict[tuple[str, str], WalkResult] = {}
+_WALK_TOKENS: dict[tuple[str, str], tuple[Symbol, ...] | None] = {}
+_WALK_MEMBERS: dict[tuple[str, str, bool], list[Symbol]] = {}
+
+
+def _reset_walk_memo() -> None:
+    """Forget every walk lookup; the index they read is being replaced."""
+    for memo in (
+        _WALK_FIELDS,
+        _WALK_SUPERS,
+        _WALK_TEXTS,
+        _WALK_TOKENS,
+        _WALK_MEMBERS,
+    ):
+        memo.clear()
+
+
+class _WalkCtx(NamedTuple):
+    """The repo-wide tables the walk reads."""
+
+    index: dict[str, list[Symbol]]
+    by_name_path: dict[tuple[str, str], list[Symbol]]
+    imports_by_file: dict[str, dict[str, Import]]
+    repo_stems: set[str]
+
+
+def _index_supertypes(
+    files: list[FileMap], index: dict[str, list[Symbol]]
+) -> None:
+    """Record each type's declared supertype names and each name's
+    implementors (see ``_SUPERS_KEY``, ``_SUBS_KEY``)."""
+    for fm in files:
+        by_id = {sym.id: sym for sym in fm.symbols}
+        for clause in fm.heritage:
+            owner = clause.subtype_id or (
+                "@" + clause.subtype_name if clause.subtype_name else ""
+            )
+            if owner:
+                index.setdefault(_SUPERS_KEY + owner, []).append(
+                    _stand_in(clause.name, fm.path)
+                )
+            sub = by_id.get(clause.subtype_id)
+            if sub is not None:
+                index.setdefault(_SUBS_KEY + clause.name, []).append(sub)
+
+
+def _call_walk(
+    call: RawCall,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> WalkResult:
+    """Type a call's chained receiver by walking its segments.
+
+    A receiver of one segment (``self``, ``w``, ``Type``) is left to
+    the structural rungs, which already read it: the walk changes
+    nothing about a depth-zero call.
+
+    Args:
+        call: The raw call being resolved.
+        caller: Its enclosing symbol, or ``None`` at module level.
+        ctx: The repo-wide tables.
+
+    Returns:
+        The walk's verdict on the whole receiver; ``unknown`` when the
+        call has no chained receiver or its language has no fields.
+    """
+    spec = languages.spec_for_path(call.path)
+    if spec is None or spec.field_query is None:
+        return _WALK_UNKNOWN
+    segments = _walk_segments(call.receiver)
+    if segments is None:
+        return _walk_one_segment(call, caller, ctx)
+    nxt = segments[1] if len(segments) > 1 else None
+    result, at = _walk_hop_zero(segments[0], nxt, call, caller, ctx)
+    while at < len(segments) and result.kind == "typed":
+        nxt = segments[at + 1] if at + 1 < len(segments) else None
+        result, used = _walk_step(result, segments[at], nxt, ctx)
+        at += used
+    if result.kind == "foreign" and not _walk_only_transparent(segments[at:]):
+        # ``this.tasks.get(id).abort()`` on a ``Map``: the foreign hop
+        # hands back something the walk can't name, not something
+        # foreign.
+        return _WALK_UNKNOWN
+
+    return result
+
+
+def _settled_before_lookup(
+    call: RawCall,
+    caller_id: str,
+    walk: WalkResult,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+    edges: dict[tuple[str, str], set[int]],
+    external: dict[tuple[str, str], set[int]],
+) -> bool:
+    """Record a call the candidate ladder never sees, if this is one.
+
+    A bare call to a parameter (see ``_bare_call_is_param``), and a
+    call whose receiver is typed outside the repo or names an outside
+    import. Returns whether the call was recorded.
+    """
+    if _bare_call_is_param(call):
+        _resolve_param_call(call, caller_id, index, edges, external)
+        return True
+    if walk.kind == "foreign" or _receiver_is_external(
+        call, file_imports, repo_stems
+    ):
+        external.setdefault((caller_id, call.text), set()).add(call.line)
+        return True
+
+    return False
+
+
+def _walk_one_segment(
+    call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> WalkResult:
+    """A one-segment receiver: walked only when it is a bare field.
+
+    ``repository.findAll()`` in Java, Kotlin or C++ is a call on the
+    caller's field. Every other one-segment receiver (self, a typed
+    parameter, a type name) stays with the structural rungs.
+    """
+    receiver = call.receiver or ""
+    if not _WALK_PLAIN_NAME.match(receiver):
+        return _WALK_UNKNOWN
+    result, _ = _walk_bare_field(receiver, None, call, caller, ctx)
+
+    return result
+
+
+def _walk_bare_field(
+    first: str,
+    nxt: str | None,
+    call: RawCall,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """A receiver's first segment as a field used without ``this``.
+
+    Java, Kotlin and C++ methods read their type's fields bare. A name
+    the binding pass found no parameter or local for, and that isn't
+    the caller's own parameter, is looked up as a field of the caller's
+    container (own, then inherited). Anything else, a field without a
+    type included, is ``unknown``, which leaves the ladder as it was.
+    """
+    if (
+        _site_language(call.path) not in _BARE_FIELD_LANGUAGES
+        or call.bound is not None
+        or _walk_is_self(first, call.path)
+        or _walk_param(caller, first) is not None
+    ):
+        return _WALK_UNKNOWN, 1
+    container = _walk_container(caller, ctx)
+    if container.kind != "typed":
+        return _WALK_UNKNOWN, 1
+
+    return _walk_field(container, first, nxt, ctx)
+
+
+def _walk_only_transparent(segments: list[str]) -> bool:
+    """Whether every segment hands back what it's called on."""
+    return all(
+        seg == "await" or seg[:-2] in _WALK_TRANSPARENT_CALLS
+        for seg in segments
+    )
+
+
+def _walk_step(
+    result: WalkResult,
+    segment: str,
+    nxt: str | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """Step through one segment after hop zero.
+
+    A call goes through its declared return type, or keeps the type
+    when it hands back what it's called on (``lock()``, ``.await``).
+    ``X.this`` is ``X``; ``X.class`` is a ``Class`` object, outside the
+    repo. Any other name is a field, else a nested type.
+    """
+    if segment.endswith("()"):
+        name = segment[:-2]
+        if name in _WALK_TRANSPARENT_CALLS:
+            return result, 1
+        return _walk_call(result, name, ctx), 1
+    if segment in ("await", "this"):
+        return result, 1
+    if segment == "class":
+        return _WALK_FOREIGN, 1
+    stepped, used = _walk_field(result, segment, nxt, ctx)
+    if stepped.kind != "unknown" or not segment[:1].isupper():
+        return stepped, used
+
+    return _walk_nested(result, segment, ctx), 1
+
+
+def _walk_call(result: WalkResult, name: str, ctx: _WalkCtx) -> WalkResult:
+    """The type a call segment ``name()`` returns, or ``unknown``.
+
+    The member must be the walked type's (own, else a supertype's) and
+    carry a declared return type; same-named members must agree on it.
+    """
+    members = _walk_find_members(result, name, ctx) or []
+    texts = {m.returns for m in members}
+    if len(texts) != 1 or None in texts:
+        return _WALK_UNKNOWN
+    member = members[0]
+    text = member.returns or ""
+    if _WALK_SELF_RETURN.search(text):
+        owner = _walk_owner_layer(result, member)
+        return WalkResult("typed", (owner,)) if owner else _WALK_UNKNOWN
+
+    return _walk_type_text(text, member.path, ctx)
+
+
+def _walk_owner_layer(
+    result: WalkResult, member: Symbol
+) -> tuple[Symbol, ...]:
+    """The layer types ``member`` belongs to, for a ``Self`` return.
+
+    The walked type, not the supertype that declares the method: a
+    fluent builder's ``withX()`` inherited from its base still returns
+    the subtype the walk is on.
+    """
+    owner = member.qualname.rpartition(".")[0]
+    for layer in result.layers:
+        if any(t.qualname == owner for t in layer):
+            return layer
+
+    return result.layers[0] if result.layers else ()
+
+
+def _walk_nested(
+    result: WalkResult, segment: str, ctx: _WalkCtx
+) -> WalkResult:
+    """A nested type ``segment`` of the walked type (``Outer.Inner``)."""
+    for layer in result.layers:
+        quals = {f"{t.qualname}.{segment}" for t in layer}
+        found = tuple(
+            s
+            for s in ctx.index.get(segment, ())
+            if s.kind in TYPE_KINDS
+            and s.qualname in quals
+            and s.language == layer[0].language
+        )
+        if found:
+            return WalkResult("typed", (found,))
+
+    return _WALK_UNKNOWN
+
+
+def _walk_segments(receiver: str | None) -> list[str] | None:
+    """A chained receiver's segments, ``?``/``!`` dropped; else ``None``.
+
+    ``None`` for a one-segment receiver other than a bare call
+    (``getRepo()``), and for one with a segment the walk can't read (an
+    index, a call with arguments left in, a construction): those stay
+    with the ladder.
+    """
+    if not receiver:
+        return None
+    parts = [p.rstrip("?!") for p in _WALK_SEGMENT_SPLIT.split(receiver)]
+    if not all(_WALK_SEGMENT.match(p) for p in parts):
+        return None
+    if len(parts) < 2 and not parts[0].endswith("()"):
+        return None
+
+    return parts
+
+
+def _walk_hop_zero(
+    first: str,
+    nxt: str | None,
+    call: RawCall,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """Type a receiver's first segment: self, a parameter, a type, or
+    (Java, Kotlin, C++) a field used without ``this``.
+
+    Returns the result and how many segments it used: two for a
+    parameter with an inline object type (``input: { client: Client }``),
+    whose next segment names the member.
+    """
+    path = call.path
+    if _walk_is_self(first, path):
+        return _walk_container(caller, ctx), 1
+    if first.endswith("()"):
+        return _walk_bare_call(first[:-2], path, caller, ctx), 1
+    param = _walk_param(caller, first)
+    if param is not None:
+        return _walk_param_type(param, nxt, caller, ctx)
+    found = _walk_type_token(first, path, ctx)
+    if not found:
+        # A name the repo has no type for is a field, a local or a
+        # module alias, not a type outside the repo.
+        return _walk_bare_field(first, nxt, call, caller, ctx)
+
+    return WalkResult("typed", (found,)), 1
+
+
+def _walk_param_type(
+    param: Param,
+    nxt: str | None,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """A typed parameter at hop zero, an inline object type included."""
+    if param.type is None or caller is None:
+        return _WALK_UNKNOWN, 1
+    tokens = _object_type_field_tokens(param.type, f"{param.name}.{nxt}")
+    if tokens is None:
+        return _walk_type_text(param.type, caller.path, ctx), 1
+    if not tokens:
+        return _WALK_UNKNOWN, 2
+
+    return _walk_type_text(tokens[0][0], caller.path, ctx), 2
+
+
+def _walk_bare_call(
+    name: str,
+    path: str,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> WalkResult:
+    """A bare call at hop zero: a method of the caller's container, else
+    a same-file function, typed by its declared return type."""
+    container = _walk_container(caller, ctx)
+    if container.kind == "typed":
+        result = _walk_call(container, name, ctx)
+        if result.kind != "unknown":
+            return result
+    local = [
+        s
+        for s in ctx.by_name_path.get((name, path), ())
+        if s.kind == "function" and s.returns
+    ]
+    if len(local) != 1:
+        return _WALK_UNKNOWN
+
+    return _walk_type_text(local[0].returns or "", path, ctx)
+
+
+def _walk_is_self(name: str, path: str) -> bool:
+    """Whether ``name`` is the method's own receiver in ``path``'s language."""
+    language = _site_language(path) or ""
+
+    return name in _WALK_SELF_NAMES.get(language, _WALK_DEFAULT_SELF_NAMES)
+
+
+def _walk_param(caller: Symbol | None, name: str) -> Param | None:
+    """The caller's parameter called ``name`` (a TS ``x?`` included)."""
+    if caller is None:
+        return None
+    for param in caller.params:
+        if param.name.rstrip("?") == name:
+            return param
+    return None
+
+
+def _walk_container(caller: Symbol | None, ctx: _WalkCtx) -> WalkResult:
+    """The type ``self``/``this`` is inside ``caller``.
+
+    The nearest type up the caller's qualname: in the caller's file
+    first (a method in a nested function still finds its class), else
+    by name the way a type token is found (a Rust ``impl`` or C++
+    out-of-line method away from its type).
+    """
+    if caller is None:
+        return _WALK_UNKNOWN
+    parts = caller.qualname.split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        qual = ".".join(parts[:cut])
+        same = tuple(
+            s
+            for s in ctx.by_name_path.get((parts[cut - 1], caller.path), ())
+            if s.kind in TYPE_KINDS and s.qualname == qual
+        )
+        if same:
+            return WalkResult("typed", (same,))
+        found = _walk_type_token(parts[cut - 1], caller.path, ctx)
+        if found:
+            return WalkResult("typed", (found,))
+
+    return _WALK_UNKNOWN
+
+
+def _walk_field(
+    result: WalkResult,
+    segment: str,
+    nxt: str | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """Step through one field segment; returns the result and segments used.
+
+    The field is looked up on the outermost layer that declares it
+    (own fields, then supertypes'). Same-named types must agree on the
+    field's type text, and a field without one is ``unknown``. An
+    inline object type (``opts: { client: Foo }``) is resolved through
+    the next segment, which it consumes.
+    """
+    found: list[tuple[Field, Symbol]] = []
+    for layer in result.layers:
+        found = [
+            hit
+            for owner in layer
+            for hit in _walk_type_fields(owner, segment, ctx)
+        ]
+        if found:
+            break
+    texts = {f.type for f, _ in found}
+    if len(texts) != 1 or None in texts:
+        return _WALK_UNKNOWN, 1
+    field_row, owner = found[0]
+    text = field_row.type or ""
+    if not text.lstrip().startswith("{"):
+        return _walk_type_text(text, owner.path, ctx), 1
+    member = dict(_OBJECT_TYPE_FIELD.findall(text)).get(nxt or "")
+    if member is None:
+        return _WALK_UNKNOWN, 2
+
+    return _walk_type_text(member, owner.path, ctx), 2
+
+
+def _walk_type_fields(
+    owner: Symbol, name: str, ctx: _WalkCtx
+) -> list[tuple[Field, Symbol]]:
+    """``owner``'s field ``name``, else the nearest supertypes' (memoized)."""
+    key = (owner.id, name)
+    hit = _WALK_FIELDS.get(key)
+    if hit is None:
+        hit = _walk_type_fields_uncached(owner, name, ctx)
+        _WALK_FIELDS[key] = hit
+    return hit
+
+
+def _walk_type_fields_uncached(
+    owner: Symbol, name: str, ctx: _WalkCtx
+) -> list[tuple[Field, Symbol]]:
+    """``_walk_type_fields`` without the memo: breadth-first up supertypes."""
+    level = [owner]
+    seen = {owner.id}
+    for _ in range(_WALK_SUPER_DEPTH + 1):
+        found = [(f, t) for t in level for f in t.fields if f.name == name]
+        if found:
+            return found
+        level = [
+            s
+            for t in level
+            for s in _walk_supertypes(t, ctx)
+            if s.id not in seen
+        ]
+        seen.update(s.id for s in level)
+        if not level:
+            break
+    return []
+
+
+def _walk_supertypes(owner: Symbol, ctx: _WalkCtx) -> list[Symbol]:
+    """The in-repo types ``owner`` declares as its supertypes (memoized)."""
+    hit = _WALK_SUPERS.get(owner.id)
+    if hit is None:
+        names = [
+            s.name
+            for s in ctx.index.get(_SUPERS_KEY + owner.id, [])
+            + ctx.index.get(_SUPERS_KEY + "@" + owner.name, [])
+        ]
+        names += _go_embedded_types(owner)
+        hit = [
+            t
+            for name in names
+            for t in _walk_type_token(name, owner.path, ctx) or ()
+        ]
+        _WALK_SUPERS[owner.id] = hit
+    return hit
+
+
+def _go_embedded_types(owner: Symbol) -> list[str]:
+    """The types a Go struct embeds: their methods are its own."""
+    if owner.language != "go":
+        return []
+    return [
+        f.type
+        for f in owner.fields
+        if f.type and f.name == go_embedded_name(f.type)
+    ]
+
+
+def _walk_type_text(text: str, path: str, ctx: _WalkCtx) -> WalkResult:
+    """The types a declared type text names, read in ``path`` (memoized)."""
+    key = (path, text)
+    hit = _WALK_TEXTS.get(key)
+    if hit is None:
+        hit = _walk_type_text_uncached(text, path, ctx)
+        _WALK_TEXTS[key] = hit
+    return hit
+
+
+def _walk_type_text_uncached(
+    text: str, path: str, ctx: _WalkCtx
+) -> WalkResult:
+    """``_walk_type_text`` without the memo.
+
+    A sequence (``X[]``, ``[X]``, ``&[X]``), a lowercase generic head
+    (``list[X]``, ``std::vector<X>``, ``map[K]V``), a type under a
+    module or crate outside the repo, or a text with no in-repo token
+    is ``foreign``. A text that says nothing (``any``) is ``unknown``.
+    Otherwise each token of the wrapper chain
+    (``_typed_param_token_candidates``) that names an in-repo type
+    becomes a layer.
+    """
+    stripped = _walk_unwrapped(text.strip().lstrip("&*").strip())
+    if stripped is None:
+        return _WALK_FOREIGN
+    if stripped in _WALK_OPEN_TEXTS or not stripped:
+        return _WALK_UNKNOWN
+    if _WALK_DOTTED_TYPE.match(stripped):
+        return _walk_nested_type(stripped, path, ctx)
+    if _walk_head_is_foreign(stripped, path, ctx):
+        return _WALK_FOREIGN
+    layers: list[tuple[Symbol, ...]] = []
+    is_open = False
+    for token, _ in _typed_param_token_candidates(stripped):
+        found = _walk_type_token(token, path, ctx)
+        if found:
+            layers.append(found)
+        elif found is not None or _walk_is_type_parameter(token):
+            is_open = True
+    if layers:
+        return WalkResult("typed", tuple(layers), is_open)
+
+    return _WALK_UNKNOWN if is_open else _WALK_FOREIGN
+
+
+def _walk_unwrapped(text: str) -> str | None:
+    """``text`` past any lowercase smart pointer; ``None`` for a sequence.
+
+    ``None`` means the text is a sequence or a lowercase generic
+    container, whose methods are never the element type's.
+    """
+    while True:
+        if text.endswith("]") or text.startswith(("[", "&[")):
+            return None
+        head = _WALK_GENERIC_HEAD.search(text)
+        if head is None or not head.group(1)[:1].islower():
+            return text
+        if head.group(1) not in _WALK_LOWER_WRAPPERS:
+            return None
+        text = text[head.end() :].rstrip(">").strip()
+
+
+def _walk_head_is_foreign(text: str, path: str, ctx: _WalkCtx) -> bool:
+    """Whether ``text`` names its type through a module outside the repo.
+
+    ``vscode.Uri``, ``http.Client``, ``serde_json::Value``: the head is
+    an import from outside the repo, or (Rust) a crate the workspace
+    doesn't define. A transparent wrapper after the head
+    (``typing.Optional[Foo]``, ``std::sync::Arc<Foo>``) isn't judged:
+    its argument is the type.
+    """
+    language = _site_language(path)
+    if language == "rust":
+        head = _WALK_RUST_HEAD.match(text)
+        if head is None or head.group(2) in _TRANSPARENT_TYPE_WRAPPERS:
+            return False
+        name = head.group(1)
+        return not (
+            name in _WALK_RUST_LOCAL_HEADS
+            or _RUST_CRATE_KEY + name in ctx.index
+            or name in ctx.repo_stems
+        )
+    if language not in _WALK_MODULE_HEAD_LANGUAGES:
+        return False
+    head = _WALK_MODULE_HEAD.match(text)
+    if head is None or head.group(2) in _TRANSPARENT_TYPE_WRAPPERS:
+        return False
+    imp = ctx.imports_by_file.get(path, {}).get(head.group(1))
+
+    return imp is None or not _import_is_in_repo(imp, ctx.repo_stems)
+
+
+def _walk_nested_type(text: str, path: str, ctx: _WalkCtx) -> WalkResult:
+    """A dotted nested-type text (``ZipContent.Entry``), by qualname."""
+    last = text.rsplit(".", 1)[-1]
+    found = tuple(
+        s
+        for s in ctx.index.get(last, ())
+        if s.kind in TYPE_KINDS
+        and (s.qualname == text or s.qualname.endswith("." + text))
+    )
+    if not found:
+        return _WALK_FOREIGN
+    near = _walk_nearest(list(found), path)
+
+    return WalkResult("typed", (tuple(near),))
+
+
+def _walk_is_type_parameter(token: str) -> bool:
+    """``T``, ``K``, ``SELF``: a type parameter, never a foreign type."""
+    return len(token) == 1 or (token.isupper() and len(token) <= 5)
+
+
+def _walk_type_token(
+    token: str, path: str, ctx: _WalkCtx
+) -> tuple[Symbol, ...] | None:
+    """The in-repo types a bare type name means in ``path`` (memoized).
+
+    ``None`` when it names none: an import from outside the repo, a
+    name no repo type has, or (JS/TS) a name the file neither imports
+    nor defines, which is a global like the DOM's ``Request``. ``()``
+    when it names only a Rust ``type`` alias, which the walk can't see
+    through. Otherwise the types the import was followed to, else the
+    same-file types, else those nearest ``path``.
+    """
+    key = (path, token)
+    if key not in _WALK_TOKENS:
+        _WALK_TOKENS[key] = _walk_type_token_uncached(token, path, ctx)
+    return _WALK_TOKENS[key]
+
+
+def _walk_type_token_uncached(
+    token: str, path: str, ctx: _WalkCtx
+) -> tuple[Symbol, ...] | None:
+    """``_walk_type_token`` without the memo."""
+    language = _site_language(path)
+    imports = (
+        {}
+        if language in _WHOLE_FILE_IMPORT_LANGUAGES
+        else ctx.imports_by_file.get(path, {})
+    )
+    imp = imports.get(token)
+    if imp is not None and not _import_is_in_repo(imp, ctx.repo_stems):
+        return None
+    origins = tuple(
+        s for s in getattr(imp, "origins", ()) if s.kind in TYPE_KINDS
+    )
+    if origins:
+        # The import was followed to the file that declares it (JS/TS
+        # specifiers, Rust ``use`` paths): no guessing by name.
+        return origins
+    name = _imported_original_name(token, imp)
+    types = _language_filtered_at(
+        path,
+        [s for s in ctx.index.get(name, ()) if s.kind in TYPE_KINDS],
+        bare=False,
+    )
+    real = [
+        s
+        for s in types
+        if not (s.kind == "type_alias" and s.language == "rust")
+    ]
+    if not real:
+        return () if types else None
+    if language == "rust" and imp is not None:
+        real = _walk_in_import_crate(real, imp, path, ctx)
+    same = tuple(s for s in real if s.path == path)
+    if same:
+        return same
+    if language in _JS_FAMILY and imp is None:
+        return None
+
+    return tuple(_walk_nearest(real, path))
+
+
+def _walk_in_import_crate(
+    types: list[Symbol], imp: Import, path: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """The types in the crate a Rust ``use`` names (``language::Buffer``
+    is ``language``'s, not ``text``'s); all of them when none is there
+    (a re-export from a crate further down)."""
+    head = imp.source.split("::", 1)[0]
+    if head in _WALK_RUST_LOCAL_HEADS:
+        dirs = [_rust_crate_dir(path)]
+    else:
+        dirs = [s.path for s in ctx.index.get(_RUST_CRATE_KEY + head, ())]
+    kept = [
+        t
+        for t in types
+        if any(t.path.startswith(d.rstrip("/") + "/") for d in dirs if d)
+    ]
+
+    return kept or types
+
+
+def _imported_original_name(token: str, imp: Import | None) -> str:
+    """The name ``token`` was imported under, for a renaming import.
+
+    ``import { Widget as WD }`` binds ``WD`` to a type the repo calls
+    ``Widget``; the import's source ends in that original name.
+    """
+    if imp is None or not imp.source:
+        return token
+    original = _PATH_SPLIT.split(imp.source)[-1]
+    if original == token or not original[:1].isupper():
+        return token
+
+    return original
+
+
+def _walk_nearest(types: list[Symbol], path: str) -> list[Symbol]:
+    """The types sharing the longest directory prefix with ``path``."""
+    if len(types) < 2:
+        return types
+    here = path.split("/")
+
+    def shared(sym: Symbol) -> int:
+        n = 0
+        for a, b in zip(here, sym.path.split("/")):
+            if a != b:
+                break
+            n += 1
+        return n
+
+    best = max(shared(s) for s in types)
+
+    return [s for s in types if shared(s) == best]
+
+
+def _walk_find_members(
+    result: WalkResult,
+    name: str,
+    ctx: _WalkCtx,
+    implementors: bool = False,
+) -> list[Symbol] | None:
+    """The members a call ``name`` on ``result`` can reach, nearest first.
+
+    Each step runs over every layer, outermost first, before the next
+    step starts: the type's own members; then, unless a layer derefs
+    to a type the walk can't name (``None``), the members other crates
+    give it (``impl Trait for Type`` there), its supertypes' members,
+    and with ``implementors`` its implementors'. A wrapper's blanket
+    trait impl elsewhere (``impl ItemHandle for Entity<T>``) so never
+    beats the type it holds. Nothing found is ``None`` when the type
+    may still reach a member the walk can't see
+    (``_walk_may_reach_more``), else ``[]``.
+    """
+    found = _walk_members(result, name, ctx)
+    if found:
+        return found
+    if _walk_derefs(result, ctx):
+        return None
+    found = _walk_members(result, name, ctx, loose=True)
+    if not found:
+        found = _walk_climbed_members(result, name, ctx)
+    if not found and implementors:
+        found = _walk_implementor_members(result, name, ctx)
+    if not found and _walk_may_reach_more(result, name, ctx):
+        return None
+
+    return found
+
+
+def _walk_members(
+    result: WalkResult,
+    name: str,
+    ctx: _WalkCtx,
+    loose: bool = False,
+) -> list[Symbol]:
+    """Own members called ``name`` of the outermost layer that has any.
+
+    ``loose`` searches the members other crates give each layer instead
+    (see ``_walk_own_members``).
+    """
+    for layer in result.layers:
+        found = _walk_unique(
+            m
+            for owner in layer
+            for m in _walk_own_members(owner, name, ctx, loose)
+        )
+        if found:
+            return found
+    return []
+
+
+def _walk_unique(symbols: Iterable[Symbol]) -> list[Symbol]:
+    """``symbols`` without repeats: one impl reached through two
+    same-named types is still one member."""
+    seen: set[str] = set()
+    out: list[Symbol] = []
+    for sym in symbols:
+        if sym.id not in seen:
+            seen.add(sym.id)
+            out.append(sym)
+    return out
+
+
+def _walk_climbed_members(
+    result: WalkResult, name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """Supertype members called ``name``, outermost layer first."""
+    for layer in result.layers:
+        found = _walk_inherited_members(layer, name, ctx)
+        if found:
+            return found
+    return []
+
+
+def _walk_inherited_members(
+    layer: tuple[Symbol, ...], name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """``name`` on the nearest supertypes of ``layer`` that declare it."""
+    seen = {t.id for t in layer}
+    level = list(layer)
+    for _ in range(_WALK_SUPER_DEPTH):
+        level = [
+            s
+            for t in level
+            for s in _walk_supertypes(t, ctx)
+            if s.id not in seen
+        ]
+        if not level:
+            break
+        seen.update(s.id for s in level)
+        found = _walk_unique(
+            m for t in level for m in _walk_own_members(t, name, ctx)
+        )
+        if found:
+            return found
+    return []
+
+
+def _walk_own_members(
+    owner: Symbol,
+    name: str,
+    ctx: _WalkCtx,
+    loose: bool = False,
+) -> list[Symbol]:
+    """``owner``'s own members called ``name`` (memoized per type).
+
+    A member is ``<owner qualname>.<name>`` in ``owner``'s file, or
+    where its language puts members: anywhere in the crate (Rust), in
+    the package directory (Go), anywhere (C/C++, Kotlin). ``loose``
+    asks instead for the Rust members other crates give the type
+    (``_walk_is_trait_impl``).
+    """
+    key = (owner.id, name, loose)
+    hit = _WALK_MEMBERS.get(key)
+    if hit is None:
+        qual = f"{owner.qualname}.{name}"
+        local = _walk_is_trait_impl if loose else _walk_member_is_local
+        hit = [
+            c
+            for c in ctx.index.get(name, ())
+            if c.qualname == qual
+            and c.kind not in TYPE_KINDS
+            and local(c, owner, ctx)
+        ]
+        _WALK_MEMBERS[key] = hit
+    return hit
+
+
+def _walk_is_trait_impl(member: Symbol, owner: Symbol, ctx: _WalkCtx) -> bool:
+    """Whether a Rust ``member`` in another crate is a trait it implements
+    for ``owner`` there (``impl ToDisplayPoint for Point`` in
+    ``editor``), not a member of that crate's own same-named type."""
+    if owner.language != "rust" or member.language != "rust":
+        return False
+    crate = _rust_crate_dir(member.path)
+    if crate == _rust_crate_dir(owner.path):
+        return False
+
+    return not any(
+        t.kind in TYPE_KINDS
+        and t.language == "rust"
+        and _rust_crate_dir(t.path) == crate
+        for t in ctx.index.get(owner.name, ())
+    )
+
+
+def _walk_member_is_local(
+    member: Symbol, owner: Symbol, ctx: _WalkCtx
+) -> bool:
+    """Whether ``member`` can belong to ``owner`` given where both live."""
+    del ctx
+    if member.path == owner.path:
+        return True
+    if _resolution_language(member.language) != _resolution_language(
+        owner.language
+    ):
+        return False
+    if owner.language == "rust":
+        return _rust_crate_dir(member.path) == _rust_crate_dir(owner.path)
+    if owner.language == "go":
+        return posixpath.dirname(member.path) == posixpath.dirname(owner.path)
+
+    return owner.language in _WALK_SPREAD_MEMBER_LANGUAGES
+
+
+def _walk_verdict(
+    walk: WalkResult,
+    call: RawCall,
+    caller: Symbol | None,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    ctx: _WalkCtx,
+) -> tuple[Symbol | _Noise | None, list[Symbol], list[Symbol]]:
+    """Apply a walk to the ladder's inputs.
+
+    ``typed``: see ``_walk_typed_verdict``. ``unknown`` on a
+    ``self.field.name(..)`` chain: the caller's own container's ``name``
+    is dropped from the candidates, since a field of a type is not,
+    without a declared type saying so, the type itself.
+
+    Returns:
+        ``(target, candidates, same_file)``: the target is a symbol, the
+        ``_NOISE`` sentinel for "external", or ``None`` for the ladder
+        to decide among the (possibly narrowed) candidates.
+    """
+    if walk.kind == "typed":
+        return _walk_typed_verdict(walk, call, candidates, same_file, ctx)
+    own = _walk_self_field_members(call, caller, ctx)
+    if not own:
+        return None, candidates, same_file
+    ids = {m.id for m in own}
+
+    return (
+        None,
+        [c for c in candidates if c.id not in ids],
+        [s for s in same_file if s.id not in ids],
+    )
+
+
+def _walk_typed_verdict(
+    walk: WalkResult,
+    call: RawCall,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    ctx: _WalkCtx,
+) -> tuple[Symbol | _Noise | None, list[Symbol], list[Symbol]]:
+    """A typed receiver's members decide the call.
+
+    The members ``_walk_find_members`` reaches (an interface-typed
+    field dispatches to its implementors). One member is the target;
+    several go to the ladder as the only candidates, so its tiebreaks
+    pick among them and an ambiguous row names only them. None anywhere
+    means the method isn't in the repo: external, unless the type could
+    still reach one the walk can't see (the ladder decides then).
+    """
+    members = _walk_find_members(walk, call.name, ctx, implementors=True)
+    if members is None:
+        return None, candidates, same_file
+    if len(members) == 1:
+        return members[0], candidates, same_file
+    if members:
+        ids = {m.id for m in members}
+        return None, members, [s for s in same_file if s.id in ids]
+
+    return _NOISE, candidates, same_file
+
+
+def _walk_implementor_members(
+    walk: WalkResult, name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """``name`` on the types that implement the walked layer's types."""
+    for layer in walk.layers:
+        found = _walk_unique(
+            [
+                m
+                for owner in layer
+                for sub in ctx.index.get(_SUBS_KEY + owner.name, ())
+                if _resolution_language(sub.language)
+                == _resolution_language(owner.language)
+                for m in _walk_own_members(sub, name, ctx)
+            ]
+        )
+        if found:
+            return found
+    return []
+
+
+# Ways a type reaches methods it doesn't declare, which the walk can't
+# follow: a Rust ``Deref`` target, a Python ``__getattr__``, C/C++
+# (``operator->``, templates and macros fill members in), and a TS/JS
+# interface (``_walk_is_structural``).
+_WALK_DEREF_TRAITS = frozenset({"Deref", "DerefMut"})
+
+
+def _walk_may_reach_more(walk: WalkResult, name: str, ctx: _WalkCtx) -> bool:
+    """Whether a missing member may still be in the repo.
+
+    Besides a type that reaches members it doesn't declare, a ``name``
+    that is a *field* of the type is a callback slot
+    (``options.postStateToWebview()``): whatever fills it, often a repo
+    function of that name, is the callee, so the ladder decides.
+    """
+    if _walk_derefs(walk, ctx):
+        return True
+    for layer in walk.layers:
+        if any(_walk_type_fields(owner, name, ctx) for owner in layer):
+            return True
+        for owner in layer:
+            if owner.language in _CPP_FAMILY or _walk_is_structural(owner):
+                return True
+            if _walk_own_members(owner, "__getattr__", ctx):
+                return True
+    return False
+
+
+def _walk_derefs(walk: WalkResult, ctx: _WalkCtx) -> bool:
+    """Whether a layer is open or derefs to a type the walk can't name
+    (Rust ``impl Deref``: ``type Target`` isn't recorded)."""
+    if walk.open:
+        return True
+
+    return any(
+        s.name in _WALK_DEREF_TRAITS
+        for layer in walk.layers
+        for owner in layer
+        for s in ctx.index.get(_SUPERS_KEY + owner.id, [])
+    )
+
+
+def _walk_is_structural(owner: Symbol) -> bool:
+    """A TS/JS interface or type alias: any object of the right shape is
+    one, so an object literal can fill it and no ``implements`` names
+    it. Its members aren't symbols either."""
+    return owner.language in _JS_FAMILY and owner.kind in (
+        "interface",
+        "type_alias",
+    )
+
+
+def _walk_self_field_members(
+    call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> list[Symbol]:
+    """The container's own ``call.name`` when ``call`` is ``self.f.name()``."""
+    segments = _walk_segments(call.receiver)
+    if (
+        segments is None
+        or len(segments) < 2
+        or segments[1].endswith("()")
+        or not _walk_is_self(segments[0], call.path)
+    ):
+        # ``self.f().g()`` may well be fluent: ``f`` returning self.
+        return []
+    container = _walk_container(caller, ctx)
+
+    return _walk_members(container, call.name, ctx)
+
+
 def _receiver_type_match(
     call: _Referable,
     candidates: list[Symbol],
@@ -5724,7 +7303,12 @@ def _rust_shape_narrowed_candidates(
     )
     if owner is not None:
         return _rust_named_owner_narrowed(
-            call, candidates, same_file, index, owner
+            call,
+            candidates,
+            same_file,
+            index,
+            owner,
+            _rust_foreign_owner_crates(call, index, file_imports, owner),
         )
     in_crate = _rust_crate_path_narrowed(call, candidates, index, file_imports)
     if in_crate is not None:
@@ -5732,8 +7316,8 @@ def _rust_shape_narrowed_candidates(
         return in_crate, [c for c in same_file if c.id in keep], True
     if _rust_type_path_receiver(call, index):
         return (
-            _owned_by_receiver_type(call, candidates, index),
-            _owned_by_receiver_type(call, same_file, index),
+            _owned_by_receiver_type(call, candidates, index, file_imports),
+            _owned_by_receiver_type(call, same_file, index, file_imports),
             True,
         )
     if _rust_unknown_type_path(
@@ -5747,6 +7331,13 @@ def _rust_shape_narrowed_candidates(
         # mean. Anything less than that is left alone here on purpose,
         # see ``_pick_candidate``'s veto.
         return [], [], True
+    if _rust_is_bare_call(call):
+        # A method or associated function needs ``x.`` or ``Type::``;
+        # a bare ``new(cx)`` can only be a free function (or a
+        # closure, a macro-local: nothing in the repo).
+        kept = [c for c in candidates if c.kind != "method"]
+        if len(kept) < len(candidates):
+            return kept, [c for c in same_file if c.kind != "method"], True
     return candidates, same_file, False
 
 
@@ -5851,11 +7442,13 @@ def _rust_named_owner_narrowed(
     same_file: list[Symbol],
     index: dict[str, list[Symbol]],
     owner: str,
+    foreign: frozenset[str] = frozenset(),
 ) -> tuple[list[Symbol], list[Symbol], bool]:
     """``_rust_shape_narrowed_candidates`` for a path whose type an
     alias or a renaming ``use`` named: ``owner``'s own members, or
     nothing at all when the repo has no ``owner`` type and no member of
-    one (``FxHashMap``: external)."""
+    one (``FxHashMap``: external). ``foreign`` is as in
+    ``_owned_by_type``."""
     in_repo = any(s.kind in TYPE_KINDS for s in index.get(owner, []))
     if not in_repo and not any(
         _container_name(c) == owner for c in candidates
@@ -5863,8 +7456,8 @@ def _rust_named_owner_narrowed(
         return [], [], True
 
     return (
-        _owned_by_type(call, candidates, index, owner),
-        _owned_by_type(call, same_file, index, owner),
+        _owned_by_type(call, candidates, index, owner, foreign),
+        _owned_by_type(call, same_file, index, owner, foreign),
         True,
     )
 
@@ -5969,6 +7562,15 @@ def _rust_is_dot_call(call: _Referable) -> bool:
         return False
     text = getattr(call, "text", "") or ""
     return text.endswith(f".{call.name}")
+
+
+def _rust_is_bare_call(call: _Referable) -> bool:
+    """Whether ``call`` is a Rust call with no receiver: ``new(cx)``."""
+    return (
+        isinstance(call, RawCall)
+        and not call.receiver
+        and call.path.endswith(".rs")
+    )
 
 
 def _drop_free_functions(symbols: list[Symbol]) -> list[Symbol]:
@@ -6158,6 +7760,7 @@ def _owned_by_receiver_type(
     call: _Referable,
     candidates: list[Symbol],
     index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
 ) -> list[Symbol]:
     """Keep only candidates a ``Type::name`` path could actually mean.
 
@@ -6178,13 +7781,16 @@ def _owned_by_receiver_type(
     survives when its container is ``Type`` itself, or is a trait. A
     free function, an unrelated struct (``Enum::Variant(..)`` landing
     on a same-named struct), or another type's method cannot be the
-    target. Nothing left means no plausible repo target.
+    target. Nothing left means no plausible repo target. Neither can
+    a member of another type of that name
+    (``_rust_foreign_owner_crates``).
     """
     owner = _rust_type_path_receiver(call, index)
     if owner is None:
         return candidates
+    foreign = _rust_foreign_owner_crates(call, index, file_imports, owner)
 
-    return _owned_by_type(call, candidates, index, owner)
+    return _owned_by_type(call, candidates, index, owner, foreign)
 
 
 def _owned_by_type(
@@ -6192,9 +7798,15 @@ def _owned_by_type(
     candidates: list[Symbol],
     index: dict[str, list[Symbol]],
     owner: str,
+    foreign: frozenset[str] = frozenset(),
 ) -> list[Symbol]:
     """The candidates a path rooted at type ``owner`` could mean: its
-    own members, else a trait's (see ``_owned_by_receiver_type``)."""
+    own members, else a trait's (see ``_owned_by_receiver_type``).
+
+    A member of ``owner`` in a crate in ``foreign`` is another type
+    that happens to share the name (``_rust_foreign_owner_crates``),
+    so it is no member of this one.
+    """
     own: list[Symbol] = []
     via_trait: list[Symbol] = []
     for cand in candidates:
@@ -6202,7 +7814,8 @@ def _owned_by_type(
         if container_name is None:
             continue
         if container_name == owner:
-            own.append(cand)
+            if _rust_crate_dir(cand.path) not in foreign:
+                own.append(cand)
         elif any(sym.kind == "trait" for sym in index.get(container_name, [])):
             via_trait.append(cand)
     # The type's own members outrank another trait's defaults: the
@@ -6222,6 +7835,52 @@ def _owned_by_type(
     # impl sitting in the caller's own file).
     plausible = [c for c in kept if _arity_plausible(c, call, index)]
     return plausible or kept
+
+
+def _rust_foreign_owner_crates(
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+    owner: str,
+) -> frozenset[str]:
+    """The crates whose own ``owner`` type is not the one a Rust
+    ``Type::name`` path names.
+
+    The path's walk (``_RustPaths``, recorded on the file's import
+    table under ``_RUST_PATH_KEY``) finds the type it means, through
+    ``use`` bindings, ``pub use`` re-exports and globs: ``use
+    rope::Point;`` reaches ``rope/src/point.rs``'s ``Point`` through
+    ``rope.rs``'s ``pub use point::Point;``. A member of a type named
+    ``owner`` sitting in a crate that declares an ``owner`` of its own
+    is then a member of that other type (gpui's and terminal's
+    ``Point.new``: 1,909 ambiguous ``Point::new`` rows on zed), and
+    so is a derived member the path's type lacks (``sandbox``'s own
+    ``SandboxPermissions::default()`` landed on ``agent_settings``'s).
+    A member in a crate that declares no ``owner`` is an ``impl`` of
+    a foreign type and stays (``language``'s ``impl ToTsPoint for
+    rope::Point``), and trait members are never touched.
+
+    Returns:
+        Every crate (``_rust_crate_dir``) that declares a type named
+        ``owner`` and holds none of the path's types; empty when the
+        walk found nothing, or found an alias (whose type lives where
+        it points).
+    """
+    receiver = getattr(call, "receiver", None) or ""
+    key = _rust_path_key(receiver)
+    found = (file_imports or {}).get(_RUST_PATH_KEY + key) if key else None
+    if not isinstance(found, _RustOriginImport) or any(
+        o.kind == "type_alias" for o in found.origins
+    ):
+        return frozenset()
+    meant = {_rust_crate_dir(o.path) for o in found.origins}
+    declaring = {
+        _rust_crate_dir(s.path)
+        for s in index.get(owner, [])
+        if s.kind in TYPE_KINDS and s.language == "rust"
+    }
+
+    return frozenset(declaring - meant)
 
 
 def _typed_param_match(
@@ -6304,7 +7963,17 @@ def _typed_param_match(
     tokens = _object_type_field_tokens(param_type, call.receiver)
     if tokens is None:
         tokens = _typed_param_token_candidates(param_type)
+    rust = call.path.endswith(".rs")
     for token, is_parameterized in tokens:
+        # ``import { Widget as WD }``: the parameter says ``WD``, the
+        # type is ``Widget``. Rust renames go through its own path rules.
+        name = (
+            token
+            if rust
+            else _imported_original_name(
+                token, (file_imports or {}).get(token)
+            )
+        )
         # A Rust ``type`` alias doesn't open the gate:
         # ``type Result<T> = std::result::Result<T, Error>;`` is the
         # foreign generic container this gate exists to keep out, under
@@ -6312,15 +7981,15 @@ def _typed_param_match(
         if is_parameterized and not any(
             sym.kind in TYPE_KINDS
             and not (sym.kind == "type_alias" and sym.path.endswith(".rs"))
-            for sym in index.get(token, [])
+            for sym in index.get(name, [])
         ):
             continue
-        target_qual = f"{token}.{call.name}"
+        target_qual = f"{name}.{call.name}"
         matched = [c for c in candidates if c.qualname == target_qual]
         if len(matched) != 1:
             continue
         only = matched[0]
-        if call.path.endswith(".rs") and _rust_typed_match_looks_cross_crate(
+        if rust and _rust_typed_match_looks_cross_crate(
             call, only, token, index, file_imports, param_type
         ):
             continue
@@ -6895,6 +8564,10 @@ def _container_match(
         ``None`` when the receiver isn't self/this or the container
         doesn't narrow to exactly one candidate.
     """
+    if call.receiver not in _SELF_RECEIVERS:
+        # A chained ``self.field.name(..)`` is a call on the field, not
+        # on the container; the receiver walk types it.
+        return None
     container = _self_container(call, caller)
     if container is None:
         return None
@@ -7210,7 +8883,7 @@ def _kotlin_member_matches(source: str, candidate: Symbol) -> bool:
     if name != candidate.name or not package:
         return False
 
-    return _jvm_package_dir(candidate.path) == package.replace(".", "/")
+    return jvm_package_dir(candidate.path) == package.replace(".", "/")
 
 
 def _relative_js_tiebreak(
@@ -7445,6 +9118,8 @@ def _receiver_is_external(
         return True
     first = _PATH_SPLIT.split(call.receiver)[0]
     imp = file_imports.get(first)
+    if imp is None and _rust_path_head(call) == first:
+        imp = file_imports.get(_RUST_HEAD_KEY + first)
     if imp is None:
         return False
     return not _import_is_in_repo(imp, repo_stems)
@@ -7644,7 +9319,7 @@ def _repo_stems(files: list[FileMap]) -> set[str]:
         keys.update(file_keys)
         if fm.language != "kotlin" or not file_keys:
             continue
-        package = _jvm_package_dir(fm.path)
+        package = jvm_package_dir(fm.path)
         if package is None:
             continue
         for sym in fm.symbols:
@@ -8067,6 +9742,15 @@ _EXTENDS_KEY = "::extends::"
 # (``_rust_crate_path_dirs``).
 _RUST_RENAMED_KEY = "::rust-renamed::"
 _RUST_CRATE_KEY = "::rust-crate::"
+# Reserved import-table namespace: ``_RUST_PATH_KEY + "a::Type"`` holds
+# the ``_RustOriginImport`` of a type path the file's calls write
+# (``_RustPaths``, ``_rust_foreign_owner_crates``).
+_RUST_PATH_KEY = "::rust-path::"
+# Reserved import-table namespace: ``_RUST_HEAD_KEY + "serde_json"``
+# holds the ``_RustOutsideImport`` of a path head the file has no
+# binding for (``_rust_head_entries``). Only a call written
+# ``serde_json::..`` reads it, never a local ``serde_json.f()``.
+_RUST_HEAD_KEY = "::rust-head::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -8079,8 +9763,8 @@ _UNNAMED_CTOR_LANGUAGES = frozenset(_UNNAMED_CTOR_NAMES)
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
     ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
-    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY`` and
-    ``_RUST_RENAMED_KEY`` entries."""
+    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY``,
+    ``_RUST_RENAMED_KEY`` and ``_SUPERS_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -8099,6 +9783,7 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
             _index_cpp_using(entry, index)
     _index_cpp_declared(files, index)
     _index_constructions(files, index)
+    _index_supertypes(files, index)
     for name, original in sorted(rust_renames(files)):
         index.setdefault(_RUST_RENAMED_KEY + name, []).append(
             _stand_in(original)
@@ -8519,6 +10204,41 @@ _CARGO_MANIFESTS = frozenset({"Cargo.toml"})
 _CARGO_SECTION = re.compile(r"^\[([^\]]+)\]\s*$", re.M)
 _CARGO_NAME = re.compile(r'^name\s*=\s*"([^"]+)"', re.M)
 _CARGO_PATH_DEP = re.compile(r"^([\w-]+)\s*=\s*\{[^}\n]*\bpath\s*=", re.M)
+_CARGO_LIB_PATH = re.compile(r'^path\s*=\s*"([^"]+)"', re.M)
+
+
+def _cargo_manifests(
+    root: Path,
+) -> Iterator[tuple[str, list[tuple[str, str]]]]:
+    """Every ``Cargo.toml`` in the repo, as its directory and its
+    ``(section header, section body)`` pairs in file order.
+
+    Read with line regexes: Python 3.10 has no TOML parser and dekko
+    takes no dependencies.
+
+    Args:
+        root: Repository root.
+
+    Yields:
+        ``(manifest directory, sections)``, the directory repo-relative
+        (``""`` for the root).
+    """
+    for rel in walker.find_config_files(root, _CARGO_MANIFESTS):
+        try:
+            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        marks = [
+            (m.start(), m.group(1)) for m in _CARGO_SECTION.finditer(text)
+        ]
+        marks.append((len(text), ""))
+        yield (
+            _dirname(rel),
+            [
+                (section, text[start:end])
+                for (start, section), (end, _) in itertools.pairwise(marks)
+            ],
+        )
 
 
 def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
@@ -8533,9 +10253,7 @@ def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
     directory-convention index (``_rust_crate_roots_index_all``)
     misses crates whose directory differs from their name or whose
     ``[lib] path`` isn't ``src/lib.rs`` (14 of zed's 261), and a
-    missed crate here would turn its imports external. Read with line
-    regexes: Python 3.10 has no TOML parser and dekko takes no
-    dependencies.
+    missed crate here would turn its imports external.
 
     Args:
         root: Repository root.
@@ -8545,18 +10263,8 @@ def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
         root), empty for a repo with no ``Cargo.toml``.
     """
     crates: dict[str, set[str]] = {}
-    for rel in walker.find_config_files(root, _CARGO_MANIFESTS):
-        try:
-            text = (root / rel).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        where = _dirname(rel)
-        marks = [
-            (m.start(), m.group(1)) for m in _CARGO_SECTION.finditer(text)
-        ]
-        marks.append((len(text), ""))
-        for (start, section), (end, _) in itertools.pairwise(marks):
-            body = text[start:end]
+    for where, sections in _cargo_manifests(root):
+        for section, body in sections:
             if section in ("package", "lib"):
                 found = _CARGO_NAME.search(body)
                 if found:
@@ -8575,13 +10283,54 @@ def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
     return {name: frozenset(dirs) for name, dirs in crates.items()}
 
 
+def load_cargo_lib_roots(root: Path) -> dict[str, frozenset[str]]:
+    """Every library crate's name with the root file of its lib target.
+
+    The name is the ``[lib]`` name, else the ``[package]`` name, with
+    ``-`` read as ``_``; the root is ``[lib] path``, else
+    ``src/lib.rs``, beside the manifest. A crate path is walked from
+    its root (``_RustPaths``), and the directory convention can't find
+    a root outside ``src/``: zed's ``gpui_shared_string`` declares
+    ``path = "gpui_shared_string.rs"``, and the convention knew only a
+    lint fixture of that name, so 176 ``SharedString::new`` sites
+    walked into the fixture.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Crate name to root files (repo-relative, whether or not they
+        exist), empty for a repo with no library crate.
+    """
+    roots: dict[str, set[str]] = {}
+    for where, sections in _cargo_manifests(root):
+        named = dict(sections)
+        if "package" not in named and "lib" not in named:
+            continue
+        lib = named.get("lib", "")
+        found = _CARGO_NAME.search(lib) or _CARGO_NAME.search(
+            named.get("package", "")
+        )
+        if found is None:
+            continue
+        path = _CARGO_LIB_PATH.search(lib)
+        rel = path.group(1) if path else "src/lib.rs"
+        rel = rel.removeprefix("./")
+        roots.setdefault(found.group(1).replace("-", "_"), set()).add(
+            f"{where}/{rel}" if where else rel
+        )
+
+    return {name: frozenset(files) for name, files in roots.items()}
+
+
 def cargo_fingerprint(root: Path) -> str:
     """Digest of the repo's Rust crates, for cache invalidation.
 
     The cached call pass reads them to tell a ``use`` of a workspace
-    crate from one of an outside crate, and to narrow a
-    ``some_crate::name(..)`` path to that crate's directories. Adding
-    a crate or a path dependency, or renaming one, moves no source
+    crate from one of an outside crate, to narrow a
+    ``some_crate::name(..)`` path to that crate's directories, and to
+    walk a crate path from its lib root. Adding a crate or a path
+    dependency, renaming one, or moving a lib root moves no source
     file and no symbol.
 
     Args:
@@ -8594,7 +10343,11 @@ def cargo_fingerprint(root: Path) -> str:
     if not crates:
         return ""
     table = [[name, sorted(dirs)] for name, dirs in sorted(crates.items())]
-    return hashlib.sha256(json.dumps(table).encode()).hexdigest()
+    libs = [
+        [name, sorted(files)]
+        for name, files in sorted(load_cargo_lib_roots(root).items())
+    ]
+    return hashlib.sha256(json.dumps([table, libs]).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -8678,6 +10431,19 @@ def _rust_crates(
 class _RustOutsideImport(Import):
     """A Rust ``use`` rooted at a crate the repo doesn't have (see
     ``_RustCrates.outside``): external, whatever its segments match."""
+
+
+@dataclass
+class _RustOriginImport(Import):
+    """A Rust type path a file writes, with the types it names.
+
+    Attributes:
+        origins: The top-level type symbols the path reaches through
+            ``use`` bindings, ``pub use`` re-exports and globs (see
+            ``_RustPaths``).
+    """
+
+    origins: tuple[Symbol, ...] = ()
 
 
 @dataclass
@@ -9146,6 +10912,625 @@ class _OriginLookup:
         self._hop(path, module, original, seen, depth)
 
 
+# A plain Rust path segment.
+_RUST_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _rust_path_key(receiver: str) -> str:
+    """A Rust ``Type::name`` receiver as the path ``_RustPaths`` walks.
+
+    ``gpui::Point::<f32>`` gives ``gpui::Point``. Empty for anything
+    else: no type at the end, ``Self``, a qualified ``<T as Tr>`` form,
+    or an associated type (a type-shaped segment before the last).
+    """
+    receiver = receiver.strip()
+    if not receiver or receiver.startswith("<"):
+        return ""
+    segs = [
+        seg.strip()
+        for seg in _strip_template_args(receiver).split("::")
+        if seg.strip()
+    ]
+    if not segs or not segs[-1][:1].isupper() or segs[-1] == "Self":
+        return ""
+    if any(seg[:1].isupper() for seg in segs[:-1]):
+        return ""
+    if not all(_RUST_IDENT.fullmatch(seg) for seg in segs):
+        return ""
+
+    return "::".join(segs)
+
+
+# A type as a ``<T>`` or ``<T as Tr>`` receiver writes it: ``Vec<u8>``,
+# ``notify::RecommendedWatcher``.
+_RUST_WRITTEN_TYPE = re.compile(r"(?:\w+::)*\w+(?:<.*>)?")
+
+
+def _rust_qualified_type(receiver: str) -> str | None:
+    """The type of a whole ``<T>`` or ``<T as Tr>`` receiver: ``T``.
+
+    ``None`` unless the receiver is one ``<..>`` from end to end, and
+    for an associated type inside one (``<T::Summary as Summary>``):
+    ``<Cmd as LspCommand>::ProtoRequest`` names an associated type,
+    which only the trait solver knows.
+    """
+    receiver = receiver.strip()
+    if not receiver.startswith("<"):
+        return None
+    depth = 0
+    for i, char in enumerate(receiver):
+        depth += {"<": 1, ">": -1}.get(char, 0)
+        if depth == 0:
+            if i != len(receiver) - 1:
+                return None
+            break
+    inner = receiver[1:-1].strip()
+    written = inner.split(" as ", 1)[0].strip()
+    if not _RUST_WRITTEN_TYPE.fullmatch(written):
+        return None
+    segs = _strip_template_args(written).split("::")
+    if any(seg.strip()[:1].isupper() for seg in segs[:-1]):
+        # ``<T::Summary as Summary>``: an associated type, as above.
+        return None
+
+    return written
+
+
+def _rust_self_type(caller: Symbol | None) -> str | None:
+    """The type ``Self`` names inside ``caller``: its container as the
+    impl wrote it (``P`` of ``P.from``, ``ext::P`` of ``ext::P.from``,
+    the trait of a default method). ``None`` outside a type."""
+    if caller is None or "." not in caller.qualname:
+        return None
+    container = caller.qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+    if not container.rsplit("::", 1)[-1][:1].isupper():
+        return None
+
+    return container
+
+
+def _rust_call_rewritten(
+    call: RawCall, symbols_by_id: dict[str, Symbol]
+) -> RawCall:
+    """A Rust ``Self::name`` or ``<T>::name`` call written as the
+    ``T::name`` it means.
+
+    Neither shape reached the type narrowing: ``Self::new`` inside
+    ``impl From<..> for P`` and ``<Vec<_>>::new()`` carried every
+    ``new`` in the repo. Read as ``P::new`` and ``Vec<_>::new``, the
+    owner step, the walk and the unknown-type rule apply as they do to
+    a written ``Type::name``, and a ``Self::Variant(..)`` no longer
+    lands on a same-named struct. Anything else is returned as-is.
+    """
+    receiver = call.receiver
+    if not receiver or not call.path.endswith(".rs"):
+        return call
+    if call.text != f"{receiver}::{call.name}":
+        return call
+    if receiver == "Self":
+        written = _rust_self_type(symbols_by_id.get(call.caller_id or ""))
+    else:
+        written = _rust_qualified_type(receiver)
+    if written is None:
+        return call
+
+    return replace(call, receiver=written, text=f"{written}::{call.name}")
+
+
+class _Unbound:
+    """Sentinel: no module or ``use`` in scope binds a path's head."""
+
+
+_UNBOUND = _Unbound()
+
+
+class _RustPaths:
+    """Walks a Rust path to the items it names.
+
+    A path is followed module by module, the way rustc reads it: a
+    crate (its lib root from ``Cargo.toml``, else the directory
+    convention), ``crate``/``self``/``super``, a child module's file,
+    and finally the item, looked up in that module's own top level,
+    else through its ``use`` binding of the name (a ``pub use``
+    re-export, a rename undone), else through each of its globs. The
+    file-stem test the ladder runs instead reads ``rope::Point`` as a
+    bag of words; nothing followed ``rope.rs``'s ``pub use
+    point::Point;`` to the one ``Point`` it means.
+
+    Built once per resolve in the parent process; what it finds rides
+    to the pool workers on the import table (``_RUST_PATH_KEY``).
+
+    Attributes:
+        paths: Every mapped ``.rs`` file.
+    """
+
+    def __init__(
+        self,
+        files: list[FileMap],
+        lib_roots: dict[str, frozenset[str]] | None = None,
+    ) -> None:
+        self.paths = frozenset(
+            fm.path for fm in files if fm.path.endswith(".rs")
+        )
+        self._top: dict[tuple[str, str], list[Symbol]] = {}
+        self._inline: dict[str, set[str]] = {}
+        self._named: dict[str, dict[str, str]] = {}
+        self._globs: dict[str, list[str]] = {}
+        for fm in files:
+            if fm.path.endswith(".rs"):
+                self._add_file(fm)
+        self._libs = {
+            name: sorted(f for f in roots if f in self.paths)
+            for name, roots in (lib_roots or {}).items()
+        }
+        self._lib_files = sorted({f for v in self._libs.values() for f in v})
+        self._convention = _rust_crate_roots_index_all(self.paths)
+        self._roots: dict[str, str | None] = {}
+        self._scope: dict[tuple[str, str], str | None | _Unbound] = {}
+        self._pending: set[tuple[str, str]] = set()
+        self._binders: dict[tuple[str, str], str | None | _Unbound] = {}
+        self._binding: set[tuple[str, str]] = set()
+        self._found: dict[tuple[str, tuple[str, ...]], tuple[Symbol, ...]] = {}
+
+    def _add_file(self, fm: FileMap) -> None:
+        """Index one Rust file's top-level items, bindings and globs."""
+        inline = self._inline.setdefault(fm.path, set())
+        for sym in fm.symbols:
+            if "." not in sym.qualname:
+                self._top.setdefault((fm.path, sym.name), []).append(sym)
+            elif sym.qualname[:1].islower():
+                inline.add(sym.qualname.split(".", 1)[0])
+        named = self._named.setdefault(fm.path, {})
+        for imp in fm.imports:
+            if imp.name == "*":
+                self._globs.setdefault(fm.path, []).append(
+                    imp.source.removesuffix("::*")
+                )
+            elif imp.name and imp.name != "_":
+                named.setdefault(imp.name, imp.source)
+
+    def types_at(
+        self, importer: str, segs: tuple[str, ...]
+    ) -> tuple[Symbol, ...]:
+        """The type symbols the path ``segs`` names from ``importer``.
+
+        Args:
+            importer: The file the path is written in.
+            segs: The path's segments (``("rope", "Point")``).
+
+        Returns:
+            The top-level type-kind symbols found, empty when the path
+            leaves the repo or names nothing the walk can place.
+        """
+        key = (importer, segs)
+        found = self._found.get(key)
+        if found is None:
+            seen: dict[str, Symbol] = {}
+            for sym in self._at(importer, list(segs), 0, set()):
+                if sym.kind in TYPE_KINDS:
+                    seen.setdefault(sym.id, sym)
+            found = self._found[key] = tuple(seen.values())
+
+        return found
+
+    def _at(
+        self,
+        importer: str,
+        segs: list[str],
+        depth: int,
+        seen: set[tuple[str, str]],
+    ) -> list[Symbol]:
+        """The items a written path names from ``importer``."""
+        segs = [seg for seg in segs if seg]
+        if not segs:
+            return []
+        if len(segs) == 1:
+            return self._items(importer, segs[0], depth, seen)
+        module = self._module(importer, segs[:-1], depth)
+        if module is None:
+            return []
+
+        return self._items(module, segs[-1], depth, seen)
+
+    def _items(
+        self,
+        module: str,
+        name: str,
+        depth: int,
+        seen: set[tuple[str, str]],
+    ) -> list[Symbol]:
+        """What ``name`` means in the module file ``module``."""
+        if depth > _REEXPORT_DEPTH or (module, name) in seen:
+            return []
+        seen.add((module, name))
+        found = self._top.get((module, name))
+        if found:
+            return list(found)
+        source = self._named.get(module, {}).get(name)
+        if source is not None:
+            return self._at(module, source.split("::"), depth + 1, seen)
+        out: list[Symbol] = []
+        for glob in self._globs.get(module, ()):
+            target = self._module(module, glob.split("::"), depth + 1)
+            if target is not None and target != module:
+                out.extend(self._items(target, name, depth + 1, seen))
+
+        return out
+
+    def _module(
+        self, importer: str, segs: list[str], depth: int = 0
+    ) -> str | None:
+        """The file of the module ``segs`` names from ``importer``."""
+        if not segs:
+            return importer
+        current = self._head(importer, segs[0], depth)
+        for seg in segs[1:]:
+            if current is None:
+                return None
+            if seg == "super":
+                current = self._parent(current)
+            elif seg != "self":
+                current = self._child(current, seg)
+
+        return current
+
+    def _head(self, importer: str, head: str, depth: int) -> str | None:
+        """The module file a path's first segment names from
+        ``importer``, in Rust's order: ``crate``/``self``/``super``; a
+        module or ``use`` of the name in the file; the same reached
+        through its globs; last, a crate of that name.
+
+        Globs shadow crate names: collab's ``use super::*`` reaches
+        its ``extension`` table module, and ``extension::Entity`` is
+        that module's, not zed's ``extension`` crate's. An inline
+        ``mod m { .. }`` has no file to walk, so a head naming one
+        ends the walk.
+        """
+        if head == "crate":
+            return self._crate_root(importer)
+        if head == "self":
+            return importer
+        if head == "super":
+            return self._parent(importer)
+        found = self._scoped(importer, head, depth)
+        if found is not _UNBOUND:
+            return found
+
+        return self._crate_file(head, importer)
+
+    def _scoped(
+        self, module: str, head: str, depth: int
+    ) -> "str | None | _Unbound":
+        """What ``head`` names in ``module``'s scope, globs included;
+        ``_UNBOUND`` when nothing there binds it.
+
+        Memoized: every glob's own head is looked up the same way, so
+        without it the lookups fan out once per glob at every level. A
+        lookup already in progress (a glob cycle) reads as unbound.
+        """
+        key = (module, head)
+        if key in self._scope:
+            return self._scope[key]
+        if depth > _REEXPORT_DEPTH or key in self._pending:
+            return _UNBOUND
+        self._pending.add(key)
+        found = self._scoped_here(module, head, depth)
+        self._pending.discard(key)
+        self._scope[key] = found
+
+        return found
+
+    def _scoped_here(
+        self, module: str, head: str, depth: int
+    ) -> "str | None | _Unbound":
+        """``_scoped``'s lookup, unmemoized."""
+        if head in self._inline.get(module, ()):
+            return None
+        child = self._child(module, head)
+        if child is not None:
+            return child
+        bound = self._named.get(module, {}).get(head)
+        if bound is not None:
+            return self._module(module, bound.split("::"), depth + 1)
+        for glob in self._globs.get(module, ()):
+            target = self._module(module, glob.split("::"), depth + 1)
+            if target is None or target == module:
+                continue
+            found = self._scoped(target, head, depth + 1)
+            if found is not _UNBOUND:
+                return found
+
+        return _UNBOUND
+
+    def binder(self, importer: str, head: str) -> "str | None | _Unbound":
+        """Where a path head is bound in ``importer``'s scope.
+
+        Args:
+            importer: The file the path is written in.
+            head: The path's first segment.
+
+        Returns:
+            The file whose named ``use`` binds ``head``: ``importer``
+            itself, or one its globs reach (``use super::*`` reaching
+            the parent's ``use .. as acp``). ``None`` when a module of
+            the repo does: a child module's file, or an inline ``mod``
+            of a file on the way. ``_UNBOUND`` when nothing in scope
+            binds it.
+        """
+        return self._binder(importer, head, 0)
+
+    def _binder(
+        self, module: str, head: str, depth: int
+    ) -> "str | None | _Unbound":
+        """``binder``, memoized the way ``_scoped`` is."""
+        key = (module, head)
+        if key in self._binders:
+            return self._binders[key]
+        if depth > _REEXPORT_DEPTH or key in self._binding:
+            return _UNBOUND
+        self._binding.add(key)
+        found = self._binder_here(module, head, depth)
+        self._binding.discard(key)
+        self._binders[key] = found
+
+        return found
+
+    def _binder_here(
+        self, module: str, head: str, depth: int
+    ) -> "str | None | _Unbound":
+        """``_binder``'s lookup, unmemoized."""
+        if head in self._inline.get(module, ()):
+            return None
+        if self._child(module, head) is not None:
+            return None
+        if head in self._named.get(module, {}):
+            return module
+        for glob in self._globs.get(module, ()):
+            target = self._module(module, glob.split("::"), depth + 1)
+            if target is None or target == module:
+                continue
+            found = self._binder(target, head, depth + 1)
+            if found is not _UNBOUND:
+                return found
+
+        return _UNBOUND
+
+    def _crate_root(self, path: str) -> str | None:
+        """The root file of the crate ``path`` belongs to: the nearer of
+        the convention's (``_rust_crate_root``) and a ``Cargo.toml`` lib
+        root above it."""
+        if path in self._roots:
+            return self._roots[path]
+        best = None
+        base = _rust_crate_root(path, self.paths)
+        if base is not None:
+            best = next(
+                (
+                    f"{base}/{n}"
+                    for n in _rust_crate_root_index_names(base, self.paths)
+                    if f"{base}/{n}" in self.paths
+                ),
+                None,
+            )
+        for root in self._lib_files:
+            where = _dirname(root)
+            inside = not where or path.startswith(where + "/")
+            if inside and (best is None or len(where) > len(_dirname(best))):
+                best = root
+        self._roots[path] = best
+
+        return best
+
+    def _parent(self, path: str) -> str | None:
+        """The file of ``path``'s parent module."""
+        root = self._crate_root(path)
+        if root == path:
+            return None
+        directory, _, name = path.rpartition("/")
+        if name == "mod.rs":
+            directory = _dirname(directory)
+        if directory:
+            for cand in (f"{directory}.rs", f"{directory}/mod.rs"):
+                if cand in self.paths:
+                    return cand
+        if root is not None and _dirname(root) == directory:
+            return root
+
+        return None
+
+    def _child(self, path: str, seg: str) -> str | None:
+        """The file of module ``seg`` declared in the module at ``path``."""
+        if (
+            self._crate_root(path) == path
+            or path.rpartition("/")[2] == "mod.rs"
+        ):
+            directory = _dirname(path)
+        else:
+            directory = path.removesuffix(".rs")
+        prefix = f"{directory}/" if directory else ""
+        for cand in (f"{prefix}{seg}.rs", f"{prefix}{seg}/mod.rs"):
+            if cand in self.paths:
+                return cand
+
+        return None
+
+    def _crate_file(self, name: str, importer: str) -> str | None:
+        """The root file of the crate ``name``, seen from ``importer``.
+
+        ``Cargo.toml``'s lib root first. Two crates of one name (a real
+        one and a lint fixture copy) take the importer's own, else the
+        one sole root that doesn't look synthetic
+        (``_looks_like_synthetic_crate_root``); with no manifest, the
+        directory convention.
+        """
+        roots = self._libs.get(name)
+        if roots:
+            if len(roots) == 1:
+                return roots[0]
+            own = _rust_crate_dir(importer)
+            mine = [r for r in roots if _rust_crate_dir(r) == own]
+            if len(mine) == 1:
+                return mine[0]
+            real = [
+                r
+                for r in roots
+                if not _looks_like_synthetic_crate_root(_rust_crate_dir(r))
+            ]
+            return real[0] if len(real) == 1 else None
+        dirs = self._convention.get(name) or []
+        base = (
+            dirs[0]
+            if len(dirs) == 1
+            else _prefer_non_synthetic_crate_root(dirs, importer)
+            if dirs
+            else None
+        )
+        if base is None:
+            return None
+
+        return next(
+            (
+                f"{base}/{n}"
+                for n in _rust_crate_root_index_names(base, self.paths)
+                if f"{base}/{n}" in self.paths
+            ),
+            None,
+        )
+
+
+def _rust_written_calls(fm: FileMap) -> list[RawCall]:
+    """One Rust file's calls, each as ``_rust_call_rewritten`` reads it."""
+    symbols = {sym.id: sym for sym in fm.symbols}
+
+    return [_rust_call_rewritten(call, symbols) for call in fm.calls]
+
+
+def _rust_path_entries(
+    fm: FileMap, rust_paths: _RustPaths
+) -> dict[str, _RustOriginImport]:
+    """The ``_RUST_PATH_KEY`` entries of one Rust file's import table:
+    each ``Type::name`` path its calls write, with the types the walk
+    finds. A path the walk can't place gets no entry."""
+    out: dict[str, _RustOriginImport] = {}
+    tried: set[str] = set()
+    for call in _rust_written_calls(fm):
+        receiver = call.receiver
+        if not receiver or receiver in tried:
+            continue
+        if f"{receiver}::" not in (call.text or ""):
+            continue
+        tried.add(receiver)
+        key = _rust_path_key(receiver)
+        if not key or _RUST_PATH_KEY + key in out:
+            continue
+        origins = rust_paths.types_at(fm.path, tuple(key.split("::")))
+        if origins:
+            out[_RUST_PATH_KEY + key] = _RustOriginImport(
+                path=fm.path, name=key, source=key, origins=origins
+            )
+
+    return out
+
+
+_RUST_PRIMITIVES = frozenset(
+    {
+        "bool",
+        "char",
+        "str",
+        "f32",
+        "f64",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+    }
+)
+
+
+def _rust_path_head(site: RawCall | RawHeritage) -> str | None:
+    """The lowercase head of a call or heritage clause written as a
+    path: ``serde_json`` of ``serde_json::from_value(..)``.
+
+    ``None`` for ``crate``/``self``/``super``, for a turbofish
+    (``find_method::<T>(..)`` names a function, not a module) and for
+    anything not written ``head::..``: a local ``regex.is_match(..)``
+    is no path, whatever crate shares its name.
+    """
+    head = (site.receiver or "").split("::", 1)[0]
+    if not (head[:1].islower() and head.isidentifier()):
+        return None
+    if head in ("crate", "self", "super"):
+        return None
+    text = (site.text or "").lstrip()
+    if not text.startswith(f"{head}::") or text.startswith(f"{head}::<"):
+        return None
+
+    return head
+
+
+def _rust_path_heads(fm: FileMap) -> set[str]:
+    """Every ``_rust_path_head`` of one Rust file's calls and heritage
+    clauses."""
+    return {
+        head
+        for site in (*_rust_written_calls(fm), *fm.heritage)
+        if (head := _rust_path_head(site)) is not None
+    }
+
+
+def _rust_head_entries(
+    fm: FileMap,
+    tables: dict[str, dict[str, Import]],
+    rust_paths: _RustPaths,
+    rust_crates: _RustCrates | None,
+) -> dict[str, _RustOutsideImport]:
+    """A ``_RustOutsideImport`` for each path head of one Rust file
+    that names nothing in the repo.
+
+    The file's own ``use`` of an outside crate is already one (see
+    ``_imports_by_file``). A head with no binding in the file is
+    outside when what binds it through the file's globs is (``use
+    super::*`` reaching the parent's ``use ext::v1 as acp``), or when
+    nothing in scope binds it and it is a primitive type or names no
+    crate and no module (``_RustCrates.outside``). An inline ``mod``,
+    a child module or an in-repo binding keeps the head in-repo, and
+    nothing is added for it.
+    """
+    table = tables.get(fm.path, {})
+    out: dict[str, _RustOutsideImport] = {}
+    for head in sorted(_rust_path_heads(fm)):
+        if head in table:
+            continue
+        where = rust_paths.binder(fm.path, head)
+        if where is None:
+            continue
+        probe = Import(path=fm.path, name=head, source=head)
+        if isinstance(where, str):
+            found = tables.get(where, {}).get(head)
+            if not isinstance(found, _RustOutsideImport):
+                continue
+            probe = Import(path=found.path, name=head, source=found.source)
+        elif not (
+            rust_crates.outside(probe)
+            if rust_crates is not None
+            else head in _RUST_PRIMITIVES
+        ):
+            continue
+        out[_RUST_HEAD_KEY + head] = _RustOutsideImport(
+            path=probe.path, name=head, source=probe.source
+        )
+
+    return out
+
+
 _RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
 
 
@@ -9377,6 +11762,7 @@ def _imports_by_file(
     lookup: _OriginLookup | None = None,
     rust_crates: _RustCrates | None = None,
     python_modules: _PythonModules | None = None,
+    rust_paths: _RustPaths | None = None,
 ) -> dict[str, dict[str, Import]]:
     """Map file path → local name → import record.
 
@@ -9387,18 +11773,22 @@ def _imports_by_file(
     ``_OriginLookup``). ``rust_crates``, when given, turns every Rust
     ``use`` of an outside crate into a ``_RustOutsideImport``.
     ``python_modules``, when given, turns every Python import of a
-    module the repo doesn't have into a ``_DanglingImport``. With
-    none of them, every record is left as-is.
+    module the repo doesn't have into a ``_DanglingImport``.
+    ``rust_paths``, when given, adds each Rust file's walked type paths
+    (``_rust_path_entries``) and its path heads that name nothing in
+    the repo (``_rust_head_entries``). With none of them, every record
+    is left as-is.
 
-    A Python star import binds no name, so it stays out of the table.
+    A Python or Rust glob binds no name, so it stays out of the table.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
         used = _member_names(fm) if lookup is not None else {}
         python = fm.path.endswith(_PY_EXTENSIONS)
+        rust = fm.path.endswith(".rs")
         for imp in fm.imports:
-            if imp.name in table or (python and imp.name == "*"):
+            if imp.name in table or ((python or rust) and imp.name == "*"):
                 continue
             if (
                 python
@@ -9430,8 +11820,33 @@ def _imports_by_file(
             table[imp.name] = _workspace_tagged(
                 imp, workspace_pkgs, origins, members
             )
+    if rust_paths is not None:
+        _add_rust_path_entries(files, out, rust_paths, rust_crates)
 
     return out
+
+
+def _add_rust_path_entries(
+    files: list[FileMap],
+    tables: dict[str, dict[str, Import]],
+    rust_paths: _RustPaths,
+    rust_crates: _RustCrates | None,
+) -> None:
+    """Add every Rust file's ``_rust_path_entries`` and
+    ``_rust_head_entries`` to its table.
+
+    A pass of its own, after every table is built: a head bound
+    through a glob is looked up in the table of the file that binds
+    it.
+    """
+    rust = [fm for fm in files if fm.path.endswith(".rs")]
+    heads = {
+        fm.path: _rust_head_entries(fm, tables, rust_paths, rust_crates)
+        for fm in rust
+    }
+    for fm in rust:
+        tables[fm.path].update(_rust_path_entries(fm, rust_paths))
+        tables[fm.path].update(heads[fm.path])
 
 
 def _member_names(fm: FileMap) -> dict[str, set[str]]:
@@ -10842,18 +13257,62 @@ def _resolve_import_rust(
     ``_rust_local_module_base``'s plain file-existence test — no
     ``mod``-declaration parsing, so an inline ``mod x { ... }`` (no
     file) is correctly untouched.
+
+    A glob (``a::*``) names module ``a`` itself, so only the full-path
+    reading applies (``_rust_glob_module``). A glob or ``self::`` path
+    that lands on the importing file is no dependency: the extractor
+    writes a ``use super::*`` inside ``mod tests {}`` as ``self::``.
     """
     segs = imp.source.split("::")
+    glob = segs[-1] == "*"
+    if glob:
+        segs = segs[:-1]
     if not segs:
         return None
+    base, rest, at_crate_root = _rust_use_base(segs, importer_path, ctx)
+    if glob:
+        found = _rust_glob_module(base, rest, ctx.paths)
+        return None if found == importer_path else found
+    if base is None or not rest:
+        return None
+    # A nested package directory's own index file is always mod.rs —
+    # lib.rs/main.rs (or a custom-named crate root, see
+    # _rust_crate_root_index_names) only ever names the crate root
+    # itself, reached here when ``base`` is a crate root (``crate::``
+    # or a cross-crate import) and ``rest``/``rest[:-1]`` is empty.
+    # Trying every applicable index name whenever the remaining
+    # segment list is empty covers both shapes without needing to
+    # track "is base the crate root" separately.
+    index_names = (
+        _rust_crate_root_index_names(base, ctx.paths)
+        if at_crate_root
+        else _RUST_INDEX_NAMES
+    )
+    full = _dir_module_candidates(base, rest, ".rs", index_names)
+    dropped = _dir_module_candidates(base, rest[:-1], ".rs", index_names)
+    found = _resolve_two_candidate_lists(ctx.paths, full, dropped)
+    if found == importer_path and segs[0] == "self":
+        return None
 
+    return found
+
+
+def _rust_use_base(
+    segs: list[str], importer_path: str, ctx: _ImportResolveContext
+) -> tuple[str | None, list[str], bool]:
+    """Where a Rust ``use`` path's head puts it.
+
+    Returns:
+        ``(base directory, segments left under it, whether the base is
+        a crate root)``; the base is ``None`` for an outside crate.
+    """
     at_crate_root = False
     if segs[0] == "crate":
         base = _rust_crate_root(importer_path, ctx.paths)
         rest = segs[1:]
         at_crate_root = True
     elif segs[0] in ("self", "super"):
-        base = _rust_self_base(importer_path)
+        base = _rust_path_self_base(segs[0], importer_path, ctx.paths)
         i = 0
         while i < len(segs) and segs[i] == "super":
             base = _dirname(base)
@@ -10879,24 +13338,50 @@ def _resolve_import_rust(
         rest = segs[1:]
         at_crate_root = True
 
-    if base is None or not rest:
+    return base, rest, at_crate_root
+
+
+def _rust_path_self_base(
+    head: str, importer_path: str, paths: frozenset[str]
+) -> str:
+    """The directory a ``self::``/``super::`` path starts from.
+
+    ``_rust_self_base``, except that ``self`` in a crate root named
+    after its crate (``src/auto_update_helper.rs``) is the root's own
+    directory, as for ``lib.rs``. The extractor writes ``use
+    super::dialog::f`` inside the root's ``mod windows_impl {}`` as
+    ``self::dialog::f``, which has to reach ``src/dialog.rs``.
+    """
+    own_dir = _dirname(importer_path)
+    own_name = importer_path.rsplit("/", 1)[-1]
+    if (
+        head == "self"
+        and own_dir
+        and own_name in _rust_crate_root_index_names(own_dir, paths)
+    ):
+        return own_dir
+
+    return _rust_self_base(importer_path)
+
+
+def _rust_glob_module(
+    base: str | None, rest: list[str], paths: frozenset[str]
+) -> str | None:
+    """The file of the module a Rust glob names: ``rest`` under
+    ``base``, or ``base``'s own module when ``rest`` is empty (``use
+    super::*``: ``a.rs``, ``a/mod.rs``, or the crate root in ``a``)."""
+    if base is None:
         return None
-    # A nested package directory's own index file is always mod.rs —
-    # lib.rs/main.rs (or a custom-named crate root, see
-    # _rust_crate_root_index_names) only ever names the crate root
-    # itself, reached here when ``base`` is a crate root (``crate::``
-    # or a cross-crate import) and ``rest``/``rest[:-1]`` is empty.
-    # Trying every applicable index name whenever the remaining
-    # segment list is empty covers both shapes without needing to
-    # track "is base the crate root" separately.
-    index_names = (
-        _rust_crate_root_index_names(base, ctx.paths)
-        if at_crate_root
-        else _RUST_INDEX_NAMES
+    if rest:
+        return _first_match(
+            paths, _dir_module_candidates(base, rest, ".rs", _RUST_INDEX_NAMES)
+        )
+    names = _rust_crate_root_index_names(base, paths)
+    own = [f"{base}.rs"] if base else []
+
+    return _first_match(
+        paths, own + _dir_module_candidates(base, [], ".rs", names)
     )
-    full = _dir_module_candidates(base, rest, ".rs", index_names)
-    dropped = _dir_module_candidates(base, rest[:-1], ".rs", index_names)
-    return _resolve_two_candidate_lists(ctx.paths, full, dropped)
 
 
 def _resolve_import_java(
@@ -11232,7 +13717,7 @@ def _kotlin_package_members(
     for fm in files:
         if fm.language != "kotlin":
             continue
-        package = _jvm_package_dir(fm.path)
+        package = jvm_package_dir(fm.path)
         if package is None:
             continue
         for name in {s.name for s in fm.symbols if "." not in s.qualname}:
@@ -11240,7 +13725,7 @@ def _kotlin_package_members(
     return index
 
 
-def _jvm_package_dir(path: str) -> str | None:
+def jvm_package_dir(path: str) -> str | None:
     """A JVM file's directory under its source root: its package path.
 
     ``core/x/src/main/kotlin/org/a/F.kt`` → ``org/a``; ``""`` for the

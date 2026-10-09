@@ -997,7 +997,8 @@ def test_ambiguous_test_caller_is_a_note_not_an_impact(
     # Possible impacts never change the exit status.
     assert cli.main(["affected", "--root", str(root)]) == 0
     out = capsys.readouterr().out
-    assert "no impacted tests" in out
+    assert "no certain impacted tests vs " in out
+    assert "; 1 possible ('--possible' lists them)" in out
     assert "note: 1 more test file(s) call changed code" in out
     assert "src/handler.test.ts -> createMessage, 2 candidates" in out
     assert "--possible lists them" in out
@@ -1093,3 +1094,35 @@ def test_possible_ranks_the_test_beside_the_code_first() -> None:
         near,
         far,
     ]
+
+
+def test_a_comment_only_edit_says_a_file_changed(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    app = root / "src/app.py"
+    app.write_text(app.read_text() + "# a note\n")
+    assert cli.main(["affected", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "no impacted tests vs " in out
+    assert "(1 file(s) changed, no symbol in them changed" in out
+
+
+def test_a_clean_tree_mentions_no_change(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    assert cli.main(["affected", "--root", str(root)]) == 0
+    assert "changed" not in capsys.readouterr().out
+
+
+def test_affected_json_counts_changed_files_and_symbols(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    app = root / "src/app.py"
+    app.write_text(app.read_text() + "# a note\n")
+    cli.main(["affected", "--root", str(root), "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["changed_files"] == 1
+    assert doc["changed_symbols"] == 0

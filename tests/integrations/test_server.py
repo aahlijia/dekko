@@ -1860,15 +1860,18 @@ def test_impacted_tests_tool_defaults_budget(
         limit,  # noqa: ANN001
         budget=None,  # noqa: ANN001
         jobs=None,  # noqa: ANN001
+        no_regen=None,  # noqa: ANN001
     ) -> int:
         seen["budget"] = budget
         seen["jobs"] = jobs
+        seen["no_regen"] = no_regen
         print("impacted")
         return 0
 
     monkeypatch.setattr(server.affected, "run", fake_run)
     assert _call(ctx, "impacted_tests", {})["isError"] is False
     assert seen["budget"] == server.affected.DEFAULT_BUDGET
+    assert seen["no_regen"] is False
     # Never the function's own sequential default.
     assert seen["jobs"] == (os.cpu_count() or 1)
 
@@ -2545,3 +2548,82 @@ def test_a_note_added_in_a_session_shows_on_its_later_calls(
             {"symbol": "f", "include_tests": include_tests},
         )["content"][0]["text"]
         assert "NOTE-AFTER-LOAD" in text
+
+
+def test_the_unknown_argument_error_lists_what_else_works() -> None:
+    with pytest.raises(server.ToolError) as excinfo:
+        server._reject_unknown_args("get_callers", {"limt": 3})
+    message = str(excinfo.value)
+    assert "accepted: symbol, sites, budget, include_tests, root" in message
+    assert "also honored: limit" in message
+    assert "'name', 'target', 'type' work for 'symbol'" in message
+    assert "did you mean 'limit'?" in message
+
+
+def test_a_tool_with_nothing_unadvertised_has_no_also_clause() -> None:
+    with pytest.raises(server.ToolError) as excinfo:
+        server._reject_unknown_args("impacted_tests", {"bogus": 1})
+    assert "also" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("tool", sorted(server._HANDLERS))
+def test_every_accepted_argument_is_named_in_the_error(tool: str) -> None:
+    with pytest.raises(server.ToolError) as excinfo:
+        server._reject_unknown_args(tool, {"bogus": 1})
+    message = str(excinfo.value)
+    for name in server._allowed_args(tool):
+        assert f"{name}" in message, name
+
+
+@pytest.mark.parametrize("value", [False, "false", "FALSE", "False"])
+def test_a_false_boolean_is_false_in_any_spelling(
+    make_mapped_repo: RepoFactory, value: object
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    plain = _call(ctx, "get_callers", {"symbol": "f"})
+    spelled = _call(ctx, "get_callers", {"symbol": "f", "sites": value})
+    assert spelled == plain
+
+
+def test_a_true_string_is_true(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    real = _call(ctx, "get_callers", {"symbol": "f", "sites": True})
+    spelled = _call(ctx, "get_callers", {"symbol": "f", "sites": "true"})
+    assert spelled == real
+
+
+@pytest.mark.parametrize("value", ["yes", "no", 1, 0, []])
+def test_a_boolean_argument_rejects_other_values(
+    make_mapped_repo: RepoFactory, value: object
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, "get_callers", {"symbol": "f", "sites": value})
+    assert result["isError"] is True
+    assert "argument 'sites' must be a boolean" in result["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("map_status", {}),
+        ("query_symbol", {"symbol": "f"}),
+        ("summary", {}),
+    ],
+)
+def test_a_root_that_does_not_exist_is_an_error(
+    tmp_path: Path, tool: str, arguments: dict
+) -> None:
+    ctx = _ctx(tmp_path)
+    missing = tmp_path / "nonexistent"
+    result = _call(ctx, tool, {**arguments, "root": str(missing)})
+    assert result["isError"] is True
+    assert f"root '{missing}' does not exist" in result["content"][0]["text"]
+
+
+def test_a_root_that_is_a_file_says_so(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    file_root = tmp_path / "a.py"
+    file_root.write_text("x = 1\n")
+    result = _call(ctx, "map_status", {"root": str(file_root)})
+    assert result["isError"] is True
+    assert "is not a directory" in result["content"][0]["text"]

@@ -9,6 +9,743 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-10-09
+
+Closes the fix cycle 1.8.0 left open: the round 1.8 findings it carried
+forward, and what their round-close gates turned up on seven real
+repositories. The code is 1.8.26; this release is the version line
+catching up, per `CONTRIBUTING.md`'s "Testing rounds and the version
+line". All 26 fixes, by area:
+
+- **Java and Kotlin construction (1.8.1-1.8.4)**: a record's canonical
+  constructor is a symbol, `X::new` is a reference to `X`, a type tie
+  is settled by the caller's own package (spring-boot +1,495 call
+  sites, none lost), and a Kotlin `f<T>(x)` is a call, not two
+  comparisons.
+- **Rust paths (1.8.5-1.8.8)**: `use` paths and globs are walked to the
+  type they name, a path whose head the repo doesn't have is external,
+  `uses <crate>` finds a crate called by path (zed `serde_json` 36
+  sites -> 1,963), and `Self::name`, `<T>::name` and bare calls get the
+  same narrowing. Callers of zed's `Point.new`: 16 -> 569.
+- **Calls through fields (1.8.9-1.8.10)**: `map.json` records each
+  type's fields, and a call through a field, with or without `this`,
+  reaches the field's type. Ambiguous rows: spring-boot 61,299 ->
+  45,316, zed 83,424 -> 75,139. A bare call to a parameter no longer
+  lands on a repo function of that name.
+- **`dekko map` no longer hangs at exit (1.8.11)** after writing the
+  map on Python 3.12+.
+- **`sanity` explains what it finds (1.8.12-1.8.16, 1.8.26)**: comments,
+  strings, same-named locals, type mentions and other languages' lines
+  are labeled as such, qualified calls carry the resolver's verdict,
+  and test-only symbols are checked. zed `WorkflowInput.bool`
+  unexplained rows 2,394 -> 0; cline "no record" rows 5,967 -> 257.
+- **CLI and MCP edges (1.8.17-1.8.22)**: `./` paths and `path:id#N` ids
+  resolve, `query --lang` narrows any target, `search` puts an exact
+  name first, `diff` has a `--budget`, MCP booleans are booleans, a
+  missing `root` is an error, and a closed pipe ends quietly on
+  Windows.
+- **The prompt-submit hook (1.8.23)** lists files only through the
+  prompt's own words, not every recently changed file (1,108 on
+  cline).
+- **A stale map costs `diff` and `affected` one re-map (1.8.24)**, not
+  one per call (tensorflow 27 s per call -> 7.8 s after the first).
+- **A map written by a newer dekko loads in an older one (1.8.25)**, so
+  a long-running MCP server no longer crashes on a newer map's keys.
+
+## [1.8.26] — 2026-10-09
+
+### Fixed
+- **`sanity` reads a test file's calls from the whole map.** By default
+  the dekko side of `sanity` leaves test files out, and the map's
+  verdict on each line (an external call, an ambiguous one) was read
+  from that same test-free view, so every qualified call in a test file
+  said "qualified call the map has no record of", even a call of the
+  target itself that the map recorded. Those rows now carry the map's
+  verdict, and a recorded call of the target says "likely filtered by
+  default --no-tests". cline `--all`: "no record" rows 5,967 → 257
+  (+3,341 recorded ambiguous, +1,575 recorded external, +794 filtered
+  by the test default); the unexplained count is unchanged.
+
+## [1.8.25] — 2026-10-09
+
+### Fixed
+- **A map written by a newer dekko loads in an older one.** A key this
+  build doesn't know on a parameter, field or import (1.8.9 added
+  `receiver` to parameters) raised `TypeError` and failed the whole
+  read, so an MCP server older than the map crashed on every call until
+  it was restarted. Unknown keys are now ignored. From this release on;
+  a server already older than 1.8.9 still needs a restart.
+
+## [1.8.24] — 2026-10-09
+
+### Performance
+- **A stale map costs `diff` and `affected` one re-map, not one per
+  call.** On a stale map both commands re-mapped the whole tree in
+  memory and threw the result away, so every call paid it again (27 s
+  each on tensorflow, 2.9 s on cline) until something else rewrote the
+  map. They now write that re-map as the map, like every other read
+  command, and the next call of any kind takes the fresh path (7.8 s
+  and ~0.7 s). The write reuses the re-map they already built, so it
+  costs the render alone; the first stale call on tensorflow goes from
+  27 s to about 41 s. A `workset` right after a stale `diff` no longer
+  re-maps the tree a second time either.
+- `diff` and `affected` take `--no-regen` to answer from memory and
+  leave a stale map on disk as it is. A tree with no map yet, a map
+  another process is regenerating, an outdated long-lived process (an
+  MCP server older than the installed dekko), and a read-only checkout
+  (one `note:`) are never written either.
+
+### Fixed
+- **`workset` compares against the same commit as `diff`.** With a
+  commit since the last map, `diff` and `affected` default to the
+  commit the map was built at, but `workset` regenerated first and then
+  read the *new* map's commit (HEAD), so it showed only the uncommitted
+  part of the change.
+- **MCP `workset` honors `dekko serve --no-regen`.** It regenerated a
+  stale map regardless; `impacted_tests` now passes the setting on too.
+
+## [1.8.23] — 2026-10-09
+
+### Fixed
+- **The prompt-submit hook lists files only through the prompt's
+  words.** Recently changed files got a relevance score of their own
+  (1,108 on cline, 831 on zed), so every prompt, code or not, listed
+  the busiest of them: "tell me a joke" pinned five hubs. Recent and
+  diff files now only rank the files a prompt word matches, and the
+  question words `search` ignores ("what", "how", ...) don't match.
+- **Fixture copies rank after the real definitions** in the hook's
+  `(defines ...)` lines: zed's `evals/fixtures/.../before.rs` copy of
+  `editor.rs` no longer comes before the gpui example.
+
+## [1.8.22] — 2026-10-09
+
+### Fixed
+- **A closed pipe ends the command quietly on Windows too.** Windows
+  reports a write to a pipe whose reader went away as `OSError`
+  `EINVAL`, not `BrokenPipeError`, so 1.8.20's guard missed it there;
+  on Windows that errno now reads as a closed pipe as well.
+
+## [1.8.21] — 2026-10-09
+
+### Fixed
+- **The MCP unknown-argument error lists every argument that works.**
+  It suggested `limit` for `get_callers {"limt": 3}` while its
+  `accepted:` list left `limit` out, so an agent could drop a working
+  argument. Arguments a tool honors without advertising them, and the
+  target aliases, now follow as `also honored: ...`; the schemas are
+  unchanged.
+- **MCP booleans are booleans.** `"false"` was read as true. A JSON
+  boolean or the string `"true"`/`"false"` (any case) is accepted;
+  anything else is an error naming the argument.
+- **A `root` that doesn't exist is an MCP error.** `map_status {"root":
+  "/nonexistent"}` answered "no map.json ... (call refresh_map)" as a
+  normal result; every tool now says the root doesn't exist (or isn't
+  a directory).
+
+## [1.8.20] — 2026-10-09
+
+### Fixed
+- **`diff` has a budget.** It had no cap: `diff HEAD~500` on cline
+  printed 2 MB. `--budget TOKENS` (default 4,000, `0` for no cap) keeps
+  changed symbols first, then added and removed, with an `N of M
+  omitted` footer; `--json` gets `meta`.
+- **`affected` says what it saw when nothing is certain.** With only
+  possible impacts it now reads `no certain impacted tests ...; N
+  possible`, and after an edit that changed no symbol (a comment,
+  whitespace, top-level code) it says how many files changed, instead
+  of a bare "no impacted tests" that read as "safe". `--json` gets
+  `changed_files` and `changed_symbols`.
+- **The symlink note counts code files only.** A symlinked
+  `LICENSE-GPL` or `AGENTS.md` can't hold a symbol, yet zed's 262 of
+  them put a 600-character note on every empty reply. Takes effect on
+  the next `dekko map`.
+- **A closed pipe ends the command quietly.** `dekko lean | head`
+  printed a `BrokenPipeError` traceback; it now exits 141 with nothing
+  on stderr.
+
+## [1.8.19] — 2026-10-09
+
+### Fixed
+- **`search` puts an exact name first.** A one-word query that is a
+  symbol's name (or a dotted query matching its qualname) now ranks it
+  ahead of busier partial matches, exact case first: claude-code
+  `search Text` listed the `Text` component 60th because nothing calls
+  it.
+- **`search --limit 0` no longer prints `(no matches)`** above `N of N
+  omitted`; the marker now means nothing scored.
+- **`deps` lists missing in-repo imports as `unresolved`**, not beside
+  npm packages under `external`: a relative `./types/message.js` whose
+  file doesn't exist, or a root-relative `src/...` path. The summary
+  counts them separately and `--json` carries both lists.
+- **`outline`/`query file` say why an existing path isn't mapped**: no
+  grammar for its extension, a directory with no mapped files, a
+  symlink, over the size cap, or ignored/vendored/excluded. A missing
+  path keeps the plain "no mapped file" line, so a typo and a skipped
+  file no longer read the same.
+
+## [1.8.18] — 2026-10-09
+
+### Fixed
+- **`query uses <module>` counts named imports as members.** A bare
+  `join(..)` after `import { join } from 'path'` is a call of
+  `path.join`, but the header's `top members` only counted
+  `path.join(..)`-shaped calls: claude-code `uses path` said `join 41`
+  for 687 such calls.
+- **`query callers --json` counts references in `meta`.** A symbol with
+  no callers but some value references (a callback passed by name)
+  had `meta.total 0` and its references only under `referenced_meta`;
+  `meta.referenced` now carries their total.
+- **`--transitive`/`--depth` on `callers` and the other non-walking
+  actions say they're ignored**, pointing at `trace` and `workset`,
+  instead of answering one hop as if they'd been read.
+- **An empty `query type` points at the type's references.** A type
+  used only in fields, locals and literals has no signature uses, so
+  `query type` found nothing; the reply now says those positions
+  aren't recorded and how many callers and references `query callers`
+  lists.
+
+## [1.8.17] — 2026-10-09
+
+### Fixed
+- **A leading `./` names the same file.** `outline ./src/a.py`, `query
+  file ./src/a.py` and `query callers ./src/a.py:helper` used to say
+  "no mapped file"; every path and target now drops it.
+- **An id's `#N` works after a single colon.** `path:Foo.run#2` used to
+  find nothing while `path::Foo.run#2` worked.
+- **`query --lang` narrows any symbol target.** It took only the six
+  throws/catches languages and only filtered those two actions, so
+  `query symbol main --lang python` still listed every `main`. It now
+  takes every mapped language, keeps only that language's candidates
+  on every symbol action, and says which languages a name does have
+  when none is in the one asked for. `throws`/`catches` still exit 2 on
+  a language they have no data for.
+- **A mistyped command exits 2.** `dekko serach` printed the help and
+  exited 0; it now says `unknown command 'serach'`, suggests `search`,
+  and exits 2.
+
+## [1.8.16] — 2026-10-08
+
+### Fixed
+Four ways the 1.8.14-1.8.15 `sanity` rules could relabel a real missed
+call as explained:
+- **A Rust turbofish with a nested generic** (`.cursor::<Dimensions<A,
+  B>>(..)`) read as a bare identifier, because the turbofish match
+  stopped at the first `>`. Any `.name::` or `.name(` now reaches the
+  method (zed `SumTree.cursor`: 38 such rows).
+- **An assignment that also calls the name** (`command =
+  command(xs)`) read as a write. A call of the name after the `=` now
+  refuses the assignment label.
+- **A Swift line calling a C function** read "dekko never links calls
+  across languages", which is false: the resolver links Swift to C
+  functions. The other-language rule now asks the resolver's own table
+  (`resolver.can_link_across`) instead of keeping a copy, so the two
+  can't drift; Groovy and Scala lines against Java now count as other
+  languages, as the resolver treats them.
+- **A closure, `||` chain or comprehension declared a local for later
+  lines.** A Rust closure parameter now binds below its line only when
+  the body stays open (`|x| {`), `||` never opens a parameter list, a
+  Python `lambda` binds only on its own line, and only a `for`
+  statement's target (not a comprehension's) binds.
+
+## [1.8.15] — 2026-10-08
+
+### Fixed
+- **A name inside a Rust, Python or Go string reads as a string
+  mention**, as it already did in JS/TS and the JVM languages (zed's
+  `log::info!("Task trace ...")`, awesome-go's `" **Link consistency**:
+  ..."`). Strings are found over the whole file, so the inner lines of
+  a docstring or a multi-line raw string count; a Rust `{name}` format
+  argument and a Python f-string field stay code.
+- **Same-named locals are recognized in Rust and Python.** A `let` or
+  `if let` pattern, a closure parameter (on the same line as the use
+  too), a `for` pattern, a Python assignment, `for` target, `with` /
+  `except ... as` or `lambda` parameter now explains a use below it, as
+  in JS/TS. zed: the free function `callback` 603 unexplained rows → 71.
+- **TypeScript leftovers.** `import X, { y } from '...'` lines read as
+  imports for both names; `function name(` overload heads read as
+  signatures; a generic argument in any position of an angle-bracket
+  list (`ToolDef<In, Output, Prog>`) reads as a type position.
+- **An assignment to the name** (`activityCallback = cb`, `count += 1`)
+  in JS/TS, Python or Rust reads `assignment to the name — a write, not
+  a call`. claude-code `sanity --all` unexplained: 40 → 21.
+- `sanity --all`'s `aggregate_causes` gains the assignment key.
+
+## [1.8.14] — 2026-10-08
+
+### Fixed
+- **A bare identifier no longer reads as a missed method call in Rust,
+  Python, JS/TS or Go.** Those languages reach a method only through a
+  receiver or a path, so on a method target a line whose occurrences
+  are all bare (`harden: bool` for a method `bool`, `app_state.client`
+  for a method `app_state`) now reads `bare identifier, not the method`.
+  zed: `WorkflowInput.bool` 2,394 unexplained rows → 0,
+  `Workspace.app_state` 474 → 0. A Python hit inside the method's own
+  class is left alone (`@name.setter`), and Java, Kotlin, C++ and C#,
+  where a bare call can be a method, are not judged.
+- **Rust type positions read as type mentions.** On a Rust struct, enum,
+  trait or alias, a line with no `Name {` or `Name(` (`Task<()>`,
+  `Task::ready(..)`, `(SharedString, usize)`) now reads `names the type
+  without constructing it`, as Java and Kotlin lines already did. zed:
+  `scheduler::Task` 989 → 6 (match patterns). Unit structs are skipped.
+- **A line in another language says so.** A JS `throw new Error(..)`
+  against a Java `Error`, a Python or shell line against a TS method:
+  `a <hit lang> line, the target is <target lang>: dekko never links
+  calls across languages`, with the two grammars as `languages` on the
+  row, and a note that a binding layer (pybind, JNI, FFI) may still
+  reach the target.
+- Text mode now appends a row's `external_callee` (from 1.8.13) and
+  `languages`.
+- `sanity --all`'s `aggregate_causes` gains the bare-identifier and
+  other-language keys, and the type-mention key's text changed.
+
+## [1.8.13] — 2026-10-08
+
+### Fixed
+- **`sanity` no longer calls a comment, a string or an unparsed file a
+  resolver blind spot.** The qualified-call rung ran before the
+  comment, string and unparsed-language rungs, so `// ccr.close() ran
+  first`, `"call x.close() first"` and a README's `conn.close()` all
+  read as calls the resolver might have missed. Those facts now come
+  first; none of those lines ever reaches the resolver.
+- **A qualified call says what the resolver decided.** A grep-only
+  `x.name(..)` row now reads the map at that line: `dekko recorded this
+  call as external` (with the callee as `external_callee`) or `the
+  resolver found 2+ in-repo candidates for a call of this name here and
+  picked none`. Only a call the map has no record of keeps the
+  blind-spot label, reworded to `qualified call the map has no record
+  of` ("cross-package" was wrong for same-package calls). claude-code:
+  1,636 of 1,663 such rows in the top targets were recorded.
+- **`Cursor.fromText(..)` for target `Cursor`** reads `names the class
+  as the receiver of a static member`, not "passed or stored as a
+  value".
+- `sanity --all`'s `aggregate_causes` gains the keys for the recorded
+  external, recorded ambiguous and static-member causes, and the
+  qualified-call key's text changed.
+
+## [1.8.12] — 2026-10-08
+
+### Fixed
+- **`sanity` on a symbol that only exists in test code checks it.** The
+  default run excludes tests, so such a target used to answer "no
+  symbol matches" with unrelated suggestions while `query` found it.
+  Every caller of a test symbol is test code too, so the run now
+  includes tests for it and says so on its first line (`note: '<id>' is
+  test code; checked with --include-tests`, and `note` in `--json`,
+  whose `include_tests` reports the value used).
+- **`sanity --all` names each row by its symbol id.** Rows printed
+  `path:qualname`, so a class's overloaded constructors showed twice
+  under one string that `sanity <target>` then called ambiguous
+  (spring-boot: 95 such pairs). Rows now carry the id
+  (`path::qualname#2`), one per overload, each re-runnable as-is.
+
+## [1.8.11] — 2026-10-08
+
+### Fixed
+- **`dekko map` no longer hangs at exit after writing the map.** A run
+  that built several process pools in a row (adding a file makes every
+  resolve pass run pooled) could fork the next pool's workers while the
+  previous pool's manager thread still held a lock. Each worker
+  inherited the lock held and blocked on it at its own exit, and the
+  parent then waited on that worker forever at interpreter exit. Every
+  pool is now closed with a bounded join of its manager thread and
+  workers (a wedged worker is killed after 30 s), so the process is
+  single-threaded again before the next fork. Python 3.12 and newer.
+- **The fork-or-spawn choice is made at every pool build.** It used to
+  be made once per process, so a later pool forked even with threads
+  alive. A thread still alive at a build now sends that pool to
+  `spawn`. The CLI keeps `fork` everywhere it had it.
+
+## [1.8.10] — 2026-10-08
+
+### Fixed
+- **A Java, Kotlin or C++ field used without `this` reaches its type.**
+  `repository.findAll()` inside a class with a `Repo repository` field,
+  Kotlin's `repo.findAll()` through a `private val repo: Repo`
+  constructor parameter, and C++'s `delegate_->Run()` or
+  `owned_->Run()` through a `std::unique_ptr<Repo>` member are walked
+  the way `this.repository.findAll()` already was: to the field type's
+  member, external when the type is outside the repo
+  (`logger.info(..)` on commons-logging, `DEFAULT_DOMAIN.equals(..)` on
+  a `String` constant, which used to land on `ImageName.equals`), and
+  on through longer chains (`repository.helper.go()`). A parameter or
+  local of the same name, lambda parameters included, still wins over
+  the field.
+- **A bare call to a parameter is not a call to a repo function of that
+  name.** `makeC(requestCapability)` returning `() =>
+  requestCapability(..)` calls its argument, not the repo's own
+  `requestCapability`; Python's `def apply(f): f()` likewise. Those
+  calls are external now, in Python, JavaScript and TypeScript, where a
+  function's name is a value a parameter shadows. Where the function is
+  passed in under its own name (`handler(.., responseStream, ..)`), the
+  passing site is still a reference to it. A called local keeps the
+  edge it had: it usually holds the function it is named after
+  (`const { run } = helpers`).
+
+Against 1.8.9, edge sites and ambiguous rows:
+
+| Repo | Edge sites | External sites | Ambiguous rows |
+|---|---|---|---|
+| spring-boot | +87 −17 | +604 −18 | 45,821 → 45,316 |
+| tensorflow | +2,141 −1,073 | +3,890 −146 | 190,447 → 187,242 |
+| cline | +0 −139 | +427 −0 | 3,671 → 3,484 |
+
+tensorflow's C++ gains are typed members (`input_impl_->GetNext(..)` is
+`IteratorBase.GetNext`); most of its losses are `std::` containers that
+had landed on a same-named repo method (`execution_plan_.size()` on
+`TfLiteIntArrayView.size`). Some C++ classes the map doesn't extract
+(declared behind a macro, or in a vendored directory) make their fields
+read as outside the repo, so a few right edges go external too. cline's
+and tensorflow's Python losses are all bare calls to a parameter.
+Map time is within 3% of 1.8.9.
+
+## [1.8.9] — 2026-10-07
+
+### Added
+- **`map.json` records each type's fields.** Every class, struct,
+  interface, enum, record and trait symbol carries `fields`: each
+  field's `name`, declared `type`, `line`, and whether the type was
+  `inferred` from a construction call or literal initializer
+  (`this.client = new Client()`, `self.items = []`). TS parameter
+  properties and interface members, Python `self.x` assignments in any
+  method, Rust tuple-struct fields (`"0"`, `"1"`), Go embedded fields,
+  Java record components and enum constants, Kotlin `val`/`var`
+  constructor parameters and C/C++ members are all read. A Go method's
+  receiver is now a leading parameter with `receiver: true`; signatures,
+  `outline`, arity and `query type` skip it as before.
+
+### Fixed
+- **A call through a field reaches the field's type.** `this.mcpHub.callTool()`
+  with `constructor(private readonly mcpHub: McpHub)` now has
+  `McpHub.callTool` as its target, where it used to have no edge at
+  all; so does `controller.mcpHub.getServers()` through a typed
+  parameter, `Type.FIELD.m()`, a Go receiver's `s.store.Get()`, an
+  inline object-type parameter's `input.client.getSchedule()`, and a
+  field declared on a supertype. The walk goes on through a call's
+  declared return type (`cx.executor().run_until_parked()` is
+  `BackgroundExecutor`'s), through calls that hand back what they're
+  called on (`lock()`, `read(cx)`, `borrow()`, `unwrap()`, `.await`),
+  through fluent builders returning `Self`, `this` or `SELF`, nested
+  types (`ConfigData.Options.of()`), enum constants
+  (`PeriodStyle.SIMPLE.parse(..)`) and Java's `Outer.this`.
+- **A chained receiver never lands on the enclosing type's own method.**
+  `self.center.panes()` inside a type with its own `panes` used to pick
+  that `panes`; it now goes to the field's type, and an untyped field
+  leaves the call to the rest of the resolver without that pick.
+- **A field whose type is outside the repo sends the call external.**
+  `this.subscriptions.delete(id)` on a `Map` and `self.items.len()` on a
+  `Vec` no longer land on a repo method named `delete` or `len`. A repo
+  type with no such member is external too (a Spring repository's
+  `findAll()` from `JpaRepository`), except where the type can reach
+  members the map doesn't list: a Rust `Deref`, a Python `__getattr__`,
+  C/C++, a TS interface an object literal can fill, or a field that is
+  itself a callback slot (`this.options.postStateToWebview()`).
+- **An interface-typed field dispatches to its implementors**: one is
+  the edge, several are an ambiguous row naming only them.
+- **An aliased type import types a parameter or field.** `function
+  f(v: WD)` with `import { Widget as WD }`, and Python's `from w import
+  Widget as WD`, reach `Widget`'s methods.
+- **`sanity` names three more causes** for a call through a field: a
+  receiver whose declared type is outside the repo, a field with no
+  type, and an interface member nothing implements. They replace the
+  "cross-package/qualified call" label on those lines.
+
+Against 1.8.8, edge sites and ambiguous rows:
+
+| Repo | Edge sites | Ambiguous rows |
+|---|---|---|
+| zed | +14,883 −2,516 | 83,424 → 75,139 |
+| spring-boot | +13,338 −418 | 61,299 → 45,821 |
+| tensorflow | +2,061 −854 | 192,069 → 190,447 |
+| cline | +443 −114 | 4,070 → 3,671 |
+
+Most lost sites are calls on std or library types that had landed on a
+same-named repo method; on zed about 1,650 moved to another target
+(`TestAppContext.run_until_parked` to `BackgroundExecutor`'s).
+`McpHub.callTool` gains its caller on cline. Depth-zero calls resolve
+as before (`Point.new` keeps 569 callers on zed). Map time and peak
+memory stay within 5% of 1.8.8. Limits: extension traits implemented
+for every type (`with_rotate_animation` on any element) and a local's
+type read off its initializer are not followed yet, and a Python field
+built by a native extension (pybind) no longer reaches the C++ class of
+the same name. An older dekko can't read a map with a Go receiver in
+it (`unexpected keyword argument 'receiver'`): restart long-running
+`dekko serve`/daemon processes after upgrading.
+
+## [1.8.8] — 2026-10-07
+
+### Fixed
+- **Rust `Self::name`, `<T>::name`, same-file paths and bare calls get
+  the type narrowing.** These shapes skipped the rule that keeps a
+  `Type::name(..)` path to `Type`'s own members, so a row could carry
+  every `new` in the repo. Now:
+  - `Self::name` reads as the impl's type: `Self::new(..)` inside
+    `impl From<..> for ProcessIdGetter` reaches `ProcessIdGetter.new`,
+    a trait default method's `Self::get_global(cx)` reaches the
+    trait's, and `Self::Variant(..)` no longer lands on a struct of
+    the same name elsewhere.
+  - A whole `<T>` or `<T as Tr>` receiver reads as `T`:
+    `<Vec<_>>::new()` is external, `<SharedString as
+    Element>::paint(..)` reaches `SharedString.paint`.
+  - A written path that ends a qualname in the caller's own file names
+    that symbol when the rest of the qualname is an inline module the
+    caller sits in: `sys::DisplayLink::new` reaches the
+    macro-made type's `new` in `mod sys`, and inside `mod tests` a
+    `StubAgentServer::default_response()` is the test module's own
+    `StubAgentServer`, not `test_support.rs`'s.
+  - A bare call never names a method: `new(cx)` next to the file's own
+    `fn new` and an `impl X { fn new }` is the free function, and a
+    bare `handler()` with only methods of that name is external.
+
+On zed against 1.8.7: edge sites +268 −40, ambiguous rows 83,891 →
+83,424; 464 bare call sites that were ambiguous among methods go
+external. Of the 15 rows that carried all 1,386 `new` candidates, 4
+are left: two cfg-gated aliases of one name, `Rc::new`, and
+`NotificationResponseDelegate::new`, whose type `define_class!` makes.
+The 40 edges lost are 16 `Self::Variant(..)` and derived
+`Self::default()` calls that had landed on an unrelated struct or
+`default`, 23 `StubAgentServer::default_response()` calls that moved to
+the test module's own type, and one `<fs::Permissions as
+..>::from_mode` that had reached terminal's `MouseFormat.from_mode`.
+cline is identical; map time unchanged. Limits: a `<T>` whose type is
+an associated type (`<T::Summary as Summary>`) stays with the ladder,
+and a one-segment type path settles on a same-file member only when
+the file declares the type (`String::from(..)` next to the file's
+`impl From<X> for String` is std's).
+
+## [1.8.7] — 2026-10-07
+
+### Fixed
+- **`uses <crate>` finds a Rust crate called by path.** `dekko query
+  uses serde_json` (and MCP `find_usages`) counted a row only when
+  `serde_json` was an import binding of the calling file, and a crate
+  called as `serde_json::from_value(..)` never is: zed showed 36 sites
+  in 3 files. `uses futures` said "not found" and called the 350
+  `futures::` sites "local variables, not a module". A Rust row written
+  `<crate>::..` now matches as the new `path` kind, a Rust file counts
+  as importing the crate when any `use` starts with it (`use
+  serde_json::Value;`), and the "local variables" note no longer fires
+  on a `::` head (a C++ namespace isn't a local either).
+
+On zed (1.8.6 map): `serde_json` 36 sites in 3 files → 1,963 in 263
+(importing 6 → 238); `futures` not found → 341 sites in 129 files;
+`smol` not found → 302 in 47; `itertools` not found → 16 in 10;
+`anyhow` 231 in 56 → 517 in 171. Every listed site is on a line `git
+grep '<crate>::'` finds; a chained call counts each link
+(`smol::process::Command::new(..).output()`), as JS chains already
+did. `uses` on claude-code (`chalk`, `React`, `path`, `fs`) and
+tensorflow (`numpy`, `np`, `absl`) is unchanged row for row.
+
+## [1.8.6] — 2026-10-07
+
+### Fixed
+- **A Rust path whose head the repo doesn't have is external.**
+  `serde_json::from_value(..)` with no `use serde_json` in the file
+  ran the resolver's ladder over every `from_value` in the repo and
+  landed on `repl`'s `JsonView.from_value`. A path head with no
+  binding in the file is now looked up the way rustc does: an inline
+  `mod` or child module of the file, or a `use` reached through its
+  globs, keeps it in the repo. A `use super::*` that reaches the
+  parent's `use agent_client_protocol::schema::v1 as acp` makes
+  `acp::SessionId::new(..)` external, where it had landed on
+  `scheduler`'s `SessionId.new`. A head nothing binds that is a
+  primitive type (`f32::from(..)`) or names no crate and no module of
+  the repo is external. A head naming a crate or module of the repo is
+  unchanged, and so is a local variable that shares a crate's name
+  (`regex.is_match(..)`).
+
+On zed against 1.8.5: edge sites −374 (serde_json 229, `acp` 85,
+primitives 12, the rest single extern crates such as `regex::escape`
+landing on `Markdown.escape`), none gained; ambiguous rows 84,858 →
+83,891; 1,680 call sites go external across 107 heads (serde_json
+636, smol 149, futures 116, `f32` 103). Callers of `scheduler`'s
+`SessionId.new` went from 63 to the 1 real one; rows carrying every
+`from` in the repo went from 107 to 22. Seven Rust `impl` clauses go
+external, five of them `bindgen!`-generated `common::Host`-style
+traits that had landed on `recent_projects`' `Host`. The module graph
+is unchanged and map time is unchanged. cline is identical; the other
+eval repos have no Rust. Limits: only lowercase heads are tested, and
+an inline module with no symbols of its own (one a macro fills) reads
+as outside.
+
+## [1.8.5] — 2026-10-07
+
+### Fixed
+- **A Rust type path is walked to the type it names.** `use
+  rope::Point;` then `Point::new(..)` means the `Point` that `rope`'s
+  root re-exports (`pub use point::Point;`), but dekko tested the
+  path's segments as file stems, so the call stayed ambiguous among
+  every `Point.new` in the workspace (gpui's, rope's and terminal's).
+  The path is now followed module by module: a crate (its lib root
+  from `Cargo.toml`, including a `[lib] path` outside `src/`), a
+  module file, then the item, through `pub use` re-exports, renames
+  and globs. A path's first segment is looked up in the file's own
+  modules and `use`s, then through its globs, before any crate name,
+  as rustc does. A member of a type of that name in a crate that
+  declares a type of that name of its own is then ruled out. Trait
+  members, and
+  impls in a crate that declares no such type (`impl ToTsPoint for
+  rope::Point`), stay candidates. A derived member the named type
+  lacks no longer lands on another crate's type of the same name
+  (`sandbox`'s own `SandboxPermissions::default()` reached
+  `agent_settings`'s).
+- **Rust globs are recorded.** `use a::*;` was dropped at extraction;
+  it is now an import (`*`, `a::*`) and a module-graph edge to `a`. A
+  `use` written inside an inline `mod tests { .. }` is re-based to the
+  file's own module (`use super::*;` there is the file itself, so it
+  binds nothing new, and `use super::X;` is `self::X`). Before, a
+  `use super::X;` in a test module pointed one module too high.
+- **A sole Rust candidate reached through a trait path counts its
+  `self`.** `text::ToOffset::to_offset(&anchor, snapshot)` passes the
+  receiver as its first argument; read as an associated function it
+  had two arguments for one parameter and went external. The
+  associated-function reading is still preferred wherever it tells two
+  candidates apart.
+
+On zed against 1.8.4: edge sites +1,957 −36, ambiguous rows 85,752 →
+84,858. Callers of `rope`'s `Point.new` went from 16 to 569 (617
+ambiguous rows named it, 29 still do). The 36 lost are 34 derived
+`default()` calls that now go external, plus two moves to the right
+target (`RenderOnce::render(self, ..)`, and `GpuiPoint::new` through
+`gpui::Point as GpuiPoint`). The module graph gains 955 glob edges
+and drops 6, which were wrong (a test module's `use super::X` read as
+the parent file's, and one self-edge). `deps --cycles` finds 112
+cycles (90 before), each still inside one crate: a root that globs its
+modules while they glob it back. Map time unchanged. cline's Rust is
+unchanged; spring-boot, tensorflow, claude-code and awesome-go have
+none. Limits: only `Type::name(..)` paths use the walk (a bare
+call through a re-exported function is unchanged), and an overload set
+within one type (several `impl From<X> for T`) stays ambiguous. The
+extraction cache refreshes on upgrade, so the first `dekko map` after
+it is a full one.
+
+## [1.8.4] — 2026-10-07
+
+### Fixed
+- **A Kotlin `f<T>(x)` is a call.** tree-sitter-kotlin parses a
+  generic call with exactly one argument and a plain or dotted type
+  argument, `runApplication<App>(*args)`, as the comparison
+  `(runApplication < App) > (*args)`, so dekko recorded no call: a
+  Spring Boot `main` showed nothing calling `runApplication`. That
+  shape is now recorded as the call it is, with its receiver
+  (`json.decodeFromString<Foo>(text)` → `json`) and one argument, or
+  an unknown count for a spread. Kotlin's compiler reads it as a call,
+  and as a comparison it would compare a `Boolean` with `>`. Zero or
+  several arguments, a trailing lambda, a chained call and a generic
+  type argument already parsed as calls and are unchanged.
+
+On spring-boot against 1.8.3: the 33 such sites are recorded. 3 reach
+the repo's `TestEntityManager` extensions (`getPage`, `getId`,
+`persistAndGetId`), 9 are external (`decodeFromString`,
+`testEntityManager.find`), and 21 `runApplication` calls join the 6
+already ambiguous between its two overloads (with a spread the count
+is unknown, and Kotlin calls aren't judged by count). Tensorflow has
+no Kotlin. The extraction cache refreshes on upgrade, so the first
+`dekko map` after it is a full one.
+
+## [1.8.3] — 2026-10-07
+
+### Fixed
+- **A Java type name the ladder can't decide is its own package's.**
+  Java finds a simple type name in the enclosing classes, then the
+  single-type imports, then the file's own package, then the on-demand
+  imports. No rung read the package, so `new ColorConverter()` with
+  one `ColorConverter` beside the caller and another in a different
+  package was ambiguous, and so were most constructions in
+  spring-boot's duplicated module copies (the `jdbc` and `r2dbc`
+  `MySqlEnvironment`, the two `JSONException`). Now a `new X(..)` or
+  `X::new` the ladder leaves ambiguous, in a file that imports no `X`,
+  takes the one top-level `X` in the caller's package (the directory
+  under the source root, so a test's package is its class's). The
+  constructor is then picked by count as usual.
+
+On spring-boot against 1.8.2: 1,495 call sites gained, none lost, 4
+reference sites gained; ambiguous rows 62,046 → 61,278. Checked over
+every pick when this was designed: no in-repo rival is a nested type
+inherited from the caller's supertypes (the one way Java's scope
+could beat the package), and none of the 3,333 existing cross-package
+type edges contradicts the rule, so it only settles ties. `sanity` on
+every type a `::new` names, with tests: 0 unexplained rows (3 at
+1.8.2). Limits: Java only (Kotlin has the same rule; 19 rows on
+spring-boot); a type nested in a supertype the repo can't see could in
+principle shadow the package's; a file with no source root has no
+package and is not judged. Tensorflow is unchanged in the design
+simulation.
+
+## [1.8.2] — 2026-10-07
+
+### Fixed
+- **A Java `X::new` is recorded.** The method-reference pattern needs
+  an identifier after `::`, and `new` is a keyword token, so a
+  constructor reference left nothing in the map: a class built only
+  through `.map(TestContentsFilter::new)` had no inbound edge and read
+  as dead. `X::new`, `X<T>::new` and `Outer.X::new` are now a
+  reference to `X`, the way `Foo::bar` is a reference to `bar`: the
+  constructor runs when the functional interface is invoked, and that
+  interface picks the overload. When `X` has exactly one constructor
+  the line can reach (a record's canonical one included), the
+  reference reaches it too. `X[]::new` builds an array and runs no
+  constructor of `X`; `a.b.X::new` names a package path a reference
+  can't carry. Neither is recorded.
+- **`sanity` reads a Java or Kotlin package from the source root.** A
+  reference was credited from a same-package sibling only in the same
+  directory, so a test in `src/test/java/org/x/` referencing its class
+  in `src/main/java/org/x/` read "unexplained". The package is now the
+  directory under the source root, for every JVM reference, not just
+  `::new`. Go, and a JVM file with no source root, keep the directory.
+- **`sanity` names a constructor's own `X::new` lines.** Swept as a
+  target, a constructor of a class with several constructors saw its
+  class's `X::new` lines as "attributed to a different, same-named
+  declaration". They now read `a constructor reference (X::new) —
+  recorded on the class, since the functional interface it is passed
+  to picks the overload`.
+
+On spring-boot against 1.8.1: 310 reference sites gained, none lost;
+call edges, external calls and ambiguous rows unchanged.
+`IncludeExcludeContentSelectorTests.TestContentsFilter` has 7
+references (was 0), `AnnotationConfigServletWebServerApplicationContext`
+28. `sanity` on every type a `::new` names, with tests: `::new` rows
+"unexplained" 306 on 1.8.0 → 3 (a same-package tie between same-named types
+the reference can't settle yet); on their constructors, 0 unexplained
+and 254 rows under the new cause. Limits: a reference is not a call,
+so `affected` doesn't follow `X::new`, as it doesn't follow
+`Foo::bar`. Tensorflow has no `::new` and is unchanged. The extraction
+cache refreshes on upgrade, so the first `dekko map` after it is a full
+one.
+
+## [1.8.1] — 2026-10-07
+
+### Fixed
+- **A Java record's canonical constructor is a symbol.** `record
+  R(int a, String b)` has a constructor `R(int, String)` whether or not
+  its body writes one, but dekko only extracted the constructors a body
+  declares. A construction from another file was judged against the
+  record's own empty parameter list, so `new BundleContentProperty("n",
+  f)` read as two arguments for none and went external. The canonical
+  constructor is now `R.R`, its parameters the record's components, on
+  the header line, or on the compact constructor when the body has one
+  (that body's calls are now the constructor's, not the record's). An
+  explicit constructor with the components' types is the canonical one,
+  so a record never has two. It has the record's access, so a private
+  nested record's constructor gets the same access veto as a private
+  method.
+
+On spring-boot against 1.8.0: 599 call sites gained and 6 lost (5 are
+compact-constructor bodies changing owner), external sites −157/+21.
+`BundleContentProperty`'s 16 constructions and
+`DockerCliContextResponse`'s 14 had no edge and now reach both the
+record and its constructor, and records that also declare other
+constructors get a real overload pick. One honest tie appears:
+`Instantiator`'s canonical `(ClassLoader, Class<?>)` and explicit
+`(ClassLoader, String)` both take the two arguments `new
+Instantiator<>(parent, name)` writes, so that row is ambiguous.
+Tensorflow has no records and is unchanged. Limits: a declared
+constructor that sits after the header in source shifts from `R.R` to
+`R.R#2`, so a note anchored to it orphans (`dekko note` sweeps it); a
+class's implicit no-argument constructor still has no symbol; records
+Spring binds by reflection can now show up in `unused` as uncalled
+constructors. The extraction cache refreshes on upgrade, so the first
+`dekko map` after it is a full one.
+
 ## [1.8.0] — 2026-10-06
 
 Closes round 1.8's fix cycle. The code is 1.7.7; this release is the

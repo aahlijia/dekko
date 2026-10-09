@@ -403,3 +403,200 @@ def test_other_languages_are_never_tagged(
 ) -> None:
     got = _bound(tmp_path, name, source)
     assert all(b is None for bounds in got.values() for b in bounds)
+
+
+# --- calls --------------------------------------------------------------
+#
+# A call is tagged by its callee text's first segment: the receiver's
+# head for `x.m()`, the name itself for a bare `f()`.
+
+
+def _call_bound(tmp_path: Path, name: str, source: str) -> dict[str, list]:
+    """``{callee text: [bound, ...]}`` in source order, for one file."""
+    (tmp_path / name).write_text(source)
+    spec = spec_for_path(name)
+    assert spec is not None
+    fm = extract_file(tmp_path, name, spec)
+    assert fm.error is None
+    out: dict[str, list] = {}
+    for call in sorted(fm.calls, key=lambda c: c.line):
+        out.setdefault(call.text, []).append(call.bound)
+    return out
+
+
+def test_ts_bare_call_to_a_parameter_is_bound(tmp_path: Path) -> None:
+    got = _call_bound(
+        tmp_path,
+        "a.ts",
+        "import { other } from './other'\n"
+        "export function makeA(rc: any) { return () => { rc(1) } }\n"
+        "export function makeC(rc: any) { return () => rc(1) }\n"
+        "export function makeF(rc: any) {\n"
+        "  return () => ({ execute(i: string) { return rc(i) } })\n"
+        "}\n"
+        "export function free() { other() }\n",
+    )
+    assert got["rc"] == ["param", "param", "param"]
+    assert got["other"] == [None]
+
+
+def test_receiver_head_is_what_gets_tagged(tmp_path: Path) -> None:
+    got = _call_bound(
+        tmp_path,
+        "a.ts",
+        "export function f(repo: any) {\n"
+        "  const local = make(); local.go(); repo.a.b(); this.x.y()\n"
+        "}\n",
+    )
+    assert got["local.go"] == ["local"]
+    assert got["repo.a.b"] == ["param"]
+    assert got["this.x.y"] == [None]
+
+
+def test_nested_def_called_by_name_is_not_bound(tmp_path: Path) -> None:
+    got = _call_bound(
+        tmp_path,
+        "a.py",
+        "def outer(cb):\n"
+        "    def helper():\n"
+        "        return 1\n"
+        "    helper()\n"
+        "    cb()\n",
+    )
+    assert got["helper"] == [None]
+    assert got["cb"] == ["param"]
+
+
+# --- calls: Java, Kotlin, C++ -------------------------------------------
+#
+# These three use a field without `this`, so a receiver's binding is
+# what tells `repository.findAll()` on a field from one on a local.
+
+
+def test_java_locals_params_and_scoped_names(tmp_path: Path) -> None:
+    got = _call_bound(
+        tmp_path,
+        "Svc.java",
+        "class Svc {\n"
+        "  private Repo repository;\n"
+        "  void run(Repo p) {\n"
+        "    repository.findAll(); p.findAll();\n"
+        "    Repo loc = null; loc.findAll();\n"
+        "    for (Repo r : list) { r.findAll(); }\n"
+        "    list.forEach(x -> x.findAll());\n"
+        "    list.forEach((Repo y) -> y.findAll());\n"
+        "    list.forEach((z, w) -> z.findAll());\n"
+        "    try { } catch (Exception e) { e.getMessage(); }\n"
+        "    if (o instanceof Repo rr) { rr.findAll(); }\n"
+        "    try (Repo res = open()) { res.findAll(); }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert got["repository.findAll"] == [None]
+    assert got["p.findAll"] == ["param"]
+    for text in (
+        "loc.findAll",
+        "r.findAll",
+        "e.getMessage",
+        "rr.findAll",
+        "res.findAll",
+    ):
+        assert got[text] == ["local"], text
+    for text in ("x.findAll", "y.findAll", "z.findAll"):
+        assert got[text] == ["param"], text
+
+
+def test_java_method_reference_is_never_bound(tmp_path: Path) -> None:
+    # `Foo::bar` names a method, which a local `bar` can't shadow.
+    got = _bound(
+        tmp_path,
+        "Foo.java",
+        "class Foo {\n"
+        "  static void bar(Object o) {}\n"
+        "  void f() { Runnable bar = null; xs.forEach(Foo::bar); }\n"
+        "}\n",
+    )
+    assert got["bar"] == [None]
+
+
+def test_kotlin_locals_params_and_scoped_names(tmp_path: Path) -> None:
+    got = _call_bound(
+        tmp_path,
+        "Svc.kt",
+        "class Svc(private val repository: Repo) {\n"
+        "  fun run(p: Repo) {\n"
+        "    repository.findAll()\n"
+        "    p.findAll()\n"
+        "    val loc = Repo()\n"
+        "    loc.findAll()\n"
+        "    val (a, b) = pair\n"
+        "    a.findAll()\n"
+        "    for (r in list) { r.findAll() }\n"
+        "    list.forEach { x -> x.findAll() }\n"
+        "    try { } catch (e: Exception) { e.trace() }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert got["repository.findAll"] == [None]
+    assert got["p.findAll"] == ["param"]
+    assert got["x.findAll"] == ["param"]
+    for text in ("loc.findAll", "a.findAll", "r.findAll", "e.trace"):
+        assert got[text] == ["local"], text
+
+
+def test_cpp_locals_params_and_scoped_names(tmp_path: Path) -> None:
+    got = _call_bound(
+        tmp_path,
+        "svc.cc",
+        "class Svc {\n"
+        "  Repo* delegate_;\n"
+        "  void Run(Repo* p);\n"
+        "};\n"
+        "void Svc::Run(Repo* p) {\n"
+        "  delegate_->Go();\n"
+        "  p->Go();\n"
+        "  Repo* ptr = nullptr; ptr->Go();\n"
+        "  Repo& ref = *p; ref.Go();\n"
+        "  Repo plain; plain.Go();\n"
+        "  for (auto& r : list) { r.Go(); }\n"
+        "  auto f = [](Repo* q) { q->Go(); };\n"
+        "  auto [a, b] = pair; a.Go();\n"
+        "}\n",
+    )
+    assert got["delegate_->Go"] == [None]
+    assert got["p->Go"] == ["param"]
+    assert got["q->Go"] == ["param"]
+    for text in ("ptr->Go", "ref.Go", "plain.Go", "r.Go", "a.Go"):
+        assert got[text] == ["local"], text
+
+
+def test_cpp_prototype_parameters_bind_nothing(tmp_path: Path) -> None:
+    got = _call_bound(
+        tmp_path,
+        "svc.cc",
+        "class Svc {\n"
+        "  Repo* delegate_;\n"
+        "  void Set(Repo* delegate_);\n"
+        "  void Run() { delegate_->Go(); }\n"
+        "};\n",
+    )
+    assert got["delegate_->Go"] == [None]
+
+
+def test_java_switch_and_record_patterns_bind_locals(tmp_path: Path) -> None:
+    got = _call_bound(
+        tmp_path,
+        "Svc.java",
+        "class Svc {\n"
+        "  private Repo repository;\n"
+        "  void run(Object o) {\n"
+        "    switch (o) {\n"
+        "      case Other repository -> repository.save();\n"
+        "      default -> {}\n"
+        "    }\n"
+        "    if (o instanceof Pt(Repo r)) { r.save(); }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert got["repository.save"] == ["local"]
+    assert got["r.save"] == ["local"]

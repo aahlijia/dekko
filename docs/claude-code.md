@@ -61,8 +61,8 @@ runs the same `query callers <target>` dekko would answer with (or
 `query uses <target>` under `--usages`), runs one scoped grep sweep
 across the repo, and diffs the two hit sets into matches/dekko-only/
 grep-only buckets — every grep-only hit is labeled with a likely
-cause drawn from `dekko-verify`'s own blind-spot list (a cross-package/
-qualified call, an unparsed-language file, a build script, a file the
+cause drawn from `dekko-verify`'s own blind-spot list (a qualified
+call, with what the map recorded there, an unparsed-language file, a build script, a file the
 map skipped, an import or `use` line, a likely unrelated
 external-library method sharing the target's bare name, a test-only
 call site, or a short/generic target name), never a guess presented as
@@ -150,6 +150,11 @@ dekko hooks uninstall                      # remove all dekko hooks
   A symbol the prompt names in code form (`generateBones`, `load_map`,
   `Foo.bar`, `run()`, or any name in backticks) lists the file defining
   it first, marked `(defines <name>)`; a plain English word never does.
+  The rest of the list is files whose names or docs share a word with
+  the prompt (question words like "what" and "how" don't count);
+  recently changed files rank higher but are never listed on that
+  alone, and a copy under a `fixtures/` directory ranks after the real
+  definitions.
 - **`pre-read`** — a non-blocking advisory to `outline` a large file
   first, before a whole-file `Read`.
 - **`pre-bash`** — the enforcement tier, off by default even when other

@@ -20,8 +20,14 @@ from dekko.core import languages
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.analysis.query import NO_ROW_LIMIT, paths_matching
-from dekko.source import read_lines
-from dekko.textutil import Meter, estimate_tokens, fit_to_budget, oneline
+from dekko.source import read_lines, unmapped_reason
+from dekko.textutil import (
+    Meter,
+    estimate_tokens,
+    fit_to_budget,
+    oneline,
+    strip_dot_slash,
+)
 
 EXIT_OK = 0
 EXIT_NOT_FOUND = 3
@@ -102,7 +108,11 @@ def _outline_sig(sym: Symbol) -> str:
         return f"{sym.kind} {sym.name}"
     if sym.kind == "variable":
         return sym.name
-    parts = [f"{p.name}: {p.type}" if p.type else p.name for p in sym.params]
+    parts = [
+        f"{p.name}: {p.type}" if p.type else p.name
+        for p in sym.params
+        if not p.receiver
+    ]
     sig = f"{sym.name}({', '.join(parts)})"
     if sym.returns:
         sig += f" -> {sym.returns}"
@@ -414,6 +424,7 @@ def run(
     Returns:
         Process exit code.
     """
+    target = strip_dot_slash(target)
     matches = paths_matching(index, target)
     if len(matches) > 1:
         print(f"dekko: '{target}' is ambiguous; candidates:", file=sys.stderr)
@@ -425,7 +436,9 @@ def run(
     else:
         outlines = collect_dir(index, target)
     if not outlines:
-        reason = languages.unindexed_reason(target)
+        reason = languages.unindexed_reason(target) or unmapped_reason(
+            root or index.root_dir, target, index.provenance
+        )
         why = f" ({reason})" if reason else ""
         print(
             f"dekko: no mapped file or directory '{target}'{why}",

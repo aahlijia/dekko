@@ -538,6 +538,7 @@ def _fully_populated_filemap() -> FileMap:
                 line=3,
                 arg_count=1,
                 arg_kinds=("string",),
+                bound="param",
             ),
         ],
         refs=[

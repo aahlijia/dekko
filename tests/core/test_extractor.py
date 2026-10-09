@@ -751,18 +751,13 @@ def test_java_method_reference_captured_as_ref(tmp_path: Path) -> None:
     assert "requireNonNull" in ref_names
 
 
-def test_java_constructor_reference_not_captured_as_ref_to_new(
+def test_java_constructor_reference_is_a_reference_to_its_type(
     tmp_path: Path,
 ) -> None:
-    """Negative case for the fix above: ``Class::new``.
-
-    ``new`` is an anonymous keyword token in tree-sitter-java, not an
-    ``identifier`` node, so it must never satisfy
-    ``_JAVA_REFERENCE_QUERY``'s ``"::" (identifier) @ref`` anchor --
-    locks in that a constructor reference doesn't spuriously surface a
-    reference to a symbol literally named ``new`` (and doesn't
-    misattribute the reference to the object identifier, ``Data``,
-    either).
+    """``Class::new`` references the class, never a symbol named
+    ``new``: ``new`` is an anonymous keyword token in tree-sitter-java,
+    read by its own ``@ctorref`` pattern, not the ``"::" (identifier)
+    @ref`` anchor ``Foo::bar`` uses.
     """
     spec = languages.spec_for_path("Data.java")
     assert spec is not None
@@ -775,9 +770,7 @@ def test_java_constructor_reference_not_captured_as_ref_to_new(
         "}\n"
     )
     fm = extract_file(tmp_path, "Data.java", spec)
-    ref_names = {ref.name for ref in fm.refs}
-    assert "new" not in ref_names
-    assert "Data" not in ref_names
+    assert [(r.name, r.line, r.bound) for r in fm.refs] == [("Data", 5, None)]
 
 
 def test_ts_object_literal_shorthand_captured_as_ref(
@@ -1312,7 +1305,7 @@ def test_parse_rust_use() -> None:
         ("b", "a::b"),
         ("d", "a::c"),
     ]
-    assert _parse_rust_use("a::*") == []
+    assert _parse_rust_use("a::*") == [("*", "a::*")]
     assert ("e", "x::e") in _parse_rust_use("x::{y::{z}, e}")
 
 

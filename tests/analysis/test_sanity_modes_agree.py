@@ -193,12 +193,17 @@ def test_method_rows_read_the_same_in_both_modes(
     # A same-named local is a local, not a library method.
     assert rows[("src/local.ts", 3)] == sanity.CAUSE_SHADOWING_LOCAL
     # A test file's own helper belongs to the test filter.
-    assert rows[("test/widget.test.ts", 5)] == sanity.CAUSE_TEST_FILTER
+    # A bare ``active()`` can't be a TS class method, test file or not.
+    assert rows[("test/widget.test.ts", 5)] == (
+        sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
+    )
     # A call in a file that never names the class is the one row the
     # receiver label is for.
-    assert rows[("src/other.ts", 2)] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+    assert rows[("src/other.ts", 2)] == (
+        sanity.CAUSE_BARE_IDENTIFIER_NOT_METHOD
+    )
     swept = _all(root, capsys)
-    assert swept["src/widget.ts:Widget.active"] == Counter(rows.values())
+    assert swept[ACTIVE] == Counter(rows.values())
 
 
 def test_every_fan_in_symbol_agrees_across_modes(
@@ -213,7 +218,7 @@ def test_every_fan_in_symbol_agrees_across_modes(
     for syms in sanity._group_fan_in_symbols(query_index).values():
         for sym in syms:
             single = Counter(_single(root, sym.id, capsys).values())
-            assert swept[f"{sym.path}:{sym.qualname}"] == single, sym.id
+            assert swept[sym.id] == single, sym.id
             checked += 1
     assert checked >= 2
 
@@ -247,3 +252,131 @@ def test_cross_file_collision_is_decided_per_target(
             )
             == expected
         )
+
+
+_OVERLOAD_REPO = {
+    "Box.java": ("class Box {\n  Box() {}\n  Box(int n) {}\n}\n"),
+    "Use.java": (
+        "class Use {\n"
+        "  void go() {\n"
+        "    Box a = new Box();\n"
+        "    Box b = new Box(1);\n"
+        "  }\n"
+        "}\n"
+    ),
+}
+
+
+def _all_doc(root: Path, capsys: pytest.CaptureFixture) -> dict:
+    assert cli.main(["sanity", "--all", "--root", str(root), "--json"]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_all_rows_name_overloads_by_their_own_id(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    doc = _all_doc(make_mapped_repo(_OVERLOAD_REPO), capsys)
+    targets = [r["target"] for r in doc["symbols"] if r["bare_name"] == "Box"]
+    assert len(targets) == len(set(targets))
+    assert "Box.java::Box.Box#2" in targets
+
+
+def test_every_all_target_reruns_single_target(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(_OVERLOAD_REPO)
+    for row in _all_doc(root, capsys)["symbols"]:
+        code = cli.main(
+            ["sanity", row["target"], "--root", str(root), "--json"]
+        )
+        capsys.readouterr()
+        assert code == 0, row["target"]
+
+
+def test_nested_same_named_types_agree_across_modes(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    nested = "class {outer} {{\n  static class Servlet {{}}\n}}\n"
+    root = make_mapped_repo(
+        {
+            "A.java": nested.format(outer="A"),
+            "B.java": nested.format(outer="B"),
+            "Use.java": (
+                "class Use {\n"
+                "  Object a = new A.Servlet();\n"
+                "  Object b = new B.Servlet();\n"
+                "}\n"
+            ),
+            "data/import.sql": (
+                "insert into note values (4, 'the Java Servlet api');\n"
+            ),
+        }
+    )
+    rows = {
+        r["target"]: Counter(r["causes"])
+        for r in _all_doc(root, capsys)["symbols"]
+        if r["bare_name"] == "Servlet"
+    }
+    assert rows
+    for target, causes in rows.items():
+        single = Counter(_single(root, target, capsys).values())
+        assert single == causes, target
+
+
+def test_a_method_and_a_struct_sharing_a_name_agree_across_modes(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a/src/lib.rs": (
+                "pub struct A;\n"
+                "impl A {\n"
+                "    pub fn node(&self) -> u8 {\n"
+                "        1\n"
+                "    }\n"
+                "}\n"
+                "pub fn use_a(a: &A) -> u8 {\n"
+                "    a.node()\n"
+                "}\n"
+            ),
+            "b/src/lib.rs": (
+                "pub struct node(pub u8);\n"
+                "pub fn make() -> node {\n"
+                "    node(3)\n"
+                "}\n"
+            ),
+            "c/src/lib.rs": (
+                "pub fn f(x: Option<node>) -> u8 {\n"
+                "    let node = 1;\n"
+                "    node\n"
+                "}\n"
+            ),
+        }
+    )
+    swept = _all(root, capsys)
+    for target in ("a/src/lib.rs::A.node", "b/src/lib.rs::node"):
+        assert target in swept, target
+        single = Counter(_single(root, target, capsys).values())
+        assert swept[target] == single, target
+
+
+def test_callers_meta_counts_references_when_nothing_calls(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    files = {
+        "src/cb.ts": "export function cb(): void {}\n",
+        "src/w.ts": (
+            'import { cb } from "./cb";\n'
+            "export function w(): void {\n"
+            "  setTimeout(cb, 1);\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(
+        ["query", "callers", "src/cb.ts::cb", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    meta = json.loads(capsys.readouterr().out)["meta"]
+    assert meta["total"] == 0
+    assert meta["referenced"] == 1

@@ -39,6 +39,7 @@ session. State is read from the transcript Claude Code
 already maintains; dekko persists none of its own.
 """
 
+import dataclasses
 import json
 import re
 import shlex
@@ -49,7 +50,7 @@ from dekko import repo_ops
 from dekko.classify import is_test_path
 from dekko.core.model import Symbol
 from dekko.storage import ledger
-from dekko.analysis import ambiguous, outline, relevance, summary
+from dekko.analysis import ambiguous, outline, relevance, search, summary
 from dekko.render import mapfile, render_lean
 from dekko.render.mapfile import MapIndex
 from dekko.integrations import orient
@@ -79,6 +80,8 @@ PROMPT_TOP_FILES = 5
 READ_THRESHOLD = 1000
 # Symbol names sampled into a file's relevance text.
 _NAME_SAMPLE = 8
+# Directory names that hold copies of real code for tests and evals.
+_FIXTURE_DIRS = frozenset({"fixtures", "fixture", "__fixtures__", "testdata"})
 # A prompt identifier, optionally qualified (``Foo.bar``, ``Foo::bar``,
 # ``Foo#bar``); a trailing sentence period is not a qualifier.
 _IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*(?:(?:\.|::|#)[A-Za-z_$][\w$]*)*")
@@ -227,6 +230,18 @@ def _file_candidates(
     return candidates, centrality
 
 
+def _without_question_words(
+    task: relevance.TaskContext,
+) -> relevance.TaskContext:
+    """``task`` without the question words ``search`` also drops."""
+    return dataclasses.replace(
+        task,
+        terms=tuple(
+            t for t in task.terms if t not in search.QUESTION_STOPWORDS
+        ),
+    )
+
+
 def _relevant_files(
     index: MapIndex,
     task: relevance.TaskContext,
@@ -256,7 +271,15 @@ def _relevant_files(
     candidates, centrality = _file_candidates(index, view, skip)
     if not candidates:
         return []
-    rel = relevance.LexicalScorer().score(task, candidates)
+    task = _without_question_words(task)
+    if not task.terms:
+        return []
+    # A file counts as matched only through the prompt's words. The
+    # diff/recent boosts rank matched files; on their own they gave
+    # every recently touched file (1,108 of cline's) a score, so any
+    # prompt at all pinned the busiest of them.
+    words_only = relevance.TaskContext(terms=task.terms)
+    rel = relevance.LexicalScorer().score(words_only, candidates)
     matched = [c for c in candidates if rel[c.id] > 0]
     if not matched:
         return []
@@ -312,10 +335,22 @@ def _defining_symbols(index: MapIndex, token: str) -> list[Symbol]:
         syms,
         key=lambda s: (
             is_test_path(s.path),
+            _is_fixture_path(s.path),
             -len(index.calls_in.get(s.id, [])),
             s.path,
         ),
     )
+
+
+def _is_fixture_path(path: str) -> bool:
+    """Whether a path sits under a fixtures directory.
+
+    A fixture copy of a real file (zed keeps a 21,000-line copy of
+    ``editor.rs`` under ``evals/fixtures/``) defines the same names and
+    can out-call the original, but it is never the file being asked
+    about.
+    """
+    return any(part in _FIXTURE_DIRS for part in path.split("/")[:-1])
 
 
 def _pinned_files(

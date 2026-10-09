@@ -97,11 +97,17 @@ def compute(index: MapIndex, top: int) -> dict:
     """
     files = sorted(index.languages_by_path)
     edge_count = sum(len(v) for v in index.module_deps_out.values())
-    external_count = sum(len(v) for v in index.module_external.values())
+    top_dirs = _top_level_dirs(index)
+    split = {
+        p: split_unresolved(specs, top_dirs)
+        for p, specs in index.module_external.items()
+    }
+    external_count = sum(len(ext) for _, ext in split.values())
+    unresolved_count = sum(len(unres) for unres, _ in split.values())
     external_only = sum(
         1
         for p in files
-        if not index.module_deps_out.get(p) and p in index.module_external
+        if not index.module_deps_out.get(p) and split.get(p, ((), ()))[1]
     )
     cycles = find_cycles(index.module_deps_out)
     multi = [c for c in cycles if len(c) >= 2]
@@ -114,6 +120,7 @@ def compute(index: MapIndex, top: int) -> dict:
         "files": len(files),
         "edges": edge_count,
         "external_sources": external_count,
+        "unresolved_specifiers": unresolved_count,
         "external_only_files": external_only,
         "cycles": len(multi),
         "cycle_files": sum(len(c) for c in multi),
@@ -274,15 +281,57 @@ def _dynamic_import_note(
     )
 
 
+def _top_level_dirs(index: MapIndex) -> frozenset[str]:
+    """The repo's top-level directories that hold a mapped file."""
+    return frozenset(
+        p.split("/", 1)[0] for p in index.languages_by_path if "/" in p
+    )
+
+
+def split_unresolved(
+    specs: list[str], top_dirs: frozenset[str]
+) -> tuple[list[str], list[str]]:
+    """Split a file's unresolved import sources into in-repo and outside.
+
+    The map keeps every import it couldn't resolve to a file under one
+    ``external`` list, so a relative specifier whose target is missing
+    (``./types/message.js``) or a root-relative one (``src/utils/x``)
+    sat beside ``zod`` and ``crypto``. Those name this repo's own files,
+    not a package: a relative source (leading ``.``) or one whose first
+    path segment is a top-level directory of the repo is unresolved.
+
+    Args:
+        specs: The import sources as the map records them.
+        top_dirs: ``_top_level_dirs`` of the index.
+
+    Returns:
+        ``(unresolved, external)``, each in the input order.
+    """
+    unresolved: list[str] = []
+    external: list[str] = []
+    for spec in specs:
+        head, sep, _ = spec.partition("/")
+        in_repo = spec.startswith(".") or (sep and head in top_dirs)
+        (unresolved if in_repo else external).append(spec)
+
+    return unresolved, external
+
+
 def _print_summary_text(doc: dict, coverage: str | None = None) -> None:
     """Print the default (no ``--file``/``--cycles``) text summary."""
     lines = []
     if coverage:
         lines.append(f"note: {coverage}")
+    unresolved = doc.get("unresolved_specifiers", 0)
     lines.append(
         f"dekko: {doc['files']} files, {doc['edges']} resolved import "
         f"edges, {doc['external_sources']} external sources across "
-        f"{doc['external_only_files']} external-only files",
+        f"{doc['external_only_files']} external-only files"
+        + (
+            f", {unresolved} unresolved in-repo specifiers"
+            if unresolved
+            else ""
+        ),
     )
     if doc["cycles"] or doc["self_cycles"]:
         parts = []
@@ -359,7 +408,9 @@ def _run_file(
 
     imports = index.module_deps_out.get(path, [])
     imported_by = index.module_deps_in.get(path, [])
-    external = index.module_external.get(path, [])
+    unresolved, external = split_unresolved(
+        index.module_external.get(path, []), _top_level_dirs(index)
+    )
     # Never report a bare "imports (0)" for a file that
     # plainly wires its imports up at runtime -- see
     # ``_dynamic_import_constructs``.
@@ -374,6 +425,7 @@ def _run_file(
             "path": path,
             "imports": imports,
             "imported_by": imported_by,
+            "unresolved": unresolved,
             "external": external,
         }
         if scope_note:
@@ -392,7 +444,7 @@ def _run_file(
     _print_file_text(
         imports,
         imported_by,
-        external,
+        (unresolved, external),
         limit,
         budget,
         dynamic_note,
@@ -403,7 +455,7 @@ def _run_file(
 def _print_file_text(
     imports: list[str],
     imported_by: list[str],
-    external: list[str],
+    outside: tuple[list[str], list[str]],
     limit: int,
     budget: int | None,
     dynamic_note: str | None,
@@ -413,7 +465,9 @@ def _print_file_text(
     Split out of ``_run_file`` purely to keep that function inside the
     project's complexity ceiling once the runtime-import disclosure
     was added -- resolution/lookup stays there, rendering lives here.
+    ``outside`` is ``(unresolved, external)`` from ``split_unresolved``.
     """
+    unresolved, external = outside
     rows = [f"    {p}" for p in imports]
     kept_imports, meter_imports = fit_to_budget(rows, budget, limit)
     rows_in = [f"    {p}" for p in imported_by]
@@ -431,6 +485,8 @@ def _print_file_text(
         print(row)
     if meter_in.omitted:
         print(f"    {meter_in.footer()}")
+    if unresolved:
+        print(f"unresolved ({len(unresolved)}): {', '.join(unresolved)}")
     if external:
         print(f"external ({len(external)}): {', '.join(external)}")
     else:

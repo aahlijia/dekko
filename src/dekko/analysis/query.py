@@ -29,6 +29,7 @@ from dekko.render.mapfile import (
     format_unsupported,
 )
 from dekko.core import languages
+from dekko.source import unmapped_reason
 from dekko.core.model import (
     TYPE_KINDS,
     CatchSite,
@@ -42,6 +43,7 @@ from dekko.textutil import (
     clip_middle,
     fit_to_budget,
     signature,
+    strip_dot_slash,
     token_footer,
 )
 from dekko.core.resolver import (
@@ -107,6 +109,17 @@ DEFAULT_MIN_SHARED = 2
 # discipline).
 DEFAULT_THROWS_DEPTH = 2
 
+# Actions whose target isn't a symbol, so ``--lang`` has nothing to
+# narrow (``catches`` reads it as a result filter instead).
+_LANG_IGNORED_ACTIONS = (
+    "file",
+    "uses",
+    "type",
+    "importers",
+    "env",
+    "cohesion",
+)
+
 _BUDGETED_ACTIONS = (
     "callers",
     "callees",
@@ -148,6 +161,7 @@ def paths_matching(
             ``deps.py``'s ``_run_file``.
     """
     universe = index.symbols_by_path if pool is None else pool
+    path = strip_dot_slash(path)
     if path in universe:
         return [path]
     suffix = "/" + path
@@ -215,6 +229,7 @@ def resolve_target(
         candidates considered. No candidates means not found; several
         with no match means ambiguous.
     """
+    target = strip_dot_slash(target)
     by_id = index.symbols_by_id.get(target)
     if by_id is not None:
         return by_id, [by_id]
@@ -288,6 +303,11 @@ def _type_over_own_constructors(
     return cls
 
 
+# The ``#N`` suffix ``_make_symbol`` gives the second and later symbols
+# sharing one ``path::qualname`` id.
+_OVERLOAD_SUFFIX = re.compile(r"#\d+$")
+
+
 def _resolve_exact(
     index: MapIndex, target: str
 ) -> tuple[Symbol | None, list[Symbol]]:
@@ -315,6 +335,16 @@ def _resolve_exact(
             body, line = head, int(tail)
     if ":" in body:
         path_part, _, qual = body.rpartition(":")
+        if _OVERLOAD_SUFFIX.search(qual):
+            # ``path:Q.f#2`` is an id written with one colon: printed
+            # ids use ``::``, but agents copy the ``path:qualname`` form
+            # and keep the overload suffix.
+            by_id = [
+                index.symbols_by_id[sid]
+                for p in paths_matching(index, path_part)
+                if (sid := f"{p}::{qual}") in index.symbols_by_id
+            ]
+            return (by_id[0] if len(by_id) == 1 else None), by_id
         in_files = [
             s
             for p in paths_matching(index, path_part)
@@ -1198,6 +1228,9 @@ def _print_relation_json(
         kept_refs, ref_meter = _fit_entries(referenced, budget, limit)
         doc["referenced_not_called"] = kept_refs
         doc["referenced_meta"] = ref_meter.as_dict()
+        # ``meta`` counts call rows only; a script that stops at
+        # ``total == 0`` must still see that the symbol is used.
+        meta["referenced"] = len(referenced)
     elif action == "callers" and not entries and not modules and build_logic:
         doc["build_script_warning"] = build_logic
     print(json.dumps(doc, indent=2))
@@ -2534,6 +2567,7 @@ def _shadow_note(index: MapIndex, target: str) -> str | None:
 MATCH_BASE = "base"
 MATCH_BINDING = "binding"
 MATCH_MODULE = "module"
+MATCH_PATH = "path"
 _NODE_PREFIX = "node:"
 _TOP_MEMBERS = 5
 
@@ -2549,7 +2583,7 @@ def _uses_matches(
 ) -> tuple[list[ExternalCall], dict[tuple[str, str], str]]:
     """Every external call that ``uses <target>`` should list, and how.
 
-    Three match kinds, first one wins per row:
+    Four match kinds, first one wins per row:
 
     - ``base``: last segment == target (``uses run`` -> ``subprocess.
       run``; the original behavior, unchanged).
@@ -2559,6 +2593,10 @@ def _uses_matches(
       local variables named ``path`` (42% of the ungated hits on
       claude-code): the same test ``resolver._receiver_is_external``
       applies at resolve time, re-run here against ``imports_by_path``.
+    - ``path``: a Rust row written ``target::..`` (``uses serde_json``
+      -> ``serde_json::from_value``). A crate is called by path with
+      no ``use`` of its own name, and a ``::`` head is never a local
+      variable, so no import gate is needed.
     - ``module``: the calling file imports some binding ``b`` from a
       source whose bare form == target, and the row's first segment (or
       its only segment) == ``b`` (``uses numpy`` -> ``np.array``;
@@ -2589,9 +2627,17 @@ def _uses_matches(
         path = ext.caller.split("::", 1)[0]
         if any(i.name == target for i in index.imports_by_path.get(path, [])):
             take(ext, MATCH_BINDING)
+        elif _rust_path_row(ext, target):
+            take(ext, MATCH_PATH)
     for ext in _module_bound_externals(index, want):
         take(ext, MATCH_MODULE)
     return rows, kinds
+
+
+def _rust_path_row(ext: ExternalCall, head: str) -> bool:
+    """Whether ``ext`` is a Rust call written ``head::..``."""
+    path = ext.caller.split("::", 1)[0]
+    return path.endswith(".rs") and ext.callee.lstrip().startswith(f"{head}::")
 
 
 def _module_bindings(index: MapIndex, source: str) -> dict[str, set[str]]:
@@ -2635,19 +2681,45 @@ def _uses_numbers(
     files = {e.caller.split("::", 1)[0] for e in exts}
     members: Counter[str] = Counter()
     for e in exts:
-        parts = callee_segments(e.callee)
-        if len(parts) >= 2:
-            members[parts[1].split("(", 1)[0]] += len(e.lines) or 1
-    want = target.removeprefix(_NODE_PREFIX)
+        member = _uses_member(target, callee_segments(e.callee))
+        if member:
+            members[member] += len(e.lines) or 1
     importing = sum(
         1
         for path, imps in index.imports_by_path.items()
-        if any(
-            i.name == target or _bare_source(index, path, i) == want
-            for i in imps
-        )
+        if any(_imports_target(index, path, i, target) for i in imps)
     )
     return sites, len(files), importing, members
+
+
+def _uses_member(target: str, parts: list[str]) -> str | None:
+    """The member of ``target`` a ``uses`` row calls, or ``None``.
+
+    ``path.join(..)`` calls ``join``; so does a bare ``join(..)`` from
+    ``import { join } from 'path'``, which is how most of a Node
+    module's calls are written. A bare call of the target itself
+    (``uses run`` matching ``run(..)``) names no member.
+    """
+    if len(parts) >= 2:
+        return parts[1].split("(", 1)[0]
+    if parts and parts[0] != target:
+        return parts[0].split("(", 1)[0]
+
+    return None
+
+
+def _imports_target(
+    index: MapIndex, path: str, imp: Import, target: str
+) -> bool:
+    """Whether one import of the file at ``path`` brings in ``target``:
+    as its binding, from a source whose bare form is ``target``, or, in
+    Rust, a ``use`` rooted at it (``use serde_json::Value;``)."""
+    if imp.name == target:
+        return True
+    if _bare_source(index, path, imp) == target.removeprefix(_NODE_PREFIX):
+        return True
+
+    return path.endswith(".rs") and imp.source.split("::", 1)[0] == target
 
 
 def _uses_summary(
@@ -2712,7 +2784,12 @@ def _run_uses_not_found(index: MapIndex, target: str) -> int:
         )
         return EXIT_NOT_FOUND
     print(f"dekko: no external reference matches '{target}'", file=sys.stderr)
-    unbound = index.externals_by_head.get(target, [])
+    # A ``ns::f`` head (a C++ namespace) is never a local variable.
+    unbound = [
+        e
+        for e in index.externals_by_head.get(target, [])
+        if not e.callee.lstrip().startswith(f"{target}::")
+    ]
     if unbound:
         n = sum(len(e.lines) or 1 for e in unbound)
         print(
@@ -3117,9 +3194,31 @@ def _type_usage_entry(index: MapIndex, row: TypeUsageRow) -> dict:
     return entry
 
 
+def _type_reference_count(index: MapIndex, name: str) -> int:
+    """Callers plus value references of every type named ``name``.
+
+    ``query type`` reads signatures only, so a type built in literals
+    and stored in fields has none; these edges are where it shows up.
+    """
+    return sum(
+        len(index.calls_in.get(s.id, []))
+        + len(index.referenced_in.get(s.id, []))
+        for s in index.symbols_by_name.get(name, [])
+        if s.kind in TYPE_KINDS
+    )
+
+
 def _run_type_not_found(index: MapIndex, needle: str) -> int:
     """Report a ``type`` target with zero matching functions/methods."""
     print(f"dekko: no results for type '{needle}'", file=sys.stderr)
+    used = _type_reference_count(index, needle)
+    if used:
+        print(
+            "  fields, locals and literals aren't recorded as type uses "
+            f"(signatures only); 'dekko query callers {needle}' lists "
+            f"{used} caller(s) and reference(s)",
+            file=sys.stderr,
+        )
     type_names = [
         s.name for s in index.symbols_by_id.values() if s.kind in TYPE_KINDS
     ]
@@ -3182,7 +3281,7 @@ def type_usage_rows(
                 sym, "param", p.name, p.type, sym.path, sym.start_line
             )
             for p in sym.params
-            if _type_matches(p.type, needle, exact)
+            if not p.receiver and _type_matches(p.type, needle, exact)
         )
     for use in index.type_uses:
         if not _type_matches(use.type, needle, exact):
@@ -3246,7 +3345,7 @@ def type_usage_name_index(index: MapIndex) -> frozenset[str]:
         if sym.returns:
             names.update(_IDENT_RE.findall(sym.returns))
         for p in sym.params:
-            if p.type:
+            if p.type and not p.receiver:
                 names.update(_IDENT_RE.findall(p.type))
     for use in index.type_uses:
         names.update(_IDENT_RE.findall(use.type))
@@ -4015,7 +4114,9 @@ def _locate_file(index: MapIndex, target: str) -> tuple[str | None, int]:
         wider = index.languages_by_path.keys() | index.hidden_test_symbols
         matches = paths_matching(index, target, wider)
     if not matches:
-        reason = languages.unindexed_reason(target)
+        reason = languages.unindexed_reason(target) or unmapped_reason(
+            index.root_dir, strip_dot_slash(target), index.provenance
+        )
         why = f" ({reason})" if reason else ""
         print(
             f"dekko: no mapped file matches '{target}'{why}", file=sys.stderr
@@ -4378,6 +4479,59 @@ def _dispatch_scan(
     return None
 
 
+def _narrow_to_lang(
+    target: str, lang: str, candidates: list[Symbol]
+) -> list[Symbol] | None:
+    """Keep the ``lang`` candidates of a target, for ``--lang``.
+
+    Args:
+        target: The target string, for the message.
+        lang: The language to keep.
+        candidates: Every symbol the target named.
+
+    Returns:
+        The ``lang`` candidates, possibly empty when the target named
+        nothing at all; ``None``, with the reason printed, when it named
+        symbols but none in ``lang``.
+    """
+    kept = [c for c in candidates if c.language == lang]
+    if kept or not candidates:
+        return kept
+    others = sorted({c.language for c in candidates})
+    print(
+        f"dekko: no {lang} symbol matches '{target}' "
+        f"({len(candidates)} in other languages: {', '.join(others)})",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _resolve_symbol_target(
+    index: MapIndex, action: str, target: str, lang: str | None
+) -> tuple[Symbol | None, list[Symbol]] | None:
+    """Resolve a symbol-target action's target, honoring ``--lang``.
+
+    ``throws`` keeps a unique target in another language: there
+    ``lang`` filters the results, and the mismatch gets its own note.
+
+    Returns:
+        ``(match, candidates)`` as ``resolve_target`` gives them, or
+        ``None`` when ``lang`` ruled out every candidate (already
+        reported).
+    """
+    sym, candidates = resolve_target(index, target)
+    if lang is not None and not (action == "throws" and sym is not None):
+        narrowed = _narrow_to_lang(target, lang, candidates)
+        if narrowed is None:
+            return None
+        sym = narrowed[0] if len(narrowed) == 1 else None
+        candidates = narrowed
+    if sym is None and action in ("supertypes", "subtypes"):
+        sym = _sole_type_candidate(target, candidates)
+
+    return sym, candidates
+
+
 def _dispatch(
     index: MapIndex,
     action: str,
@@ -4402,9 +4556,10 @@ def _dispatch(
     if scanned is not None:
         return scanned
 
-    sym, candidates = resolve_target(index, target)
-    if sym is None and action in ("supertypes", "subtypes"):
-        sym = _sole_type_candidate(target, candidates)
+    resolved = _resolve_symbol_target(index, action, target, lang)
+    if resolved is None:
+        return EXIT_NOT_FOUND, None
+    sym, candidates = resolved
     if sym is None:
         return report_unresolved(target, candidates, index), None
     if action == "symbol":
@@ -4489,13 +4644,20 @@ def run(
             env-var key read anywhere (``env --list``) instead of
             looking up one ``target`` key. Ignored for every other
             action.
-        lang: For ``catches``/``throws``, restrict results to one
-            language (e.g. ``"java"``) — cuts cross-language noise on
-            a multi-language repo. Ignored for every other action.
+        lang: Keep only this language's symbols when the target names
+            several (every symbol-target action); for ``catches``/
+            ``throws``, also restrict the results to it. The actions in
+            ``_LANG_IGNORED_ACTIONS`` ignore it, with a note.
 
     Returns:
         Process exit code.
     """
+    if lang is not None and action in _LANG_IGNORED_ACTIONS:
+        print(
+            f"dekko: note: --lang doesn't apply to '{action}'; it narrows "
+            "a symbol target, and the results of throws/catches",
+            file=sys.stderr,
+        )
     effective_budget = budget
     if budget is None and action in _BUDGETED_ACTIONS:
         effective_budget = DEFAULT_RELATION_BUDGET

@@ -4,7 +4,7 @@
 dekko map                            # (re)generate the map
 dekko map src                        # ...restricted to a subtree
 dekko summary                        # repo digest: dirs, hotspots, entry points
-dekko outline src/server.py          # a file's signatures + docs, no bodies
+dekko outline src/server.py          # a file's signatures + docs, no bodies (a path that exists but isn't mapped says why)
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
 dekko query callers resolve --sites  # who calls resolve, with call sites, then who passes it as a value ('referenced (not called)')
 dekko query callers resolve --no-tests  # production callers only (the MCP get_callers default; the CLI includes tests)
@@ -26,14 +26,14 @@ dekko query env DATABASE_URL         # every statically-known read site for this
 dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
 dekko query cohesion src/app.py      # intra-file connected-components (weak signal, not clustering)
 dekko context run_map --budget 1500  # minimal context pack for an edit
-dekko search "retries failed http requests"  # free-text relevance search
+dekko search "retries failed http requests"  # free-text relevance search (a one-word query that is a symbol's name ranks it first)
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
 dekko search "..." --scorer both             # fuses lexical+embedding; needs dekko[search]
 dekko workset                        # one bundle for your current change
 dekko workset --symbol Config --type-impact  # + type-usage + heritage impact, unioned
 dekko affected                       # test files impacted by your changes (exit 0/1)
 dekko affected --possible            # + tests reaching the change only through unresolved calls
-dekko diff                           # symbols changed since the map's commit (exit 0/1)
+dekko diff                           # symbols changed since the map's commit (exit 0/1; --budget 4000 by default, 0 = no cap)
 dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
 dekko unused --kinds all             # callables + types, unioned
@@ -55,34 +55,38 @@ dekko daemon start                   # warm-cache background process (see below)
 Symbol targets accept a bare `name`, `Class.method`, a qualified
 `file.py:name` or `file.py:Class.method`, a trailing `:LINE` to pick
 one overload (`Foo.java:Foo.run:12`), or a symbol id exactly as any
-command prints it (`Foo.java::Foo.run#2`). An id always names its own
-symbol. In `file:name`, a symbol whose full qualname is `name` wins
+command prints it (`Foo.java::Foo.run#2`, also accepted with one colon
+as `Foo.java:Foo.run#2`). An id always names its own symbol. A leading
+`./` on any path or target is ignored. In `file:name`, a symbol whose full qualname is `name` wins
 over ones that only share the bare name, so `ErrorPage.java:ErrorPage`
 is the class, not the class plus its constructors. A bare name shared
 only by one class and that class's own constructors resolves to the
 class, with a note on stderr (its callers are every construction).
-Other ambiguous names list their candidates instead of guessing.
+Other ambiguous names list their candidates instead of guessing;
+`query --lang LANG` keeps only the LANG ones (`dekko query symbol main
+--lang go`), and a name with none in LANG says which languages it does
+have. A mistyped command (`dekko serach`) exits 2 with a suggestion.
 Every read command takes `--json` for structured output.
 Most also regenerate a stale map automatically (`--no-regen` to fail
-instead) — `diff`, `affected`, `status`, and `ledger` don't accept
-`--no-regen` at all: `status`/`ledger` never regenerate regardless,
-and `diff`/`affected` always re-map the current tree in memory
-rather than writing a fresh `map.json` to disk, so `dekko status`
-right after a `dekko diff`/`dekko affected` on a fresh edit can still
-report the map as stale. That in-memory pass reuses the last `dekko
-map`'s caches the same way an incremental map does (see "Incremental
-vs. `--full` map runs"), so it costs about what `dekko map` would. From
-a plain shell, nothing gets cheaper on the next call until you run
-`dekko map`. Under the daemon or the MCP server (`impacted_tests`), a
-repeat call on a tree that hasn't changed since the last one reuses
-that call's in-memory pass instead of redoing it; any edit, or a new
-`dekko map`, starts over. A stale map is also never parsed just to be
-rejected: freshness is judged from the small provenance sidecar, and
-`map.json` is loaded only when it's current. On a
-large repo (5,000+ mapped files) both waits print a `note:` to stderr
-first: a stale map's in-memory pass, and the regen every other read
-command does. A missing map is always announced, since the first build
-is a cold one.
+instead). `status` and `ledger` never regenerate and don't accept
+`--no-regen`. `diff` and `affected` re-map a stale tree in memory
+(they need a snapshot of it, not a loaded map), reusing the last map's
+caches the same way an incremental map does (see "Incremental vs.
+`--full` map runs"), and then write that re-map as the map, so the next
+call of any read command finds it fresh. With `--no-regen` they still
+answer from the in-memory re-map but leave the map on disk as it is;
+under the daemon or the MCP server (`impacted_tests` under `serve
+--no-regen`), a repeat call on a tree that hasn't changed since then
+reuses that re-map instead of redoing it. They also never write over a
+tree that has no map yet, over a map another process is regenerating,
+from an MCP server older than the installed dekko, or into a read-only
+checkout (one `note:`); the answer is the same either way. A stale map
+is also never parsed just to be rejected: freshness is judged from the
+small provenance sidecar, and `map.json` is loaded only when it's
+current. On a large repo (5,000+ mapped files) both waits print a
+`note:` to stderr first: a stale map's re-map, and the regen every
+other read command does. A missing map is always announced, since the
+first build is a cold one.
 
 `diff`/`affected` compare at symbol-body-hash granularity, not a whole-file
 diff: an edit outside every symbol's body span (a trailing comment after the
@@ -157,7 +161,10 @@ enclosing definition (`app.ts:31  function type in Options  [param:
 config]`), or `(module level)` when there is none. It does not see
 struct/class **fields** typed with the target type, generic arguments,
 or JSX — those aren't function-shaped, so a clean result set from
-`query type` doesn't mean the type is otherwise unused.
+`query type` doesn't mean the type is otherwise unused. When it finds
+nothing but the type has callers or value references (built in a
+literal, stored in a field), the reply says so and points at `query
+callers <T>`.
 Default matching is identifier-token based (`Config` matches
 `Optional[Config]`, `Vec<Config>`, `Config | None`, but not
 `ConfigManager`); pass `--exact` to match the stored type text
@@ -206,8 +213,9 @@ counted; and **module**, the bare import source (`uses numpy`, `uses
 fs`, `uses node:path`) reaching calls through whatever the file bound
 it to, including bare named imports (`existsSync(...)` after
 `import { existsSync } from 'fs'`). Output leads with a summary
-(`chalk: 284 call sites in 44 files`, the top members used, and
-`imported by 47 files`). That last number is the honest denominator:
+(`chalk: 284 call sites in 44 files`, the top members used, counting
+a bare call through a named import as that member, and `imported by
+47 files`). That last number is the honest denominator:
 `uses` sees *calls*, and a name used only in type position, JSX, or
 as a property read never lands in the call bucket, so on a React
 codebase the importing-file count is much larger than the call-site
@@ -346,8 +354,12 @@ sets by `(file, line)` into three buckets:
 - **dekko-only** — dekko resolved a call grep's literal pattern
   didn't match (an alias, a multi-line call) — informational.
 - **grep-only** — grep found a line dekko's answer missed. Each entry
-  is labeled with a likely cause: a cross-package/qualified call
-  (`pkg.Func(`, `Type::method(`, `Type.method(`), a bare
+  is labeled with a likely cause: a qualified call (`pkg.Func(`,
+  `Type::method(`, `Type.method(`) — which says what the map
+  recorded at that line when it recorded anything: external (with the
+  callee, `external_callee` in `--json`), ambiguous (2+ in-repo
+  candidates, none picked), or nothing at all, the real blind spot —
+  a bare
   import/require statement naming the symbol (`import { X } from
   '...'`, `from x import X`, `const { X } = require('...')`, a Rust
   `use a::{X, Y};` line or one row of a multi-line `use` list — not a
@@ -393,7 +405,8 @@ of `unexplained miss`:
   (`# "tfrun" commands can't include pipes`) is a comment, not a
   string literal.
 - *A recorded value reference.* `names.some(isChrome)`,
-  `process.on("exit", cleanup)`, `.map(Src::getSource)`: the map
+  `process.on("exit", cleanup)`, `.map(Src::getSource)`, and since
+  1.8.2 a Java constructor reference `.map(Entry::new)`: the map
   already holds that line as a reference edge to the target (Python,
   JS/TS, Go, Java), and the row says `passed or stored as a value,
   not called — dekko has this as a reference (see: dekko query callers
@@ -401,7 +414,10 @@ of `unexplained miss`:
   references below the callers since 1.6.11. Only when the file
   could really have made that reference: it defines the target,
   imports its name or its declaring type, or is a same-package
-  sibling (Go/Java), and it binds no local of the same name. A
+  sibling, and it binds no local of the same name. Go's package is
+  the directory; a Java or Kotlin package is the directory under the
+  source root, so since 1.8.2 a test in `src/test/java/org/x/` sees
+  `src/main/java/org/x/` without an import. A
   `const count = ...; if (count >= 3)` in a file that never imports
   `count` stays unexplained.
 - *A path-qualified function value in Rust or C++*, where dekko
@@ -422,7 +438,11 @@ of `unexplained miss`:
     `logForDebugging('CCRClient: Epoch mismatch')` reads `mention
     inside a string or template text`. Not when the string text
     calls it (`eval("cleanup()")`, `setTimeout("cleanup()")`), which
-    is a real reference the resolver can't see.
+    is a real reference the resolver can't see. Since 1.8.15 Rust,
+    Python and Go lines get the same reading, with strings found over
+    the whole file so a docstring's or a raw string's inner lines
+    count too; a Rust `{name}` format argument and a Python f-string
+    field stay code.
   - A property read the map records at that line (`result.warn.map(...)`)
     reads `a property read of a same-named field`. Not in `--usages`
     mode, where a `this.handler` passed along could be the reference
@@ -448,11 +468,28 @@ count: `matches`, `dekko-only` and `grep-only` are untouched, only the
 cause on a grep-only row changes. `--fail-on-unexplained` will fail
 less often as a result.
 
+**Language rules, since 1.8.14.** Three causes follow from a language
+itself, per target. A line the resolver can't link to the target's
+language (it links Java and Kotlin, JS/TS/TSX, C and C++ both ways,
+and Swift to C functions; every other language only to itself) reads
+`a <hit lang> line, the target is <target lang>:
+dekko never links calls across languages ...`, the two grammars on the
+row as `languages`; a binding layer (pybind, JNI) may still reach the
+target, and the label says so. On a method target in Rust, Python,
+JS/TS or Go, a line whose only occurrences are bare identifiers reads
+`bare identifier, not the method`: those languages reach a method only
+through a receiver or a path (`x.name(..)`, `x.name::<..>(..)`,
+`T::name`; any `.name` in the non-Rust ones), and a Python hit inside the method's own class is
+never judged (`@name.setter`). On a Rust struct, enum, trait or alias,
+a line with no `Name {` / `Name(` reads as a type mention (below); a
+unit struct is skipped, since a bare `Marker` is a value. An unparsed
+file keeps its own label under all three.
+
 **Java and Kotlin type mentions, since 1.6.10.** On a type target, or
 a constructor of one, a Java or Kotlin line that names the type without
-constructing it reads `names the type without constructing it
-(declaration, parameter or return type, generic argument, static member
-access, cast or class literal) — not a call site`: `ConfigurationPropertyName
+constructing it reads `names the type without constructing it (a type
+position, path, generic argument, static member access, cast or class
+literal) — not a call site`: `ConfigurationPropertyName
 oldName = property.getName();`, `List<Name> all`, `Name.of("a")`,
 `Name.class`, `(Name) o`, `o instanceof Name`, `new Name[3]`. It holds
 only when no occurrence of the name on the line could construct it:
@@ -484,8 +521,8 @@ repo's own `ErrorPage` in another package, `org.other.Tool.m(..)` can't
 be the repo's `Tool.m`, and `new Other.Inner()` can't be `Outer.Inner`;
 the resolver reads the written path the same way. Such a line reads
 `written through another package's or type's qualified name, so it
-names a different type — not a miss`, instead of `cross-package/
-qualified call — known resolver blind spot`.
+names a different type — not a miss`, instead of a qualified-call
+label.
 
 **A site the map attributed to a same-named sibling, since 1.5.9.**
 When two unrelated symbols share a bare name (a 1-arg `errorMessage(e)`
@@ -513,7 +550,12 @@ recorded on the class and on the overload its arguments pick. Since
 and a row the map gave only to the class, from a caller whose
 arguments fit two or more overloads equally, reads `a construction
 whose arguments fit 2+ constructors of the class — recorded on the
-class, not on one overload (see: dekko query callers <class>)`.
+class, not on one overload (see: dekko query callers <class>)`. Since
+1.8.2 a Java `X::new` line the map recorded as a reference to the
+class reads ``a constructor reference (`X::new`) — recorded on the
+class, since the functional interface it is passed to picks the
+overload``: the reference names a constructor only when the class has
+exactly one the line can reach.
 
 **Four more index facts, since 1.5.10.** Each is read off the map, not
 the line, and named as such:
@@ -645,7 +687,8 @@ sites, which have no line in the map. Measured with `sanity --all`
 1,439 → 218; the grep-only totals are unchanged, since only causes on
 grep-only rows move.
 
-**Same-named locals (JS/TS only), since 0.43.76; widened in 1.5.10.**
+**Same-named locals (JS/TS since 0.43.76, widened in 1.5.10; Rust and
+Python since 1.8.15).**
 A second pass over whatever is still `unexplained` after every shape
 above: a use of a local declared earlier in an enclosing scope reads
 as `use of a same-named local declared earlier in an enclosing scope —
@@ -657,7 +700,11 @@ fragmenting by line number. A binding is a `const`/`let`/`var` (plain
 or destructured, including a member line of a multi-line `const {`),
 a `catch (e)` parameter, an arrow or `function` parameter on a line
 above (`xs.map(count => ...)`, `({ action }) =>`), a `for`-of binding,
-or a parameter of any enclosing symbol, read off the map (a
+in Rust a `let` / `if let` / `while let` pattern, a closure parameter
+(on the hit's own line too: `.map(|callback| callback(1))`) or a `for`
+pattern, in Python an assignment, a `for` target, `with`/`except ...
+as name` or a `lambda` parameter, or a parameter of any enclosing
+symbol, read off the map (a
 destructured parameter `{ slots, activeSlot }` and an optional one
 `count?` count). Scope is every enclosing symbol, then the file's top
 level: an inner arrow sees the outer function's locals, and a hit with
@@ -1213,7 +1260,12 @@ ends `Outer.Inner`; a path no repo type is on is counted external. A
 package needs two lowercase segments or a known first one (`java`,
 `javax`, `jakarta`, `org`, `com`, `io`, `net`, `kotlin`, ...), so
 `foo.Bar.m()` on a local `foo` is left to the ladder, and an ALL_CAPS
-segment is read as a constant, not a type. A low ambiguous rate
+segment is read as a constant, not a type. Since 1.8.3 a Java `new
+X(..)` or `X::new` that is still ambiguous, with no import of `X` in
+the file, takes the one top-level `X` in the file's own package, as
+Java does (the package is the directory under the source root, so
+`src/test/java/org/x` and `src/main/java/org/x` are one package). Two
+`X` in that package, or none, leave it ambiguous. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output
@@ -1274,6 +1326,16 @@ id>`, with the class's caller count). `--json` adds `overload_ties`
 mean an unrelated symbol is not a tie; it keeps the plain "resolved
 ambiguously — not counted here" note, counted separately. `query
 symbol` and `context` split the two the same way.
+
+A Java constructor reference, `X::new` (also `X<T>::new` and
+`Outer.X::new`), is a reference, not a call, since 1.8.2: the
+constructor runs when the functional interface it is passed to is
+invoked, and that interface picks the overload. `query callers X`
+lists the line under "referenced (not called)", and so does `query
+callers` on `X`'s constructor when it is the only one the line can
+reach (a record's included). An array constructor (`X[]::new`) and a
+package-qualified one (`a.b.X::new`) are not recorded. Like `Foo::bar`,
+it is not followed by `affected`, which walks calls.
 
 In C++, `new X(...)`, `std::make_unique<X>(...)`/`make_shared` (and
 the `absl::` spellings) and a temporary `X(...)` all count as
@@ -1336,6 +1398,12 @@ dekko deps --top 20                  # widen the most-depended-on ranking in the
 dekko deps --export mermaid          # emit the module graph via `export`'s existing renderers
 dekko deps --export dot --output deps.dot
 ```
+
+An import the resolver couldn't tie to a file is listed under
+`unresolved` when its source names this repo's own files (a relative
+`./types/message.js` whose target is missing, or a root-relative
+`src/...` path) and under `external` otherwise (`zod`, `crypto`); the
+summary line counts both.
 
 `dekko deps FILE` and `dekko deps --file FILE` are equivalent — the
 bare positional is a convenience alias for interactive use, `--file`
@@ -1610,12 +1678,11 @@ dekko query catches ConfigurationPropertiesBindException --lang java
 dekko query throws handleRequest --transitive --lang java
 ```
 
-`--lang` accepts any language `throws`/`catches` extracts data for
-(currently `cpp`, `java`, `javascript`, `python`, `tsx`, `typescript`
-— derived from the language registry, so it stays in sync with
-coverage automatically); an unsupported value (`rust`, `go`, ...) is
-rejected by the CLI with a clear error rather than silently accepted
-and producing an always-empty result. For `catches`, filtering is by
+For `throws`/`catches`, `--lang` must be a language they extract
+data for (currently `cpp`, `java`, `javascript`, `python`, `tsx`,
+`typescript`, derived from the language registry, so it stays in sync
+with coverage automatically); any other value (`rust`, `go`, ...)
+exits 2 with that list rather than producing an always-empty result. For `catches`, filtering is by
 each catch clause's own file language; the excluded count and its
 per-language breakdown are disclosed (`note: --lang java filter
 applied — 30 catch clause(s) in another language excluded (28
@@ -1806,15 +1873,15 @@ first comparison cost about an incremental map instead of a full one.
 A rev that adds, removes or renames a file relative to the map, or
 changes a type, still resolves in full.
 
-On a stale map the current-tree side is the in-memory re-map described
-under the read commands above. The daemon keeps the last one it built
-and reuses it while the working tree holds the same content, so an
-agent that edits once and then calls `affected` several times pays for
-the re-map once (cline: ~3.3 s per call before, ~0.4 s for a repeat;
-tensorflow: ~29 s before, ~3 s). That costs memory: one extra
-current-tree snapshot, about the size of the map, held while the tree
-stays dirty and unmapped, and dropped as soon as a call finds the map
-fresh again. The MCP server does the same.
+On a stale map the current-tree side is the re-map described under the
+read commands above, written as the map afterwards, so an agent that
+edits once and then calls `diff`, `affected` and `workset` pays for the
+re-map once (tensorflow: ~27 s for every stale call before, ~8 s for
+each call after the first). When the re-map isn't written
+(`--no-regen`, an outdated MCP server), the daemon and the MCP server
+keep the last one and reuse it while the working tree holds the same
+content. That costs memory: one extra current-tree snapshot, about the
+size of the map, dropped as soon as a call finds the map fresh again.
 
 Even for the current-tree side, the warm cache's win is specifically
 skipping map *loading* (re-parsing `map.json` into an in-memory

@@ -153,14 +153,19 @@ def test_a_lowercase_head_that_is_no_package_is_left_alone(
     tmp_path: Path,
 ) -> None:
     """``foo`` is one lowercase segment and no known package root, so
-    ``foo.Bar.m()`` is not read as a package path."""
+    ``foo.Bar.m()`` is not read as a package path.
+
+    ``foo`` is left undeclared: a parameter ``Object foo`` would be
+    walked as a field ``Bar`` of ``Object``, a type outside the repo,
+    and the call would rightly go external.
+    """
     graph = _graph(
         tmp_path,
         {
             f"{_SRC}/app/Bar.java": _java(
                 "app", "public class Bar {\n    public void m() { }\n}\n"
             ),
-            _USER: _user("    void go(Object foo) { foo.Bar.m(); }\n"),
+            _USER: _user("    void go() { foo.Bar.m(); }\n"),
         },
     )
     assert (

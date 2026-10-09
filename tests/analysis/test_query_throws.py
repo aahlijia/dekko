@@ -687,26 +687,26 @@ def test_catches_default_sort_exact_before_catch_all(
 
 
 def test_query_lang_rejects_unsupported_language(
-    make_mapped_repo: RepoFactory,
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     # 'rust' is a real language name but permanently excluded from
     # throws/catches (exception_handling_supported() == False) -- it
-    # must never be a valid --lang choice, since accepting it would
+    # must never be a valid --lang for them, since accepting it would
     # silently produce an always-empty result instead of a clear error.
     root = make_mapped_repo(PY_THROWS)
-    with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "query",
-                "catches",
-                "ValueError",
-                "--lang",
-                "rust",
-                "--root",
-                str(root),
-            ]
-        )
-    assert exc.value.code == 2
+    code = cli.main(
+        [
+            "query",
+            "catches",
+            "ValueError",
+            "--lang",
+            "rust",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 2
+    assert "'catches' has no rust data" in capsys.readouterr().err
 
 
 def test_caller_language_resolved_symbol_id() -> None:

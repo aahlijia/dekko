@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from dekko.core import rust_cfg
-from dekko.core.languages import LanguageSpec
+from dekko.core.languages import VALUE_NAMESPACE_LANGUAGES, LanguageSpec
 from dekko.core.model import (
     TYPE_KINDS,
     EnvRead,
+    Field,
     FileMap,
     Import,
     Param,
@@ -22,6 +23,7 @@ from dekko.core.model import (
     Reexport,
     Symbol,
     TypeUse,
+    go_embedded_name,
 )
 from tree_sitter import Node, Parser, Query, QueryCursor
 from dekko.core.grammars import get_grammar
@@ -96,18 +98,22 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         return FileMap(path=rel, language=spec.name, error=str(exc))
 
     defs = _collect_definitions(spec, tree.root_node, rel)
-    calls = _collect_calls(spec, tree.root_node, rel, defs)
+    _collect_fields(spec, tree.root_node, rel, defs)
+    import_matches = _import_matches(spec, tree.root_node)
+    bindings = _local_bindings(
+        spec, tree.root_node, defs, _import_binding_bytes(import_matches)
+    )
+    calls = _collect_calls(spec, tree.root_node, rel, defs, bindings)
     if spec.name == "rust":
         calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
     if spec.name in ("c", "cpp"):
         calls.extend(_collect_cpp_ctor_arg_calls(tree.root_node, rel, defs))
-    import_matches = _import_matches(spec, tree.root_node)
     refs = _collect_refs(
         spec,
         tree.root_node,
         rel,
         defs,
-        _import_binding_bytes(import_matches),
+        bindings if spec.name in VALUE_NAMESPACE_LANGUAGES else {},
     )
     reads = _collect_reads(spec, tree.root_node, rel, defs)
     heritage = _collect_heritage(spec, tree.root_node, rel, defs)
@@ -274,6 +280,11 @@ def _collect_definitions(
         if name_node is None or def_node is None:
             continue
 
+        if _is_record_header(def_node) and _record_declares_canonical(
+            def_node.parent
+        ):
+            continue
+
         params_node = _one(caps, "params")
 
         if _looks_like_c_macro_invocation(
@@ -282,10 +293,8 @@ def _collect_definitions(
             continue
 
         ret_node = _one(caps, "ret")
-        params = (
-            _parse_params(spec.param_style, params_node)
-            if params_node is not None
-            else []
+        params = _definition_params(
+            spec.param_style, params_node, _one(caps, "recv")
         )
 
         returns = None
@@ -354,6 +363,68 @@ def _is_deleted_function(def_node: Node) -> bool:
     return any(c.type == "delete_method_clause" for c in def_node.children)
 
 
+def _is_record_header(def_node: Node) -> bool:
+    """Whether a definition node is a Java record's component list,
+    standing for the record's implicit canonical constructor."""
+    parent = def_node.parent
+    return (
+        def_node.type == "formal_parameters"
+        and parent is not None
+        and parent.type == "record_declaration"
+    )
+
+
+# A type annotation inside a Java parameter's type text
+# (``java.lang.@Nullable String``, ``String @NonNull []``).
+_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(\([^)]*\))?\s*")
+
+
+def _record_declares_canonical(record: Node) -> bool:
+    """Whether a Java record's body declares its canonical constructor.
+
+    A compact constructor always is it. An explicit constructor is it
+    when its parameter types are the components' types (JLS 8.10.4),
+    compared with annotations and whitespace dropped: the header may
+    annotate a component its constructor's parameter leaves bare.
+    """
+    header = record.child_by_field_name("parameters")
+    body = record.child_by_field_name("body")
+    if header is None or body is None:
+        return False
+
+    components = _java_param_types(header)
+    for member in body.named_children:
+        if member.type == "compact_constructor_declaration":
+            return True
+        if member.type != "constructor_declaration":
+            continue
+        params = member.child_by_field_name("parameters")
+        if params is not None and _java_param_types(params) == components:
+            return True
+
+    return False
+
+
+def _java_param_types(params_node: Node) -> list[str]:
+    """A Java parameter list's types, annotations and whitespace
+    dropped. A varargs type keeps its ``...``, and ``int a[]`` reads
+    as ``int[]``, the type it declares."""
+    types: list[str] = []
+    for param in params_node.named_children:
+        if param.type == "comment":
+            continue
+        if param.type == "spread_parameter":
+            text = _java_spread_param(param).type or _text(param)
+        else:
+            type_node = param.child_by_field_name("type")
+            text = _text(type_node) if type_node is not None else _text(param)
+            text += "".join(
+                _text(c) for c in param.children if c.type == "dimensions"
+            )
+        types.append(re.sub(r"\s+", "", _JAVA_TYPE_ANNOTATION.sub("", text)))
+    return types
+
+
 # ALL-CAPS-with-underscores is the near-universal C/C++ convention for
 # function-like macros (``TF_DEVICELIST_METHOD``, ``EXPECT_DEATH``,
 # ``TF_ASSERT_OK_AND_ASSIGN``, ...). Combined with a malformed
@@ -409,6 +480,39 @@ def _looks_like_c_macro_invocation(
         return False
 
     return bool(_ALL_CAPS_NAME.match(name))
+
+
+def _definition_params(
+    style: str,
+    params_node: Node | None,
+    recv_node: Node | None,
+) -> list[Param]:
+    """A definition's parameters, a Go receiver first when it has one."""
+    params = (
+        _parse_params(style, params_node) if params_node is not None else []
+    )
+    recv = _receiver_param(style, recv_node)
+
+    return [recv, *params] if recv is not None else params
+
+
+def _receiver_param(style: str, recv_node: Node | None) -> Param | None:
+    """A Go method's receiver as a leading ``Param(receiver=True)``.
+
+    ``s`` in ``func (s *Server) Run()`` is how the body names the value
+    the method runs on, so recording it lets a call on ``s`` be typed
+    the way a call on ``self`` is. An unnamed receiver (``func (*S)
+    Run()``) has nothing to record.
+    """
+    if recv_node is None:
+        return None
+    parsed = _parse_params(style, recv_node)
+    if not parsed or not parsed[0].name:
+        return None
+    first = parsed[0]
+    rtype = first.type.lstrip("*").strip() if first.type else None
+
+    return Param(first.name, rtype or None, receiver=True)
 
 
 def _receiver_container(recv_node: Node | None) -> str | None:
@@ -531,8 +635,10 @@ def _jvm_visibility(language: str, def_node: Node) -> str | None:
     Java: the narrowest of the member's own access and every enclosing
     type's, walking up through type bodies to the file. A member of an
     anonymous or local class (a type body that isn't reached that way)
-    gets ``None``. Kotlin: ``"private"`` when the declaration or any
-    enclosing class or object is ``private``.
+    gets ``None``. A record's header, standing for its implicit
+    canonical constructor, has the record's own access (JLS 8.10.4).
+    Kotlin: ``"private"`` when the declaration or any enclosing class
+    or object is ``private``.
 
     Args:
         language: The file's language name.
@@ -541,6 +647,9 @@ def _jvm_visibility(language: str, def_node: Node) -> str | None:
     Returns:
         ``"private"``, ``"package"`` or ``None``.
     """
+    if language == "java" and _is_record_header(def_node):
+        access = _java_effective_access(def_node.parent)
+        return access if access in ("private", "package") else None
     if language == "java" and def_node.type in _JAVA_VISIBILITY_MEMBERS:
         access = _java_effective_access(def_node)
         return access if access in ("private", "package") else None
@@ -1482,12 +1591,27 @@ def _parse_params(style: str, params_node: Node) -> list[Param]:
 # Calls
 
 
+# One scope's claim on a name: (start byte, end byte, kind, scope node
+# type). ``kind`` is "param" / "local", or ``_BOUND_EXEMPT`` for a
+# binding the map already indexes (a nested def, an import), recorded
+# only so the innermost-scope search stops on it.
+_Binding = tuple[int, int, str, str]
+
+
 def _collect_calls(
-    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+    spec: LanguageSpec,
+    root: Node,
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+    bindings: dict[str, list[_Binding]],
 ) -> list[RawCall]:
-    """Find call expressions and attribute them to enclosing defs."""
+    """Find call expressions and attribute them to enclosing defs.
+
+    Each call is tagged with what its callee's first segment is bound
+    to (``RawCall.bound``); ``bindings`` is ``_local_bindings``' table.
+    """
     if spec.name == "kotlin":
-        return _collect_kotlin_calls(spec, root, rel, defs)
+        return _collect_kotlin_calls(spec, root, rel, defs, bindings)
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
     attrs = (
         _rust_error_attribute_spans(root)
@@ -1516,6 +1640,7 @@ def _collect_calls(
         call = _raw_call(callee, rel, spans, arg_count, constructs=cpp_new)
         if call is None:
             continue
+        _tag_bound(spec, call, callee, bindings)
         if (
             spec.name == "java"
             and call_node is not None
@@ -1532,7 +1657,11 @@ def _collect_calls(
 
 
 def _collect_kotlin_calls(
-    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+    spec: LanguageSpec,
+    root: Node,
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+    bindings: dict[str, list[_Binding]],
 ) -> list[RawCall]:
     """Kotlin calls, attributed to their enclosing definitions.
 
@@ -1545,6 +1674,11 @@ def _collect_kotlin_calls(
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
     calls: list[RawCall] = []
     for _, caps in _run_query(spec.grammar, spec.call_query, root):
+        generic = _kotlin_generic_call(caps, rel, spans)
+        if generic is not None:
+            _tag_bound(spec, generic, _one(caps, "gcall"), bindings)
+            calls.append(generic)
+            continue
         ctor = _one(caps, "ctor")
         call_node = ctor or _one(caps, "call")
         if call_node is None:
@@ -1559,18 +1693,41 @@ def _collect_kotlin_calls(
         text, name, receiver = parts
         text, receiver = _cap_callee(text, name, receiver)
         caller = _enclosing(spans, call_node.start_byte)
-        calls.append(
-            RawCall(
-                caller_id=caller.id if caller else None,
-                path=rel,
-                text=text,
-                name=name,
-                receiver=receiver,
-                line=call_node.start_point[0] + 1,
-                arg_count=_kotlin_arg_count(call_node),
-            )
+        call = RawCall(
+            caller_id=caller.id if caller else None,
+            path=rel,
+            text=text,
+            name=name,
+            receiver=receiver,
+            line=call_node.start_point[0] + 1,
+            arg_count=_kotlin_arg_count(call_node),
         )
+        _tag_bound(spec, call, call_node, bindings)
+        calls.append(call)
     return calls
+
+
+# The joiners a callee text's segments are split on.
+_CALLEE_JOINERS = re.compile(r"\?\.|->|::|\.")
+
+
+def _callee_head(text: str) -> str:
+    """The first segment of a callee text: ``a`` of ``a.b.c``,
+    ``a?.b``, ``a->b`` or ``a::b``; the text itself when it has one."""
+    return _CALLEE_JOINERS.split(text, maxsplit=1)[0]
+
+
+def _tag_bound(
+    spec: LanguageSpec,
+    call: RawCall,
+    node: Node | None,
+    bindings: dict[str, list[_Binding]],
+) -> None:
+    """Set ``call.bound`` from the binding table, at ``node``'s place."""
+    if node is None or not bindings:
+        return
+    claims = bindings.get(_callee_head(call.text))
+    call.bound = _bound_kind(spec, node, claims)
 
 
 def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
@@ -1583,6 +1740,13 @@ def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
     head = call.named_children[0] if call.named_children else None
     if head is None:
         return None
+
+    return _kotlin_head_parts(head)
+
+
+def _kotlin_head_parts(head: Node) -> tuple[str, str, str | None] | None:
+    """``(text, name, receiver)`` of a Kotlin callee: ``f`` or
+    ``a.b.f``, ``None`` for any other shape."""
     if head.type == "identifier":
         name = _text(head)
         return name, name, None
@@ -1594,6 +1758,49 @@ def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
     name = _text(member)
     receiver = _kotlin_canonical(head.named_children[0])
     return f"{receiver}.{name}", name, receiver
+
+
+def _kotlin_generic_call(
+    caps: dict[str, list[Node]],
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+) -> RawCall | None:
+    """The call a ``@gcall`` match stands for: ``f<T>(x)`` that
+    tree-sitter-kotlin parsed as ``(f < T) > (x)``.
+
+    One argument, or an unknown count when it is a spread
+    (``*args``). Calls inside the argument are found on their own.
+
+    Args:
+        caps: One ``call_query`` match.
+        rel: Repo-relative file path.
+        spans: ``(start_byte, end_byte, symbol)`` of every definition.
+
+    Returns:
+        The call, or ``None`` for any other match.
+    """
+    node = _one(caps, "gcall")
+    head = _one(caps, "gfn")
+    arg = _one(caps, "garg")
+    if node is None or head is None or arg is None:
+        return None
+    parts = _kotlin_head_parts(head)
+    if parts is None:
+        return None
+
+    text, name, receiver = parts
+    text, receiver = _cap_callee(text, name, receiver)
+    spread = any(c.type == "spread_expression" for c in arg.named_children)
+    caller = _enclosing(spans, node.start_byte)
+    return RawCall(
+        caller_id=caller.id if caller else None,
+        path=rel,
+        text=text,
+        name=name,
+        receiver=receiver,
+        line=node.start_point[0] + 1,
+        arg_count=None if spread else 1,
+    )
 
 
 def _kotlin_constructed_type(
@@ -2434,7 +2641,7 @@ def _collect_refs(
     root: Node,
     rel: str,
     defs: list[tuple[Node, Symbol]],
-    import_bytes: frozenset[int] = frozenset(),
+    bindings: dict[str, list[_Binding]],
 ) -> list[RawRef]:
     """Find bare-identifier value references, attributed to enclosing defs.
 
@@ -2447,15 +2654,30 @@ def _collect_refs(
     yet.
 
     Each reference is tagged with what it is lexically bound to
-    (``RawRef.bound``, see ``_local_bindings``); ``import_bytes`` is
-    ``_import_binding_bytes``'s set.
+    (``RawRef.bound``); ``bindings`` is ``_local_bindings``' table, or
+    empty for a language whose references a local can't shadow.
     """
     if spec.reference_query is None:
         return []
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
-    bindings = _local_bindings(spec, root, defs, import_bytes)
     refs: list[RawRef] = []
     for _, caps in _run_query(spec.grammar, spec.reference_query, root):
+        ctor_ref = _one(caps, "ctorref")
+        if ctor_ref is not None:
+            # A type name is never a local, so the reference is a plain
+            # one, never ``bound``.
+            type_name = _java_constructor_ref_type(ctor_ref)
+            if type_name is not None:
+                caller = _enclosing(spans, ctor_ref.start_byte)
+                refs.append(
+                    RawRef(
+                        caller_id=caller.id if caller else None,
+                        path=rel,
+                        name=type_name,
+                        line=ctor_ref.start_point[0] + 1,
+                    )
+                )
+            continue
         ref_node = _one(caps, "ref")
         if ref_node is None:
             continue
@@ -2473,6 +2695,33 @@ def _collect_refs(
             )
         )
     return refs
+
+
+def _java_constructor_ref_type(node: Node) -> str | None:
+    """The type a Java ``X::new`` constructor reference names, or
+    ``None`` when it names no constructor dekko can look up.
+
+    ``X::new``, ``X<T>::new`` and ``Outer.X::new`` (a capitalized first
+    segment is a nesting) name ``X``. ``a.b.X::new`` starts with a
+    package, which a reference has no written path to carry, so it is
+    skipped rather than taken by its last segment. An array constructor
+    (``int[]::new``, ``X[]::new``) builds an array and runs no
+    constructor of ``X``.
+    """
+    head = node.children[0] if node.children else None
+    if head is not None and head.type == "generic_type":
+        head = head.named_children[0] if head.named_children else None
+    if head is None:
+        return None
+    if head.type in ("identifier", "type_identifier"):
+        return _text(head)
+    if head.type not in ("field_access", "scoped_type_identifier"):
+        return None
+    text = _text(head)
+    if not text[:1].isupper():
+        return None
+
+    return text.rpartition(".")[2]
 
 
 def _collect_reads(
@@ -2559,11 +2808,6 @@ def _is_property_read(site: Node) -> bool:
 # yields ``bound=None``, which is exactly the behavior without this
 # table: it can leave a false edge standing, never remove a true one.
 
-# One scope's claim on a name: (start byte, end byte, kind, scope node
-# type). ``kind`` is "param" / "local", or ``_BOUND_EXEMPT`` for a
-# binding the map already indexes (a nested def, an import), recorded
-# only so the innermost-scope search stops on it.
-_Binding = tuple[int, int, str, str]
 _BOUND_EXEMPT = ""
 
 # A class body binds names for its own statements only: code inside a
@@ -2588,6 +2832,12 @@ _PATTERN_CONTAINERS = frozenset(
         "as_pattern_target",
         "tuple",
         "list",
+        "inferred_parameters",
+        "parameter_list",
+        "reference_declarator",
+        "structured_binding_declarator",
+        "multi_variable_declaration",
+        "function_value_parameters",
     }
 )
 # Pattern nodes that keep the bound name under one field; every other
@@ -2600,7 +2850,17 @@ _PATTERN_FIELDS = {
     "optional_parameter": "pattern",
     "default_parameter": "name",
     "typed_default_parameter": "name",
+    "formal_parameter": "name",
+    "catch_formal_parameter": "name",
+    "init_declarator": "declarator",
+    "pointer_declarator": "declarator",
+    "array_declarator": "declarator",
+    "parameter_declaration": "declarator",
+    "optional_parameter_declaration": "declarator",
 }
+# Kotlin pattern nodes with no fields: the name is their first
+# ``identifier`` child (a ``parameter`` may lead with modifiers).
+_FIRST_IDENTIFIER_PATTERNS = frozenset({"parameter", "variable_declaration"})
 _PATTERN_LEAVES = frozenset(
     {"identifier", "shorthand_property_identifier_pattern"}
 )
@@ -2624,6 +2884,11 @@ def _pattern_identifiers(node: Node) -> list[Node]:
         # identifiers that bind nothing.
         first = node.named_children[0] if node.named_children else None
         return _pattern_identifiers(first) if first is not None else []
+    if node.type in _FIRST_IDENTIFIER_PATTERNS:
+        first = next(
+            (c for c in node.named_children if c.type == "identifier"), None
+        )
+        return [first] if first is not None else []
     if node.type in _PATTERN_CONTAINERS:
         return [
             ident
@@ -2674,6 +2939,9 @@ def _binding_sites(
         return node.parent, "param", _pattern_identifiers(node)
     if capture == "scoped":
         return scope_node, "local", _pattern_identifiers(node)
+    if capture == "funcparams":
+        scope = _scope_above(node.parent, spec.binding_function_scopes)
+        return scope, "param", _pattern_identifiers(node)
     if capture == "funclocal":
         scope = _scope_above(node.parent, spec.binding_function_scopes)
         return scope, "local", _pattern_identifiers(node)
@@ -2699,6 +2967,7 @@ def _binding_sites(
 
 _BINDING_CAPTURES = (
     "params",
+    "funcparams",
     "param",
     "local",
     "funclocal",
@@ -4921,6 +5190,314 @@ def _collect_type_uses(
 
 
 # ---------------------------------------------------------------------
+# Fields
+
+# Receivers a field assignment in a method is made on.
+_FIELD_SELF_NAMES = frozenset({"this", "self", "cls"})
+
+# A field declared by a constructor parameter sits in the constructor's
+# span but belongs to its class: a TS parameter property, a Java record
+# component, a Kotlin primary-constructor ``val``/``var`` (the last two
+# have a constructor symbol spanning the parameter list).
+_PARAM_PROPERTY_NODES = frozenset(
+    {
+        "required_parameter",
+        "optional_parameter",
+        "formal_parameter",
+        "class_parameter",
+    }
+)
+
+# Enum members: a field typed as its own enum.
+_ENUM_CONSTANT_NODES = frozenset({"enum_constant", "enum_entry"})
+
+# A literal initializer types a field as a builtin. The names are
+# lowercase on purpose: the resolver reads a lowercase type as outside
+# the repo, so a call on such a field goes external. ``None``/``null``/
+# ``undefined`` are absent: a placeholder (``self.conn = None`` in
+# ``__init__``) says nothing about what is assigned later.
+_FIELD_LITERAL_TYPES = {
+    "string": "string",
+    "template_string": "string",
+    "string_literal": "string",
+    "number": "number",
+    "integer": "int",
+    "integer_literal": "int",
+    "float": "float",
+    "true": "boolean",
+    "false": "boolean",
+    "boolean_literal": "boolean",
+    "array": "array",
+    "list": "list",
+    "object": "object",
+    "dictionary": "dict",
+    "tuple": "tuple",
+    "set": "set",
+}
+
+_PASCAL_NAME = re.compile(r"[A-Z][A-Za-z0-9_]*\Z")
+
+
+def _collect_fields(
+    spec: LanguageSpec,
+    root: Node,
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+) -> None:
+    """Attach the fields each type declares to its ``Symbol``.
+
+    Runs ``spec.field_query`` and gives each match to its owner: the
+    innermost type whose span holds it. A match whose innermost
+    definition is a function is a local and is dropped, unless it is a
+    ``this.x = ..`` / ``self.x = ..`` assignment or a constructor
+    parameter property, which belong to the enclosing type. When a type
+    names a field twice, a declared type beats an inferred one and any
+    type beats none.
+
+    Args:
+        spec: Language spec; nothing happens when it has no
+            ``field_query``.
+        root: Parsed tree root.
+        rel: Repo-relative path (unused beyond symmetry with the other
+            collectors).
+        defs: The definition pass's ``(node, symbol)`` pairs; their
+            ``fields`` are set in place, in source order.
+    """
+    del rel
+    if spec.field_query is None:
+        return
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    type_spans = [span for span in spans if span[2].kind in TYPE_KINDS]
+    if not type_spans:
+        return
+    rows: dict[str, dict[str, Field]] = {}
+    owners: dict[str, Symbol] = {}
+    for _, caps in _run_query(spec.grammar, spec.field_query, root):
+        for owner, row in _field_rows(spec.name, caps, spans, type_spans):
+            owners[owner.id] = owner
+            _merge_field(rows.setdefault(owner.id, {}), row)
+    for sym_id, named in rows.items():
+        owners[sym_id].fields = sorted(named.values(), key=lambda f: f.line)
+
+
+def _merge_field(named: dict[str, Field], row: Field) -> None:
+    """Keep the better-typed of two rows for the same field name."""
+    old = named.get(row.name)
+    if old is None:
+        named[row.name] = row
+        return
+
+    upgrade = row.type is not None and (
+        old.type is None or (old.inferred and not row.inferred)
+    )
+    if upgrade:
+        named[row.name] = row
+
+
+def _field_rows(
+    language: str,
+    caps: dict[str, list[Node]],
+    spans: list[tuple[int, int, Symbol]],
+    type_spans: list[tuple[int, int, Symbol]],
+) -> list[tuple[Symbol, Field]]:
+    """The ``(owner, Field)`` rows one ``field_query`` match yields."""
+    node = _one(caps, "field")
+    if node is None or not _field_shape_ok(language, node, caps):
+        return []
+    owner = _field_owner(node, caps, spans, type_spans)
+    if owner is None:
+        return []
+    body = _one(caps, "tuple")
+    if body is not None:
+        return [(owner, row) for row in _tuple_fields(body)]
+    name, suffix = _field_name(caps)
+    if name is None and language == "go":
+        name = _go_embedded_name(caps)
+    if name is None:
+        return []
+    type_text, inferred = _field_type(language, node, caps, owner)
+    if type_text is not None and suffix:
+        type_text += suffix
+
+    return [(owner, Field(name, type_text, node.start_point[0] + 1, inferred))]
+
+
+def _field_owner(
+    node: Node,
+    caps: dict[str, list[Node]],
+    spans: list[tuple[int, int, Symbol]],
+    type_spans: list[tuple[int, int, Symbol]],
+) -> Symbol | None:
+    """The type a field match belongs to, or ``None`` for a local."""
+    inner = _enclosing(spans, node.start_byte)
+    if inner is None:
+        return None
+    if inner.kind in TYPE_KINDS:
+        return inner
+    in_method = (
+        _one(caps, "self") is not None or node.type in _PARAM_PROPERTY_NODES
+    )
+    return _enclosing(type_spans, node.start_byte) if in_method else None
+
+
+def _field_shape_ok(
+    language: str,
+    node: Node,
+    caps: dict[str, list[Node]],
+) -> bool:
+    """Whether a match is a field at all, past what the query can say."""
+    self_node = _one(caps, "self")
+    if self_node is not None and _text(self_node) not in _FIELD_SELF_NAMES:
+        return False
+    check = _FIELD_SHAPE_CHECKS.get((language, node.type))
+
+    return check is None or check(node)
+
+
+def _parent_type(node: Node, depth: int) -> str | None:
+    """Type of the ancestor ``depth`` levels up, or ``None``."""
+    up: Node | None = node
+    for _ in range(depth):
+        up = up.parent if up is not None else None
+    return up.type if up is not None else None
+
+
+def _kotlin_class_parameter_is_property(node: Node) -> bool:
+    """A Kotlin primary-constructor parameter is a field with val/var."""
+    return any(child.type in ("val", "var") for child in node.children)
+
+
+_FIELD_SHAPE_CHECKS: dict[tuple[str, str], Callable[[Node], bool]] = {
+    # A struct's own field, not one of an enum variant's.
+    ("rust", "field_declaration"): lambda n: (
+        _parent_type(n, 2) in ("struct_item", "union_item")
+    ),
+    # A named type's own field, not one of a nested anonymous struct's.
+    ("go", "field_declaration"): lambda n: _parent_type(n, 3) == "type_spec",
+    # A class-body property, not a local ``val``.
+    ("kotlin", "property_declaration"): lambda n: (
+        _parent_type(n, 1) == "class_body"
+    ),
+    ("kotlin", "class_parameter"): _kotlin_class_parameter_is_property,
+}
+
+
+def _field_name(caps: dict[str, list[Node]]) -> tuple[str | None, str]:
+    """A field's name, plus the pointer suffix a C/C++ declarator adds.
+
+    A C/C++ declarator that turns out to declare a method (a
+    ``function_declarator`` on the way down) yields no name.
+    """
+    decl = _one(caps, "decl")
+    if decl is not None:
+        return _cpp_field_declarator(decl)
+    name = _one(caps, "name")
+
+    return (_text(name) if name is not None else None), ""
+
+
+def _go_embedded_name(caps: dict[str, list[Node]]) -> str | None:
+    """An embedded Go field's name, from its ``@type`` capture."""
+    type_node = _one(caps, "type")
+
+    if type_node is None:
+        return None
+
+    return go_embedded_name(_text(type_node))
+
+
+def _cpp_field_declarator(decl: Node) -> tuple[str | None, str]:
+    """Dig a C/C++ field declarator for its name and ``*``/``&`` suffix."""
+    suffix = ""
+    node: Node | None = decl
+    while node is not None:
+        if node.type == "field_identifier":
+            return _text(node), suffix
+        if node.type == "function_declarator":
+            return None, ""
+        if node.type == "pointer_declarator":
+            suffix += "*"
+        elif node.type == "reference_declarator":
+            suffix += "&"
+        inner = node.child_by_field_name("declarator")
+        if inner is None and node.named_children:
+            inner = node.named_children[-1]
+        node = inner
+    return None, ""
+
+
+def _tuple_fields(body: Node) -> list[Field]:
+    """A Rust tuple struct's fields, named by position."""
+    out: list[Field] = []
+    for i, child in enumerate(body.children):
+        if body.field_name_for_child(i) != "type":
+            continue
+        out.append(
+            Field(str(len(out)), _text(child), child.start_point[0] + 1)
+        )
+    return out
+
+
+def _field_type(
+    language: str,
+    node: Node,
+    caps: dict[str, list[Node]],
+    owner: Symbol,
+) -> tuple[str | None, bool]:
+    """A field's type text and whether it was inferred."""
+    if node.type in _ENUM_CONSTANT_NODES:
+        return owner.qualname, False
+    type_node = _one(caps, "type")
+    if type_node is not None:
+        declared = _norm_field_type(language, _text(type_node))
+        if declared is not None:
+            return declared, False
+    inferred = _infer_field_type(language, _one(caps, "init"))
+
+    return inferred, inferred is not None
+
+
+def _norm_field_type(language: str, text: str) -> str | None:
+    """Strip an annotation's ``:`` (and Go's ``*``); empty is ``None``."""
+    out = text.strip()
+    if out.startswith(":"):
+        out = out[1:].strip()
+    if language == "go":
+        out = out.lstrip("*")
+
+    return out or None
+
+
+def _infer_field_type(language: str, init: Node | None) -> str | None:
+    """The type a construction call or literal initializer gives a field."""
+    if init is None:
+        return None
+    literal = _literal_type(init)
+    if literal is not None:
+        return literal
+    if init.type == "new_expression":
+        ctor = init.child_by_field_name("constructor")
+        return _text(ctor).rsplit(".", 1)[-1] if ctor is not None else None
+    callee = None
+    if language == "python" and init.type == "call":
+        callee = init.child_by_field_name("function")
+    elif language == "kotlin" and init.type == "call_expression":
+        callee = init.named_children[0] if init.named_children else None
+    if callee is None:
+        return None
+    name = _text(callee).rsplit(".", 1)[-1]
+
+    return name if _PASCAL_NAME.match(name) else None
+
+
+def _literal_type(init: Node) -> str | None:
+    """The builtin a literal initializer names (``-1`` included)."""
+    if init.type == "unary_expression" and init.named_children:
+        init = init.named_children[0]
+    return _FIELD_LITERAL_TYPES.get(init.type)
+
+
+# ---------------------------------------------------------------------
 # Imports
 
 
@@ -5057,15 +5634,68 @@ def _python_rebinds(
 def _imports_rust(
     matches: list[tuple[int, dict[str, list[Node]]]], rel: str
 ) -> list[Import]:
-    """Flatten Rust ``use`` declarations into imported names."""
+    """Flatten Rust ``use`` declarations into imported names.
+
+    A glob is kept as ``("*", "<prefix>::*")``. A ``use`` inside an
+    inline ``mod m { .. }`` is recorded at file level like every other,
+    so its ``super`` is re-based onto the file's own module first (see
+    ``_rust_rebased_use``).
+    """
     out: list[Import] = []
     for _, caps in matches:
         use = _one(caps, "use")
         if use is None:
             continue
+        depth = _rust_inline_mod_depth(use)
         for name, source in _parse_rust_use(_text(use)):
-            out.append(Import(path=rel, name=name, source=source))
+            rebased = _rust_rebased_use(source, depth)
+            if name == "*" and rebased == "self::*":
+                # The file's own module: it binds nothing new.
+                continue
+            out.append(Import(path=rel, name=name, source=rebased))
     return out
+
+
+def _rust_inline_mod_depth(node: Node) -> int:
+    """How many inline ``mod m { .. }`` blocks enclose ``node``.
+
+    A function body is no module, so a ``use`` inside a ``fn`` inside
+    ``mod tests`` is one level deep.
+    """
+    depth = 0
+    parent = node.parent
+    while parent is not None:
+        if parent.type == "mod_item":
+            depth += 1
+        parent = parent.parent
+    return depth
+
+
+def _rust_rebased_use(source: str, depth: int) -> str:
+    """A ``use`` source written ``depth`` inline modules deep, as the
+    file's own module would write it.
+
+    Inside ``mod tests { use super::*; }`` the ``super`` is the file
+    itself, so read at file level it is ``self::*``; zed has 516 of its
+    566 ``use super::*`` in such a block. One leading ``super`` is
+    dropped per level, and a path left pointing into the file's own
+    module is written ``self::..``. A path that climbs fewer levels
+    than it is deep names an inline module's item, which the file's
+    top level doesn't hold either; it gets ``self::`` too, so nothing
+    reads it as the parent file's. A path with no leading ``super`` is
+    left as written.
+    """
+    segs = source.split("::")
+    climbs = 0
+    while climbs < len(segs) and segs[climbs] == "super":
+        climbs += 1
+    if not depth or not climbs:
+        return source
+    rest = segs[min(climbs, depth) :]
+    if not rest or rest[0] != "super":
+        rest = ["self", *rest]
+
+    return "::".join(rest)
 
 
 def _imports_js(
@@ -5249,8 +5879,8 @@ def _strip_quotes(text: str) -> str:
 def _parse_rust_use(text: str) -> list[tuple[str, str]]:
     """Expand a ``use`` argument into ``(local_name, source)`` pairs.
 
-    Handles plain paths, ``as`` renames, nested ``{...}`` groups, and
-    skips glob imports.
+    Handles plain paths, ``as`` renames and nested ``{...}`` groups. A
+    glob gives ``("*", "<prefix>::*")``.
 
     Args:
         text: The argument of a ``use`` declaration, e.g.
@@ -5275,7 +5905,10 @@ def _parse_rust_use(text: str) -> list[tuple[str, str]]:
 def _rust_use_leaf(path: str) -> list[tuple[str, str]]:
     """Resolve a brace-free use path to its local binding."""
     path = path.strip()
-    if not path or path.endswith("*"):
+    if path.endswith("*"):
+        prefix = path[:-1].strip().rstrip(":").strip()
+        return [("*", f"{prefix}::*")] if prefix else []
+    if not path:
         return []
     if " as " in path:
         source, local = path.rsplit(" as ", 1)

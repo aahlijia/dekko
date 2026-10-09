@@ -6,7 +6,7 @@ import pytest
 
 from dekko.integrations import cli
 from dekko.analysis import query
-from dekko.render.mapfile import MapIndex
+from dekko.render.mapfile import MapIndex, load_map
 from dekko.core.model import Param, Symbol
 
 from conftest import RepoFactory
@@ -536,3 +536,82 @@ def test_workset_type_impact_counts_sites_and_bundles_owners(
     assert doc["seed"]["blast_radius"]["type_usage"] == 3
     assert doc["seed"]["touched_symbols"] == 3
     assert "app.ts" in doc["seed"]["touched_files"]
+
+
+def test_type_go_receiver_is_not_a_param_usage(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A method's receiver says where the method lives, not that it takes
+    # the type as an argument; listing it would add one row per method.
+    files = {
+        "main.go": (
+            "package main\n"
+            "\n"
+            "type Config struct{}\n"
+            "\n"
+            "func (c *Config) Load() {\n"
+            "}\n"
+            "\n"
+            "func start(cfg *Config) {\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(["query", "type", "Config", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "start" in out
+    assert "Load" not in out
+
+
+def test_go_receiver_alone_does_not_make_a_type_used(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A struct whose only mentions are its own methods' receivers is
+    # still an unused type.
+    root = make_mapped_repo(
+        {
+            "main.go": (
+                "package main\n"
+                "\n"
+                "type Config struct{}\n"
+                "\n"
+                "func (c *Config) Load() {\n"
+                "}\n"
+            ),
+        }
+    )
+    names = query.type_usage_name_index(load_map(root))
+    assert "Config" not in names
+
+
+FIELD_ONLY_TYPE = {
+    "main.go": (
+        "package main\n"
+        "\n"
+        "type Link struct {\n"
+        "\tURL string\n"
+        "}\n"
+        "\n"
+        "type Page struct {\n"
+        "\tLinks []Link\n"
+        "}\n"
+        "\n"
+        "func build() Page {\n"
+        '\tl := Link{URL: "x"}\n'
+        "\treturn Page{Links: []Link{l}}\n"
+        "}\n"
+    ),
+}
+
+
+def test_an_empty_type_answer_points_at_its_references(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(FIELD_ONLY_TYPE)
+    code = cli.main(["query", "type", "Link", "--root", str(root)])
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "no results for type 'Link'" in err
+    assert "fields, locals and literals aren't recorded" in err
+    assert "'dekko query callers Link'" in err

@@ -14,18 +14,20 @@ import subprocess
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
-from functools import cached_property
+from dataclasses import dataclass, field, fields
+from functools import cache, cached_property
 from pathlib import Path
+from typing import Any
 
 from dekko import selfcheck
-from dekko.core import walker
+from dekko.core import languages, walker
 from dekko.classify import is_test_path
 from dekko.core.model import (
     CallGraph,
     CatchSite,
     EnvRead,
     ExternalCall,
+    Field,
     FileMap,
     Import,
     Param,
@@ -460,6 +462,14 @@ def _too_large_summary(
     }
 
 
+def _is_mappable(path: str) -> bool:
+    """Whether a Tier-1 or Tier-2 grammar would map ``path``."""
+    return (
+        languages.spec_for_path(path) is not None
+        or languages.tier2_grammar_for_path(path) is not None
+    )
+
+
 def _symlink_summary(
     skipped: list[tuple[str, str]] | None,
 ) -> dict | None:
@@ -469,7 +479,10 @@ def _symlink_summary(
     aggregated by directory) rather than ``_vendored_summary`` — a
     symlinked source file is rare enough that the actual path is the
     useful signal: a user wants to know *which* file quietly became
-    invisible, not just a count.
+    invisible, not just a count. Only a link a grammar would map
+    counts: a symlinked ``LICENSE-GPL`` or ``AGENTS.md`` can't hold a
+    symbol even when followed (zed has 262 of them, and the note rode
+    on every empty reply).
 
     Args:
         skipped: ``(path, reason)`` pairs from ``walker.discover``.
@@ -482,7 +495,9 @@ def _symlink_summary(
     if not skipped:
         return None
     paths = sorted(
-        path for path, reason in skipped if reason == _SYMLINK_REASON
+        path
+        for path, reason in skipped
+        if reason == _SYMLINK_REASON and _is_mappable(path)
     )
     if not paths:
         return None
@@ -881,6 +896,9 @@ class MapIndex:
         notes_stat: ``[mtime_ns, size]`` of ``notes.json`` when
             ``notes`` was read (``load_map`` only), for
             ``refresh_notes``.
+        root_dir: The repository root the map was read from
+            (``load_map`` only), so a reply can look at a path on disk
+            that isn't in the map.
     """
 
     root_label: str
@@ -954,6 +972,7 @@ class MapIndex:
     map_stat: list[int] | None = None
     hidden_test_symbols: dict[str, int] = field(default_factory=dict)
     notes_stat: list[int] | None = None
+    root_dir: Path | None = None
     # ``without_tests``'s result, kept for the next call. The view
     # shares symbols and lists with this index, which no reader
     # mutates; ``refresh_notes`` drops it when the notes change.
@@ -1019,6 +1038,7 @@ class MapIndex:
             root_label=self.root_label,
             provenance=self.provenance,
             doc_version=self.doc_version,
+            root_dir=self.root_dir,
         )
         for sid, sym in self.symbols_by_id.items():
             if _symbol_is_test(sym):
@@ -1422,9 +1442,32 @@ def describe_version_stale(fresh: Freshness) -> str:
     return f"stale ({which}): " + "; ".join(parts)
 
 
+@cache
+def _field_names(cls: type) -> frozenset[str]:
+    """The dataclass field names ``cls`` accepts."""
+    return frozenset(f.name for f in fields(cls))
+
+
+def _from_known(cls: type, d: dict) -> Any:
+    """Build dataclass ``cls`` from ``d``, ignoring keys it doesn't have.
+
+    A map written by a newer dekko can carry a field this build has
+    never heard of. Passing it on as a keyword raised ``TypeError`` and
+    took the whole read down, so a long-lived process older than the
+    map crashed on every call; dropping the key costs only what the
+    newer field would have added. Tried as-is first: a map from this
+    build never pays for the filter.
+    """
+    try:
+        return cls(**d)
+    except TypeError:
+        names = _field_names(cls)
+        return cls(**{k: v for k, v in d.items() if k in names})
+
+
 def _symbol_from_dict(d: dict) -> Symbol:
     """Rebuild a ``Symbol`` (with ``Param``s) from its JSON dict."""
-    params = [Param(**p) for p in d.get("params", [])]
+    params = [_from_known(Param, p) for p in d.get("params", [])]
     return Symbol(
         id=d["id"],
         name=d["name"],
@@ -1443,6 +1486,7 @@ def _symbol_from_dict(d: dict) -> Symbol:
         in_literal=d.get("in_literal", False),
         literal_consumer=d.get("literal_consumer"),
         visibility=d.get("visibility"),
+        fields=[_from_known(Field, f) for f in d.get("fields", [])],
     )
 
 
@@ -1572,6 +1616,7 @@ def load_map(root: Path) -> MapIndex | None:
     notes_stat = _stat_sig(root / _MAP_DIR / "notes.json")
     index = MapIndex(
         root_label=doc.get("root", root.name),
+        root_dir=root,
         provenance=doc.get("provenance"),
         notes=_load_notes(root),
         notes_stat=notes_stat,
@@ -1585,7 +1630,7 @@ def load_map(root: Path) -> MapIndex | None:
         if entry.get("error"):
             index.errors_by_path[fpath] = entry["error"]
         index.imports_by_path[fpath] = [
-            Import(**imp) for imp in entry.get("imports", [])
+            _from_known(Import, imp) for imp in entry.get("imports", [])
         ]
         index.type_aliases_by_path[fpath] = frozenset(
             entry.get("type_aliases", [])

@@ -804,3 +804,49 @@ def test_deps_dynamic_scan_handles_unreadable_and_unknown_language(
     assert deps._dynamic_import_constructs(None, "x.py", "python") == []
     assert deps._dynamic_import_constructs(root, "x.cob", "cobol") == []
     assert deps._dynamic_import_constructs(root, "x.py", None) == []
+
+
+MISSING_TARGETS = {
+    "src/a.ts": (
+        "import { b } from './b.js'\n"
+        "import { m } from './missing.js'\n"
+        "import { g } from 'src/gone/x.js'\n"
+        "import { z } from 'zod'\n"
+        "import { randomUUID } from 'crypto'\n"
+        "export function a(): void { b(); m(); g(); z(); randomUUID() }\n"
+    ),
+    "src/b.ts": "export function b(): void {}\n",
+}
+
+
+def test_deps_file_lists_unresolved_in_repo_specifiers_apart(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MISSING_TARGETS)
+    code = cli.main(["deps", "--root", str(root), "--file", "src/a.ts"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "unresolved (2): ./missing.js, src/gone/x.js" in out
+    assert "external (2): crypto, zod" in out
+
+
+def test_deps_file_json_carries_unresolved(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MISSING_TARGETS)
+    cli.main(["deps", "--root", str(root), "--file", "src/a.ts", "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["unresolved"] == ["./missing.js", "src/gone/x.js"]
+    assert doc["external"] == ["crypto", "zod"]
+
+
+def test_deps_summary_counts_unresolved_specifiers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MISSING_TARGETS)
+    cli.main(["deps", "--root", str(root), "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["external_sources"] == 2
+    assert doc["unresolved_specifiers"] == 2
+    cli.main(["deps", "--root", str(root)])
+    assert "2 unresolved in-repo specifiers" in capsys.readouterr().out

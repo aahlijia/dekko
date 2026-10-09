@@ -2106,3 +2106,29 @@ def test_constructed_class_prefers_the_constructors_own_file(
         cls = query.constructed_class(index, ctor)
         assert cls is not None
         assert cls.path == path
+
+
+@pytest.mark.parametrize("flag", [["--transitive"], ["--depth", "3"]])
+def test_callers_say_when_a_walk_flag_is_ignored(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    flag: list[str],
+) -> None:
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(
+        ["query", "callers", "a.py:helper", *flag, "--root", str(root)]
+    )
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "doesn't apply to 'callers'" in err
+    assert "dekko trace" in err
+
+
+def test_supertypes_take_transitive_without_a_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {"a.py": "class A:\n    pass\n\n\nclass B(A):\n    pass\n"}
+    )
+    cli.main(["query", "supertypes", "B", "--transitive", "--root", str(root)])
+    assert "doesn't apply" not in capsys.readouterr().err

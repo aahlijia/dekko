@@ -1243,6 +1243,78 @@ def test_rust_rename_edit_keeps_incremental_equal_to_full(
     assert (pair in external) == (before == "renamed")
 
 
+def _rust_crate(name: str, root: str) -> dict[str, str]:
+    return {
+        f"crates/{name}/Cargo.toml": (
+            f'[package]\nname = "{name}"\n\n[lib]\npath = "src/{name}.rs"\n'
+        ),
+        f"crates/{name}/src/{name}.rs": root,
+    }
+
+
+_RUST_POINT = (
+    "pub struct Point;\n"
+    "impl Point {\n"
+    "    pub fn new() -> Point {\n"
+    "        Point\n"
+    "    }\n"
+    "}\n"
+)
+RUST_REEXPORT_SRC = {
+    **_rust_crate("geo", "pub mod point;\npub use point::Point;\n"),
+    "crates/geo/src/point.rs": _RUST_POINT,
+    **_rust_crate("gfx", _RUST_POINT),
+    **_rust_crate("term", _RUST_POINT),
+    **_rust_crate(
+        "app", "use geo::Point;\npub fn run() {\n    Point::new();\n}\n"
+    ),
+}
+_REPOINTED = "pub mod point;\npub use gfx::Point;\n"
+
+
+def test_gate_widens_to_files_writing_a_type_re_exported_elsewhere(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``Point::new()`` is walked through ``geo``'s ``pub use``; the
+    call names ``new``, so the file is found by the type it wrote."""
+    root = make_mapped_repo(RUST_REEXPORT_SRC)
+    (root / "crates/geo/src/geo.rs").write_text(_REPOINTED)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"crates/geo/src/geo.rs", "crates/app/src/app.rs"}
+
+
+def test_gate_refuses_when_a_rust_glob_is_gained(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(RUST_REEXPORT_SRC)
+    (root / "crates/geo/src/geo.rs").write_text(
+        "pub mod point;\npub use point::*;\n"
+    )
+    assert _build(root) is None
+
+
+def test_rust_re_export_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(RUST_REEXPORT_SRC)
+    (root / "crates/geo/src/geo.rs").write_text(_REPOINTED)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = full["ids"]
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    assert (
+        "crates/app/src/app.rs::run",
+        "crates/gfx/src/gfx.rs::Point.new",
+    ) in edges
+
+
 PY_GENERATED_SRC = {
     "pkg/__init__.py": "",
     "pkg/ops/__init__.py": "",
@@ -1352,6 +1424,59 @@ def test_rust_alias_edit_keeps_incremental_equal_to_full(
     edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
     pair = ("src/user.rs::use_it", "src/other.rs::Other.new")
     assert (pair in edges) == (target == "Other")
+
+
+_SESSION_ID = (
+    "pub struct SessionId;\n"
+    "impl SessionId {\n"
+    "    pub fn new() -> SessionId {\n"
+    "        SessionId\n"
+    "    }\n"
+    "}\n"
+)
+_OUTSIDE_ACP = "mod ids;\nmod sidebar;\nuse ext::v1 as acp;\n"
+_IN_REPO_ACP = "mod ids;\nmod sidebar;\nuse crate::ids as acp;\n"
+RUST_GLOB_ALIAS_SRC = {
+    "crates/other/Cargo.toml": '[package]\nname = "other"\n',
+    "crates/other/src/lib.rs": _SESSION_ID,
+    "crates/app/Cargo.toml": (
+        '[package]\nname = "app"\n\n[lib]\npath = "src/app.rs"\n'
+    ),
+    "crates/app/src/ids.rs": _SESSION_ID,
+    "crates/app/src/sidebar.rs": (
+        "use super::*;\npub fn run() {\n    acp::SessionId::new();\n}\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("before", [_OUTSIDE_ACP, _IN_REPO_ACP])
+def test_rust_glob_alias_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    """``acp::SessionId::new()`` reaches the parent's ``use .. as acp``
+    through ``use super::*``; re-pointing it from an outside crate to a
+    repo module, or back, moves the unchanged child's call."""
+    root = make_mapped_repo(
+        RUST_GLOB_ALIAS_SRC | {"crates/app/src/app.rs": before}
+    )
+    after = _IN_REPO_ACP if before == _OUTSIDE_ACP else _OUTSIDE_ACP
+    (root / "crates/app/src/app.rs").write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = full["ids"]
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    pair = (
+        "crates/app/src/sidebar.rs::run",
+        "crates/app/src/ids.rs::SessionId.new",
+    )
+    assert (pair in edges) == (after == _IN_REPO_ACP)
 
 
 # --- reusing another tree's cache --------------------------------------

@@ -866,3 +866,64 @@ def test_cli_hooks_run_pre_bash_strict_smoke(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_a_recent_file_with_no_matching_word_is_not_listed(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Recently changed files only rank matched ones; on their own they
+    # used to make any prompt at all list the busiest of them.
+    _, index = _index(make_mapped_repo)
+    task = relevance.TaskContext(
+        terms=("weather",), recent_paths=frozenset({"src/db.py"})
+    )
+    assert hooks._relevant_files(index, task, ledger.LedgerView()) == []
+
+
+def test_a_recent_file_does_not_join_a_matched_one(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    _, index = _index(make_mapped_repo)
+    task = relevance.TaskContext(
+        terms=("login",), recent_paths=frozenset({"src/db.py"})
+    )
+    assert hooks._relevant_files(index, task, ledger.LedgerView()) == [
+        "src/auth.py"
+    ]
+
+
+def test_question_words_match_nothing(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "src/how.py": (
+                '"""Explain how and why it works."""\n'
+                "def why_it_works() -> None:\n    pass\n"
+            ),
+        }
+    )
+    assert _prompt_lines(root, "how and why?") is None
+
+
+def test_prompt_submit_fixture_copies_rank_after_real_definitions(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "src/editor.py": "def open_buffer() -> None:\n    pass\n",
+            "src/other.py": (
+                "def open_buffer() -> None:\n    pass\n\n\n"
+                "def a() -> None:\n    open_buffer()\n"
+            ),
+            "evals/fixtures/case/before.py": (
+                "def open_buffer() -> None:\n    pass\n\n\n"
+                "def b() -> None:\n    open_buffer()\n\n\n"
+                "def c() -> None:\n    open_buffer()\n"
+            ),
+        }
+    )
+    lines = _prompt_lines(root, "who calls open_buffer?")
+    assert lines is not None
+    pins = [ln for ln in lines if "(defines open_buffer)" in ln]
+    assert pins[-1] == "evals/fixtures/case/before.py (defines open_buffer)"

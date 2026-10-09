@@ -49,12 +49,56 @@ class Param:
             TS ``...rest``, Rust/Go/C/C++ ``...``) — makes the
             candidate's maximum arity unbounded. ``False`` for every
             ordinary parameter.
+        receiver: Whether the parameter is a Go method's receiver
+            (``s`` in ``func (s *Server) Run()``), recorded so a call
+            on it can be typed like ``self``. It is never an argument,
+            so arity skips it.
     """
 
     name: str
     type: str | None = None
     has_default: bool = False
     variadic: bool = False
+    receiver: bool = False
+
+
+@dataclass
+class Field:
+    """A field a type declares, with the type the resolver can follow.
+
+    Attributes:
+        name: Field name as written; a tuple-struct field is named by
+            its position (``"0"``, ``"1"``).
+        type: Declared type text (generics kept, Go's leading ``*``
+            stripped), a type read off a construction call or literal
+            initializer, or ``None`` when neither says.
+        line: 1-based line of the declaration.
+        inferred: Whether ``type`` came from an initializer rather than
+            an annotation.
+    """
+
+    name: str
+    type: str | None = None
+    line: int = 0
+    inferred: bool = False
+
+
+def go_embedded_name(type_text: str) -> str:
+    """The name Go gives an embedded field: its type's own name.
+
+    ``*pkg.Base[T]`` embeds a field called ``Base``, so a ``Field``
+    whose name is that of its own type is an embedding, and its type's
+    methods are the struct's.
+
+    Args:
+        type_text: The embedded type as written.
+
+    Returns:
+        The bare type name.
+    """
+    bare = type_text.lstrip("*").split("[", 1)[0]
+
+    return bare.rsplit(".", 1)[-1]
 
 
 @dataclass
@@ -135,6 +179,9 @@ class Symbol:
             ``internal``, a member of an anonymous or local class, and
             every other language and kind). The resolver vetoes a pick
             the call site can't reach.
+        fields: The fields a type declares, in source order. Only
+            type-kind symbols (``TYPE_KINDS``) carry them; the resolver
+            walks a chained receiver (``self.hub.call()``) through them.
     """
 
     id: str
@@ -154,6 +201,7 @@ class Symbol:
     in_literal: bool = False
     literal_consumer: str | None = None
     visibility: str | None = None
+    fields: list[Field] = field(default_factory=list)
 
 
 @dataclass
@@ -186,6 +234,14 @@ class RawCall:
             isn't ``?``; ``None`` otherwise. Read by
             ``resolver._pick_constructor`` to rule out an overload
             whose parameter a literal can't be.
+        bound: What the callee text's first segment is lexically bound
+            to (the receiver's head for ``x.m()``, the name itself for
+            a bare ``f()``): ``"param"``, ``"local"``, or ``None`` for
+            anything else (a symbol, an import, ``this``, a field, or a
+            language with no ``binding_query``). Read by the resolver:
+            a bare name that is a parameter or a local is not a field of
+            the enclosing type, and a bare call to a parameter is not a
+            call to a repo function of that name.
     """
 
     caller_id: str | None
@@ -196,6 +252,7 @@ class RawCall:
     line: int = 0
     arg_count: int | None = None
     arg_kinds: tuple[str, ...] | None = None
+    bound: str | None = None
 
 
 @dataclass

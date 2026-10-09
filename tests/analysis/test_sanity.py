@@ -211,7 +211,8 @@ def test_classify_miss_near_definition_but_not_comment_shaped() -> None:
     assert cause != sanity.CAUSE_COMMENT_MENTION
 
 
-def test_classify_miss_qualified_call_still_wins_near_definition() -> None:
+def test_classify_miss_comment_quoting_a_call_is_a_comment() -> None:
+    # A comment never reaches the resolver, whatever code it quotes.
     cause = sanity.classify_miss(
         "// e.g. pkg.Helper(3)",
         "Helper",
@@ -221,7 +222,7 @@ def test_classify_miss_qualified_call_still_wins_near_definition() -> None:
         near_own_definition=True,
         looks_like_comment=True,
     )
-    assert cause == sanity.CAUSE_QUALIFIED_CALL
+    assert cause == sanity.CAUSE_COMMENT_MENTION
 
 
 def test_classify_miss_python_docstring_opening_line() -> None:
@@ -437,7 +438,7 @@ def test_sanity_all_matches_reports_clean(
     assert doc["counts"]["matches"] >= 1
 
 
-def test_sanity_detects_qualified_call_miss(
+def test_sanity_labels_a_qualified_call_the_map_sent_external(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
@@ -455,7 +456,7 @@ def test_sanity_detects_qualified_call_miss(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     causes = {row["cause"] for row in doc["grep_only"]}
-    assert sanity.CAUSE_QUALIFIED_CALL in causes
+    assert sanity.CAUSE_RECORDED_EXTERNAL in causes
 
 
 def test_sanity_detects_test_filter_miss(
@@ -528,12 +529,20 @@ def test_sanity_data_driven_collision_flags_uncurated_name(
     # a real, measurable ambiguous call-graph collision the moment a
     # bare, receiverless call to it exists -- ambiguous.collision_names
     # must surface that collision as CAUSE_GENERIC_NAME here, not
-    # CAUSE_UNEXPLAINED, even absent any curation.
+    # CAUSE_UNEXPLAINED, even absent any curation. Java, where a bare
+    # call can be a method (implicit ``this``); in Python it can't, and
+    # the line reads as a bare identifier instead.
     root = make_mapped_repo(
         {
-            "a.py": "class A:\n    def dispose(self):\n        pass\n",
-            "b.py": "class B:\n    def dispose(self):\n        pass\n",
-            "c.py": "def caller(x):\n    return dispose(x)\n",
+            "A.java": "class A {\n    void dispose() {}\n}\n",
+            "B.java": "class B {\n    void dispose() {}\n}\n",
+            "C.java": (
+                "class C {\n"
+                "    void caller() {\n"
+                "        dispose();\n"
+                "    }\n"
+                "}\n"
+            ),
         }
     )
     _force_no_dekko_hits(monkeypatch)
@@ -3277,16 +3286,20 @@ def test_classify_grep_hits_matches_single_target_path(
 
     index = mapfile.load_map(root)
     assert index is not None
-    own_def_locs = frozenset(
-        (s.path, s.start_line) for s in index.symbols_by_name.get("target", [])
+    query_index = index.without_tests()
+    inputs = sanity._name_inputs(
+        query_index,
+        "target",
+        frozenset(),
+        sanity._ambiguous_spans_by_name(query_index),
     )
     sweep = sanity._run_grep(root, "target")
     causes_from_helper = sanity._classify_grep_hits(
         sweep.hits,
         "target",
         root,
-        own_def_locs=own_def_locs,
         tests_excluded=True,
+        **vars(inputs),
     )
     # _force_no_dekko_hits means every non-own-def hit landed in
     # grep_only above, so the two maps cover exactly the same set.
@@ -3872,19 +3885,26 @@ def test_sanity_receiver_mismatch_flags_unrelated_collision(
     # same-named zero-arg call in a different file with no import of
     # the defining class and no receiver identifier on the same line
     # (so it doesn't already match the higher-precedence
-    # CAUSE_QUALIFIED_CALL check -- see _QUALIFIED_CALL_TEMPLATE).
+    # CAUSE_QUALIFIED_CALL check -- see _QUALIFIED_CALL_TEMPLATE). Java,
+    # where a bare call can be a method; in Python it can't.
     root = make_mapped_repo(
         {
-            "a.py": (
-                "class Widget:\n"
-                "    def isTrue(self):\n"
-                "        return True\n"
-                "\n\n"
-                "def caller():\n"
-                "    w = Widget()\n"
-                "    return w.isTrue()\n"
+            "Widget.java": (
+                "class Widget {\n"
+                "    boolean isTrue() { return true; }\n"
+                "    boolean caller() {\n"
+                "        Widget w = new Widget();\n"
+                "        return w.isTrue();\n"
+                "    }\n"
+                "}\n"
             ),
-            "b.py": ("def unrelated():\n    return isTrue()\n"),
+            "U.java": (
+                "class U {\n"
+                "    boolean unrelated() {\n"
+                "        return isTrue();\n"
+                "    }\n"
+                "}\n"
+            ),
         }
     )
     _force_no_dekko_hits(monkeypatch)
@@ -3898,7 +3918,7 @@ def test_sanity_receiver_mismatch_flags_unrelated_collision(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     causes = {row["file"]: row["cause"] for row in doc["grep_only"]}
-    assert causes["b.py"] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+    assert causes["U.java"] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
     assert doc["receiver_mismatch_declaring_type"] == "Widget"
     assert doc["receiver_mismatch_count"] >= 1
     assert "Widget" in doc["receiver_mismatch_note"]
@@ -3976,16 +3996,16 @@ def test_sanity_group_by_file_rolls_up_grep_only(
     # surfaces as ``CAUSE_GENERIC_NAME`` rather than leaving it
     # unexplained. And a bare value
     # reference (``value = name``) is explained too, from the map's
-    # own reference edges. A name inside a longer string is the one
-    # shape sanity deliberately refuses to classify, which keeps these
-    # two hits genuinely unexplained -- the rendering behavior this
-    # test actually exercises.
+    # own reference edges, and a name inside a string reads as a string
+    # mention. A subscript and a comparison operand stay genuinely
+    # unexplained -- the rendering behavior this test actually
+    # exercises.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
             "b.py": (
-                "value = 'see totally_unrelated_wrapper docs'\n"
-                "another = 'or totally_unrelated_wrapper here'\n"
+                "value = obj[totally_unrelated_wrapper]\n"
+                "another = totally_unrelated_wrapper > 3\n"
             ),
             "c.py": (
                 "import pkg\n\n\n"
@@ -4012,8 +4032,8 @@ def test_sanity_group_by_file_rolls_up_grep_only(
     # b.py (2 hits) must sort before c.py (1 hit).
     assert out.index("b.py: 2") < out.index("c.py: 1")
     assert f"{sanity.CAUSE_UNEXPLAINED}   <-- look here" in out
-    assert sanity.CAUSE_QUALIFIED_CALL in out
-    assert f"{sanity.CAUSE_QUALIFIED_CALL}   <-- look here" not in out
+    assert sanity.CAUSE_RECORDED_EXTERNAL in out
+    assert f"{sanity.CAUSE_RECORDED_EXTERNAL}   <-- look here" not in out
 
 
 def test_sanity_group_by_file_omitted_keeps_flat_listing(
@@ -4024,15 +4044,15 @@ def test_sanity_group_by_file_omitted_keeps_flat_listing(
     # C.3: default behavior (--group-by-file omitted) is unchanged —
     # the existing flat _print_bucket_text rendering still applies.
     #
-    # Names inside longer strings, not calls or bare references --
-    # see the sibling rollup test above for why those two shapes no
-    # longer stay unexplained.
+    # A subscript and a comparison operand, not calls, bare references
+    # or strings -- see the sibling rollup test above for why those
+    # shapes no longer stay unexplained.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
             "b.py": (
-                "value = 'see totally_unrelated_wrapper docs'\n"
-                "another = 'or totally_unrelated_wrapper here'\n"
+                "value = obj[totally_unrelated_wrapper]\n"
+                "another = totally_unrelated_wrapper > 3\n"
             ),
         }
     )
@@ -5079,9 +5099,9 @@ def test_js_prose_parenthetical_is_string_mention(tmp_path: Path) -> None:
     assert cause == sanity.CAUSE_STRING_MENTION
 
 
-def test_python_string_mention_keeps_its_label(tmp_path: Path) -> None:
+def test_python_string_mention_is_a_string_mention(tmp_path: Path) -> None:
     cause = _classify_one(tmp_path, "src/a.py", 'log("please warn now")')
-    assert cause == sanity.CAUSE_UNEXPLAINED
+    assert cause == sanity.CAUSE_STRING_MENTION
 
 
 def test_js_recorded_read_is_property_read(tmp_path: Path) -> None:

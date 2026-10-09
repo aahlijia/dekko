@@ -367,6 +367,41 @@ def test_provenance_records_symlink_excluded_files_with_paths(
     assert "--follow-symlinks" in note
 
 
+def test_symlinks_to_files_no_grammar_maps_leave_the_note(
+    tmp_path: Path,
+) -> None:
+    # A symlinked LICENSE or Markdown file couldn't hold a symbol even
+    # if followed, so it isn't a coverage gap worth a note on every
+    # reply (zed: 262 such links).
+    (tmp_path / "real_module.py").write_text("def f() -> None:\n    pass\n")
+    (tmp_path / "LICENSE-GPL").write_text("text\n")
+    (tmp_path / "AGENTS.md").write_text("# a\n")
+    (tmp_path / "crate").mkdir()
+    (tmp_path / "crate" / "LICENSE-GPL").symlink_to(tmp_path / "LICENSE-GPL")
+    (tmp_path / "CLAUDE.md").symlink_to(tmp_path / "AGENTS.md")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    index = mapfile.load_map(tmp_path)
+    assert index is not None
+    assert index.provenance["symlink_excluded"] is None
+    assert mapfile.format_unsupported(index.provenance) is None
+
+
+def test_only_code_symlinks_are_counted(tmp_path: Path) -> None:
+    (tmp_path / "real_module.py").write_text("def f() -> None:\n    pass\n")
+    (tmp_path / "alias_module.py").symlink_to(tmp_path / "real_module.py")
+    (tmp_path / "AGENTS.md").write_text("# a\n")
+    (tmp_path / "CLAUDE.md").symlink_to(tmp_path / "AGENTS.md")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    index = mapfile.load_map(tmp_path)
+    assert index is not None
+    assert index.provenance["symlink_excluded"] == {
+        "count": 1,
+        "paths": ["alias_module.py"],
+    }
+
+
 def test_symlink_excluded_none_when_no_symlinks_present(
     make_mapped_repo: RepoFactory,
 ) -> None:

@@ -109,8 +109,9 @@ _DOC_LIMIT = 80
 # Natural-language question words a symbol's own name/doc would never
 # contain. Deliberately separate from relevance._STOPWORDS, which is
 # shared with --task blending elsewhere (workset/context/lean) and is
-# kept minimal on purpose — this overlay only ever applies here.
-_SEARCH_STOPWORDS = frozenset(
+# kept minimal on purpose — this overlay applies to free-text queries
+# only: here and the prompt-submit hook's file pins.
+QUESTION_STOPWORDS = frozenset(
     {
         "what",
         "how",
@@ -176,7 +177,7 @@ def _query_terms(query_text: str) -> tuple[str, ...]:
     return tuple(
         t
         for t in relevance.normalize_terms(query_text)
-        if t not in _SEARCH_STOPWORDS
+        if t not in QUESTION_STOPWORDS
     )
 
 
@@ -356,8 +357,37 @@ def rank(
         )
         for c in survivors
     ]
-    hits.sort(key=lambda h: (-h.score, h.symbol.path, h.symbol.start_line))
+    want = query_text.strip()
+    hits.sort(
+        key=lambda h: (
+            -_exact_tier(h.symbol, want),
+            -h.score,
+            h.symbol.path,
+            h.symbol.start_line,
+        )
+    )
     return hits
+
+
+def _exact_tier(sym: Symbol, query_text: str) -> int:
+    """How exactly a symbol is the one the query names.
+
+    A one-word query that *is* a symbol's name is the answer, however
+    little else calls it: blending by fan-in put claude-code's ``Text``
+    component 60th for ``search Text``. ``2`` for the exact name (or a
+    dotted query equal to the qualname or its tail), ``1`` for the same
+    ignoring case, ``0`` otherwise.
+    """
+    if not query_text or any(c.isspace() for c in query_text):
+        return 0
+    names = (sym.name, sym.qualname)
+    if query_text in names or sym.qualname.endswith("." + query_text):
+        return 2
+    folded = query_text.casefold()
+    if folded in (n.casefold() for n in names):
+        return 1
+
+    return 0
 
 
 def _fuse_both(
@@ -562,7 +592,7 @@ def _render_text(
     kept, meter = _fit(query_text, hits, budget, limit)
     print(_manifest(query_text, len(hits)))
     print()
-    if not kept:
+    if not hits:
         print("(no matches)")
     else:
         for hit in kept:

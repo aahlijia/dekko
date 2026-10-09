@@ -1,6 +1,7 @@
 """The search subcommand: BM25 free-text relevance ranking and budget."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,7 @@ from dekko.analysis.relevance import (
     TaskContext,
     blended_scores,
 )
+from dekko.render import mapfile
 from dekko.textutil import Meter
 
 from conftest import RepoFactory
@@ -1624,3 +1626,60 @@ def test_blended_scores_precomputed_relevance_matches_subset_call() -> None:
         w_rel=1.0,
     )
     assert blended["target"] == full_relevance["target"]
+
+
+TEXT_REPO = {
+    "src/text.ts": (
+        "export function Text(): void {}\n"
+        "export class Cursor {\n"
+        "  text(): string {\n"
+        "    return ''\n"
+        "  }\n"
+        "}\n"
+    ),
+    "src/render.ts": (
+        "export function renderText(): void { textWidth(); getText() }\n"
+        "export function textWidth(): number { return getText().length }\n"
+        "export function getText(): string { return '' }\n"
+        "export function a(): void { renderText(); textWidth() }\n"
+        "export function b(): void { renderText(); getText() }\n"
+    ),
+}
+
+
+def _names(root: Path, query_text: str) -> list[str]:
+    index = mapfile.load_map(root)
+    assert index is not None
+    return [h.symbol.qualname for h in search.rank(index, query_text)]
+
+
+def test_an_exact_name_outranks_busier_partial_matches(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    names = _names(make_mapped_repo(TEXT_REPO), "Text")
+    assert names[:2] == ["Text", "Cursor.text"]
+
+
+def test_exact_case_wins_between_two_exact_names(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    names = _names(make_mapped_repo(TEXT_REPO), "text")
+    assert names[:2] == ["Cursor.text", "Text"]
+
+
+def test_a_dotted_query_matches_the_qualname_tail(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    names = _names(make_mapped_repo(TEXT_REPO), "Cursor.text")
+    assert names[0] == "Cursor.text"
+
+
+def test_limit_zero_with_hits_prints_no_empty_marker(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TEXT_REPO)
+    code = cli.main(["search", "Text", "--limit", "0", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "(no matches)" not in out
+    assert "omitted" in out
