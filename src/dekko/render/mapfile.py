@@ -14,9 +14,10 @@ import subprocess
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
-from functools import cached_property
+from dataclasses import dataclass, field, fields
+from functools import cache, cached_property
 from pathlib import Path
+from typing import Any
 
 from dekko import selfcheck
 from dekko.core import languages, walker
@@ -1441,9 +1442,32 @@ def describe_version_stale(fresh: Freshness) -> str:
     return f"stale ({which}): " + "; ".join(parts)
 
 
+@cache
+def _field_names(cls: type) -> frozenset[str]:
+    """The dataclass field names ``cls`` accepts."""
+    return frozenset(f.name for f in fields(cls))
+
+
+def _from_known(cls: type, d: dict) -> Any:
+    """Build dataclass ``cls`` from ``d``, ignoring keys it doesn't have.
+
+    A map written by a newer dekko can carry a field this build has
+    never heard of. Passing it on as a keyword raised ``TypeError`` and
+    took the whole read down, so a long-lived process older than the
+    map crashed on every call; dropping the key costs only what the
+    newer field would have added. Tried as-is first: a map from this
+    build never pays for the filter.
+    """
+    try:
+        return cls(**d)
+    except TypeError:
+        names = _field_names(cls)
+        return cls(**{k: v for k, v in d.items() if k in names})
+
+
 def _symbol_from_dict(d: dict) -> Symbol:
     """Rebuild a ``Symbol`` (with ``Param``s) from its JSON dict."""
-    params = [Param(**p) for p in d.get("params", [])]
+    params = [_from_known(Param, p) for p in d.get("params", [])]
     return Symbol(
         id=d["id"],
         name=d["name"],
@@ -1462,7 +1486,7 @@ def _symbol_from_dict(d: dict) -> Symbol:
         in_literal=d.get("in_literal", False),
         literal_consumer=d.get("literal_consumer"),
         visibility=d.get("visibility"),
-        fields=[Field(**f) for f in d.get("fields", [])],
+        fields=[_from_known(Field, f) for f in d.get("fields", [])],
     )
 
 
@@ -1606,7 +1630,7 @@ def load_map(root: Path) -> MapIndex | None:
         if entry.get("error"):
             index.errors_by_path[fpath] = entry["error"]
         index.imports_by_path[fpath] = [
-            Import(**imp) for imp in entry.get("imports", [])
+            _from_known(Import, imp) for imp in entry.get("imports", [])
         ]
         index.type_aliases_by_path[fpath] = frozenset(
             entry.get("type_aliases", [])

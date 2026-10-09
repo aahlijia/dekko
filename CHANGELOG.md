@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.25] — 2026-10-09
+
+### Fixed
+- **A map written by a newer dekko loads in an older one.** A key this
+  build doesn't know on a parameter, field or import (1.8.9 added
+  `receiver` to parameters) raised `TypeError` and failed the whole
+  read, so an MCP server older than the map crashed on every call until
+  it was restarted. Unknown keys are now ignored. From this release on;
+  a server already older than 1.8.9 still needs a restart.
+
 ## [1.8.24] — 2026-10-09
 
 ### Performance
