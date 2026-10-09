@@ -9,6 +9,14 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.22] — 2026-10-09
+
+### Fixed
+- **A closed pipe ends the command quietly on Windows too.** Windows
+  reports a write to a pipe whose reader went away as `OSError`
+  `EINVAL`, not `BrokenPipeError`, so 1.8.20's guard missed it there;
+  on Windows that errno now reads as a closed pipe as well.
+
 ## [1.8.21] — 2026-10-09
 
 ### Fixed

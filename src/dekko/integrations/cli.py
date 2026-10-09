@@ -7,6 +7,7 @@ writes a human-readable MAP.md plus a machine-readable map.json.
 
 import argparse
 import difflib
+import errno
 import json
 import os
 import shutil
@@ -3021,11 +3022,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         code = _main(argv)
         sys.stdout.flush()
-    except BrokenPipeError:
+    except OSError as exc:
+        if not _is_closed_pipe(exc):
+            raise
         _discard_stdout()
         return EXIT_BROKEN_PIPE
 
     return code
+
+
+def _is_closed_pipe(exc: OSError) -> bool:
+    """Whether ``exc`` is a write to a pipe whose reader went away.
+
+    ``BrokenPipeError`` on POSIX. Windows reports the same event as
+    ``EINVAL`` on the write instead, and only there is that errno read
+    this way.
+    """
+    if isinstance(exc, BrokenPipeError):
+        return True
+
+    return os.name == "nt" and exc.errno == errno.EINVAL
 
 
 def _discard_stdout() -> None:

@@ -1,6 +1,7 @@
 """CLI surface tests: flags, output resolution, plugin install."""
 
 import contextlib
+import errno
 import json
 import subprocess
 import sys
@@ -1272,3 +1273,14 @@ def test_a_closed_pipe_exits_quietly(
     assert "Traceback" not in err
     assert "BrokenPipeError" not in err
     assert proc.returncode == 141
+
+
+def test_einval_reads_as_a_closed_pipe_only_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    einval = OSError(errno.EINVAL, "Invalid argument")
+    monkeypatch.setattr(cli.os, "name", "nt")
+    assert cli._is_closed_pipe(einval)
+    monkeypatch.setattr(cli.os, "name", "posix")
+    assert not cli._is_closed_pipe(einval)
+    assert cli._is_closed_pipe(BrokenPipeError())
