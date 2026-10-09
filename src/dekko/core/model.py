@@ -232,8 +232,11 @@ class RawCall:
             never treated as "zero arguments written."
         arg_kinds: What each written argument visibly is, one entry
             per argument (``string``, ``class``, ``bool``, ``int``,
-            ``char``, ``null``, ``new:<Type>``, ``lambda``, or ``?``
-            for anything an expression's text can't tell). Set only
+            ``char``, ``null``, ``new:<Type>``, ``lambda``,
+            ``type:<Type>``, or ``?`` for anything an expression's text
+            can't tell). A plain name or ``this.x`` takes the kind its
+            declared type implies: ``String s`` is ``string``, ``File
+            f`` is ``type:File``. Set only
             for a Java construction with at least one argument that
             isn't ``?``; ``None`` otherwise. Read by
             ``resolver._pick_constructor`` to rule out an overload

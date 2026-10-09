@@ -1936,6 +1936,12 @@ _JAVA_RECORD_CANONICAL_VERSION = 2
 # it skips (arrays, package paths). Read off the node outside the query.
 _JAVA_CTOR_REF_VERSION = 1
 
+# Bump when ``extractor._java_typed_arg_kind`` changes which Java
+# construction arguments take a kind from their declared type (the
+# scopes ``_java_declared_type`` walks, the type-to-kind table). Code
+# outside the query.
+_JAVA_TYPED_ARG_VERSION = 1
+
 # Bump when ``extractor._collect_kotlin_calls`` changes the ``RawCall``
 # it builds from a Kotlin ``f<T>(x)`` misparsed as a comparison (its
 # head, receiver, or the one-or-unknown argument count). Code outside
@@ -1966,7 +1972,8 @@ def spec_fingerprint() -> str:
     ``_TIER2_ENGINE_VERSION``, ``_PY_IMPORT_REBIND_VERSION``,
     ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION``,
     ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``,
-    ``_JAVA_CTOR_REF_VERSION``, ``_KOTLIN_GENERIC_CALL_VERSION`` and
+    ``_JAVA_CTOR_REF_VERSION``, ``_JAVA_TYPED_ARG_VERSION``,
+    ``_KOTLIN_GENERIC_CALL_VERSION`` and
     ``_RUST_USE_SCOPE_VERSION``, which
     each cover one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
@@ -2000,6 +2007,7 @@ def spec_fingerprint() -> str:
         f"java_new_qualifier={_JAVA_NEW_QUALIFIER_VERSION}",
         f"java_record_canonical={_JAVA_RECORD_CANONICAL_VERSION}",
         f"java_ctor_ref={_JAVA_CTOR_REF_VERSION}",
+        f"java_typed_arg={_JAVA_TYPED_ARG_VERSION}",
         f"kotlin_generic_call={_KOTLIN_GENERIC_CALL_VERSION}",
         f"rust_use_scope={_RUST_USE_SCOPE_VERSION}",
     ]

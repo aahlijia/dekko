@@ -1673,6 +1673,8 @@ def _collect_calls(
         else []
     )
     calls: list[RawCall] = []
+    # Pattern variable names per Java function (``_java_pattern_names``).
+    patterns: dict[int, frozenset[str]] = {}
     for _, caps in _run_query(spec.grammar, spec.call_query, root):
         callee = _one(caps, "callee")
         if callee is None:
@@ -1700,7 +1702,7 @@ def _collect_calls(
             and call_node is not None
             and call_node.type == "object_creation_expression"
         ):
-            call.arg_kinds = _java_arg_kinds(args_node)
+            call.arg_kinds = _java_arg_kinds(args_node, patterns)
         calls.append(call)
         made = _cpp_factory_type(callee) if spec.name == "cpp" else None
         if made is not None:
@@ -2472,11 +2474,16 @@ _JAVA_ARG_KIND_BY_NODE = {
 }
 
 
-def _java_arg_kinds(args_node: Node | None) -> tuple[str, ...] | None:
+def _java_arg_kinds(
+    args_node: Node | None,
+    patterns: dict[int, frozenset[str]],
+) -> tuple[str, ...] | None:
     """What each argument of a Java construction visibly is.
 
     Args:
         args_node: The construction's argument list, if any.
+        patterns: Pattern variable names per function, filled as
+            functions are met (``_java_pattern_names``).
 
     Returns:
         One kind per argument (see ``RawCall.arg_kinds``), or ``None``
@@ -2485,7 +2492,9 @@ def _java_arg_kinds(args_node: Node | None) -> tuple[str, ...] | None:
     if args_node is None:
         return None
     kinds = tuple(
-        _java_arg_kind(a) for a in args_node.named_children if not a.is_extra
+        _java_typed_arg_kind(a, patterns)
+        for a in args_node.named_children
+        if not a.is_extra
     )
     if all(k == "?" for k in kinds):
         return None
@@ -2519,6 +2528,358 @@ def _java_arg_kind(arg: Node) -> str:
             return "new:" + made.strip()
 
     return "?"
+
+
+def _java_typed_arg_kind(
+    arg: Node,
+    patterns: dict[int, frozenset[str]],
+) -> str:
+    """One Java argument's kind, reading a name as its declared type.
+
+    A literal's kind stands. A plain name, or ``this.x``, takes the
+    kind its declaration's type implies (``_java_kind_of_type``): a
+    ``String`` parameter rules out what a string literal rules out.
+    Anything else (a call, a field chain, a cast) stays ``?``.
+    """
+    kind = _java_arg_kind(arg)
+    if kind != "?":
+        return kind
+    text = None
+    if arg.type == "identifier":
+        text = _java_declared_type(arg, patterns)
+    elif arg.type == "field_access":
+        text = _java_this_field_type(arg)
+
+    return _java_kind_of_type(text) if text else "?"
+
+
+# The literal kind a declared Java type passes as (see ``_JAVA_ACCEPTS``
+# in the resolver): boxing and unboxing give a box the set its
+# primitive's literal has.
+_JAVA_KIND_BY_TYPE = {
+    "String": "string",
+    "Class": "class",
+    "boolean": "bool",
+    "Boolean": "bool",
+    "int": "int",
+    "Integer": "int",
+    "char": "char",
+    "Character": "char",
+}
+# Declared types with no literal table: their widening sets differ from
+# ``int``'s, and a wrong set would rule out a right overload.
+_JAVA_UNTABLED_TYPES = frozenset(
+    {
+        "var",
+        "long",
+        "short",
+        "byte",
+        "float",
+        "double",
+        "Long",
+        "Short",
+        "Byte",
+        "Float",
+        "Double",
+    }
+)
+
+
+def _java_kind_of_type(text: str) -> str:
+    """The ``RawCall.arg_kinds`` entry a declared Java type implies.
+
+    A tabled type reads as its literal's kind, any other reference type
+    ``Foo`` as ``type:Foo``. An array, a varargs element, a type
+    variable and an untabled primitive or box are ``?``.
+    """
+    text = re.sub(r"\s+", "", _JAVA_TYPE_ANNOTATION.sub("", text))
+    if "[" in text or "..." in text:
+        return "?"
+    base = re.sub(r"<.*", "", text).rsplit(".", 1)[-1]
+    if not base or base in _JAVA_UNTABLED_TYPES:
+        return "?"
+    if len(base) <= 2 and base.isupper():
+        return "?"
+
+    return _JAVA_KIND_BY_TYPE.get(base, "type:" + base)
+
+
+# Nodes whose pattern variables can shadow a name inside them.
+_JAVA_FUNCTIONS = frozenset(
+    {
+        "method_declaration",
+        "constructor_declaration",
+        "compact_constructor_declaration",
+        "lambda_expression",
+    }
+)
+
+
+def _java_declared_type(
+    ident: Node,
+    patterns: dict[int, frozenset[str]],
+) -> str | None:
+    """The type text a Java name's declaration writes, or ``None``.
+
+    Walks out from the name and stops at the first scope that declares
+    it (``_JAVA_SCOPES``): a local declared before it, a loop, catch or
+    resource variable, a parameter, a field of an enclosing type in
+    the same file. Not found (an inherited field, a static import), or
+    declared with no usable type (an untyped lambda parameter, an array
+    declarator, a union catch), is ``None``. So is a name that is also
+    a pattern variable in any function the walk passed through: which
+    one a use means depends on flow dekko doesn't follow.
+    """
+    name, pos = _text(ident), ident.start_byte
+    functions: list[Node] = []
+    node = ident
+    while node.parent is not None:
+        node = node.parent
+        if node.type in _JAVA_FUNCTIONS:
+            functions.append(node)
+        scope = _JAVA_SCOPES.get(node.type)
+        got = scope(node, name, pos) if scope is not None else None
+        if got is None:
+            continue
+        if not got or any(
+            name in _java_pattern_names(fn, patterns) for fn in functions
+        ):
+            return None
+
+        return got
+
+    return None
+
+
+def _java_this_field_type(access: Node) -> str | None:
+    """The declared type of the field ``this.x`` names, or ``None``."""
+    obj = access.child_by_field_name("object")
+    field = access.child_by_field_name("field")
+    if obj is None or field is None or obj.type != "this":
+        return None
+    body = access.parent
+    while body is not None and body.type not in _JAVA_FIELD_BODIES:
+        body = body.parent
+    if body is None:
+        return None
+
+    return _java_body_type(body, _text(field), access.start_byte) or None
+
+
+def _java_pattern_names(
+    fn: Node,
+    patterns: dict[int, frozenset[str]],
+) -> frozenset[str]:
+    """Every pattern variable a Java function binds (``o instanceof
+    Foo f``, ``case Point(var x, ..)``), collected once per function."""
+    names = patterns.get(fn.id)
+    if names is not None:
+        return names
+    found: set[str] = set()
+    stack = [fn]
+    while stack:
+        node = stack.pop()
+        if node.type == "instanceof_expression":
+            bound = node.child_by_field_name("name")
+            if bound is not None:
+                found.add(_text(bound))
+        elif node.type in ("type_pattern", "record_pattern_component"):
+            found.update(
+                _text(c) for c in node.named_children if c.type == "identifier"
+            )
+        stack.extend(node.named_children)
+    names = patterns[fn.id] = frozenset(found)
+
+    return names
+
+
+def _java_declarator_type(decl: Node, name: str) -> str | None:
+    """The type a local or field declaration gives ``name``.
+
+    Returns:
+        The declared type's text; ``""`` when ``name`` is declared with
+        no usable type (``String s[]``); ``None`` when ``decl`` doesn't
+        declare it.
+    """
+    for declarator in decl.children_by_field_name("declarator"):
+        bound = declarator.child_by_field_name("name")
+        if bound is None or _text(bound) != name:
+            continue
+        if any(c.type == "dimensions" for c in declarator.children):
+            return ""
+        type_node = decl.child_by_field_name("type")
+        return _text(type_node) if type_node is not None else ""
+
+    return None
+
+
+def _java_param_type(params: Node | None, name: str) -> str | None:
+    """The type a parameter list gives ``name``: text, ``""`` for an
+    array or varargs parameter, ``None`` when it has no such name."""
+    if params is None:
+        return None
+    for param in params.named_children:
+        if param.type == "spread_parameter":
+            if _java_spread_param(param).name == name:
+                return ""
+            continue
+        if param.type != "formal_parameter":
+            continue
+        bound = param.child_by_field_name("name")
+        if bound is None or _text(bound) != name:
+            continue
+        if any(c.type == "dimensions" for c in param.children):
+            return ""
+        type_node = param.child_by_field_name("type")
+        return _text(type_node) if type_node is not None else ""
+
+    return None
+
+
+def _java_block_type(node: Node, name: str, pos: int) -> str | None:
+    """A local declared in a block's statements before ``pos``."""
+    for statement in node.named_children:
+        if statement.start_byte >= pos:
+            break
+        if statement.type == "local_variable_declaration":
+            got = _java_declarator_type(statement, name)
+            if got is not None:
+                return got
+
+    return None
+
+
+def _java_case_group_type(node: Node, name: str, pos: int) -> str | None:
+    """A local declared in this ``case`` group, or an earlier one of
+    the same old-style ``switch``: its scope is the whole switch block
+    from the declaration on, not just its own group."""
+    group: Node | None = node
+    while group is not None:
+        if group.type == "switch_block_statement_group":
+            got = _java_block_type(group, name, pos)
+            if got is not None:
+                return got
+        group = group.prev_named_sibling
+
+    return None
+
+
+def _java_for_type(node: Node, name: str, pos: int) -> str | None:
+    """A variable a ``for`` loop's init declares."""
+    for init in node.children_by_field_name("init"):
+        if init.type == "local_variable_declaration":
+            got = _java_declarator_type(init, name)
+            if got is not None:
+                return got
+
+    return None
+
+
+def _java_named_type(node: Node, name: str, pos: int) -> str | None:
+    """An enhanced-``for`` variable or a try-with-resources resource:
+    one ``name`` and one ``type`` field on the node itself."""
+    bound = node.child_by_field_name("name")
+    if bound is None or _text(bound) != name:
+        return None
+    type_node = node.child_by_field_name("type")
+
+    return _text(type_node) if type_node is not None else ""
+
+
+def _java_resources_type(node: Node, name: str, pos: int) -> str | None:
+    """A try-with-resources resource declaring ``name``."""
+    resources = node.child_by_field_name("resources")
+    if resources is None:
+        return None
+    for resource in resources.named_children:
+        if resource.type == "resource":
+            got = _java_named_type(resource, name, pos)
+            if got is not None:
+                return got
+
+    return None
+
+
+def _java_catch_type(node: Node, name: str, pos: int) -> str | None:
+    """A catch parameter: its type, ``""`` for a union ``A | B``."""
+    for param in node.named_children:
+        if param.type != "catch_formal_parameter":
+            continue
+        bound = param.child_by_field_name("name")
+        if bound is None or _text(bound) != name:
+            continue
+        types = [c for c in param.named_children if c.type == "catch_type"]
+        text = _text(types[0]) if types else ""
+        return "" if "|" in text else text
+
+    return None
+
+
+def _java_lambda_type(node: Node, name: str, pos: int) -> str | None:
+    """A lambda parameter: its type when written, ``""`` when not."""
+    params = node.child_by_field_name("parameters")
+    if params is None:
+        return None
+    if params.type == "identifier":
+        return "" if _text(params) == name else None
+    if params.type == "inferred_parameters":
+        names = {_text(c) for c in params.named_children}
+        return "" if name in names else None
+
+    return _java_param_type(params, name)
+
+
+def _java_function_type(node: Node, name: str, pos: int) -> str | None:
+    """A method's or constructor's parameter."""
+    return _java_param_type(node.child_by_field_name("parameters"), name)
+
+
+def _java_compact_type(node: Node, name: str, pos: int) -> str | None:
+    """A compact constructor's parameters: its record's components."""
+    body = node.parent
+    record = body.parent if body is not None else None
+    if record is None or record.type != "record_declaration":
+        return None
+
+    return _java_param_type(record.child_by_field_name("parameters"), name)
+
+
+def _java_body_type(node: Node, name: str, pos: int) -> str | None:
+    """A field of a type body, or a record component from inside the
+    record's body."""
+    for member in node.named_children:
+        if member.type in ("field_declaration", "constant_declaration"):
+            got = _java_declarator_type(member, name)
+            if got is not None:
+                return got
+    owner = node.parent
+    if owner is not None and owner.type == "record_declaration":
+        return _java_param_type(owner.child_by_field_name("parameters"), name)
+
+    return None
+
+
+# Type bodies whose fields a name inside them can mean.
+_JAVA_FIELD_BODIES = frozenset(
+    {"class_body", "enum_body_declarations", "interface_body"}
+)
+# The Java scopes that can declare a name, by node type, each returning
+# the declared type's text, ``""`` (declared, no usable type) or
+# ``None`` (not declared here).
+_JAVA_SCOPES: dict[str, Callable[[Node, str, int], str | None]] = {
+    "block": _java_block_type,
+    "constructor_body": _java_block_type,
+    "switch_block_statement_group": _java_case_group_type,
+    "for_statement": _java_for_type,
+    "enhanced_for_statement": _java_named_type,
+    "try_with_resources_statement": _java_resources_type,
+    "catch_clause": _java_catch_type,
+    "lambda_expression": _java_lambda_type,
+    "method_declaration": _java_function_type,
+    "constructor_declaration": _java_function_type,
+    "compact_constructor_declaration": _java_compact_type,
+    **dict.fromkeys(_JAVA_FIELD_BODIES, _java_body_type),
+}
 
 
 def _java_is_string_concat(node: Node) -> bool:

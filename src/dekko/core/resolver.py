@@ -8299,10 +8299,11 @@ def _pick_constructor(
     is the ``(Class<?>...)`` one, and ``new ErrorPage(X.class,
     "/500")`` the ``(Class, String)`` one. Overloads nothing visible
     separates (``new ErrorPage(HttpStatus.NOT_FOUND, "/404")``) are
-    returned undecided, never guessed: dekko has no types for other
-    expressions. A constructor the call site can't reach
-    (``jvm_unreachable``, a private overload from another file) is no
-    overload of it at all.
+    returned undecided, never guessed. A name counts as its declared
+    type (a ``File file`` parameter is never a ``String``), but a call
+    result or a field chain still has no type. A constructor the call
+    site can't reach (``jvm_unreachable``, a private overload from
+    another file) is no overload of it at all.
 
     Args:
         cls: The constructed class.
@@ -8366,8 +8367,9 @@ _JAVA_ACCEPTS = {
     "char": frozenset({"char", "int", "long", "float", "double", "Character"})
     | _JAVA_ANY,
 }
-# Types a freshly constructed object or a lambda is never an instance
-# of (unless it constructs that very type).
+# Types a freshly constructed object, a lambda, or a name declared as
+# some other reference type is never an instance of (unless it
+# constructs that very type).
 _JAVA_NOT_OBJECTS = _JAVA_PRIMITIVES | frozenset(
     {
         "String",
@@ -8483,7 +8485,7 @@ def _java_literal_rules_out(
         return True
     if kind.startswith("new:"):
         return base in _JAVA_NOT_OBJECTS and base != kind[4:]
-    if kind == "lambda":
+    if kind == "lambda" or kind.startswith("type:"):
         return base in _JAVA_NOT_OBJECTS
 
     return base not in _JAVA_ACCEPTS[kind]

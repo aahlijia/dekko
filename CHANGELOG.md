@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.2] — 2026-10-09
+
+### Fixed
+- **A Java construction argument that is a name counts as its declared
+  type.** Constructor overloads that take the same number of arguments
+  were split only by literals (`"x"`, `X.class`, `true`); a variable
+  read as "unknown", so `new Instantiator<>(parent, loaderClassName)`
+  against `(ClassLoader, Class<?>)` and `(ClassLoader, String)` stayed
+  ambiguous though `loaderClassName` is a `String` parameter one line
+  up. A plain name or `this.x` now takes the type its declaration in
+  the same file writes (a parameter, a local declared before it, a
+  loop, catch, resource or typed lambda variable, a field or record
+  component), and rules out the overloads it can't be passed to, the
+  way a literal of that type does. A `String`, `Class`, `boolean`,
+  `int` or `char` (or their boxes) narrows like its literal; any other
+  type only rules out `String`, `Class`, the boxes, primitives and
+  arrays. spring-boot: +60 constructor edges, none lost, ambiguous rows
+  45,316 -> 45,263. Arrays, `var`, type variables, `long`/`double`
+  and the other wide primitives, untyped lambda parameters, pattern
+  variables, inherited fields and call results still read as unknown.
+
 ## [1.9.1] — 2026-10-09
 
 ### Fixed

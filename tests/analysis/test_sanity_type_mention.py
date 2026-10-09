@@ -42,7 +42,7 @@ USE_JAVA = (
     '        log("see Ticket");\n'
     "        IntFunction<Ticket> s = Ticket::new;\n"
     "        new Ticket(1);\n"
-    "        new Ticket(1, o);\n"
+    "        new Ticket(1, factory.get());\n"
     "        // Ticket is a thing\n"
     "        Object w = new Outer.Inner();\n"
     "    }\n"
@@ -57,7 +57,8 @@ JAVA_REPO = {
 USE = "app/Use.java"
 TICKET_CLASS = "web/Ticket.java::Ticket"
 # The (int, String) overload, which ties with (int, Object) on
-# ``new Ticket(1, o)`` and loses ``new Ticket(1)`` to the (int) one.
+# ``new Ticket(1, factory.get())`` (a call result has no type) and
+# loses ``new Ticket(1)`` to the (int) one.
 TICKET_CTOR = "web/Ticket.java:Ticket.Ticket:4"
 TICKET_INT_CTOR = "web/Ticket.java:Ticket.Ticket:3"
 
