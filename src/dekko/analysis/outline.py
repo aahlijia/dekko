@@ -20,7 +20,7 @@ from dekko.core import languages
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.analysis.query import NO_ROW_LIMIT, paths_matching
-from dekko.source import read_lines
+from dekko.source import read_lines, unmapped_reason
 from dekko.textutil import (
     Meter,
     estimate_tokens,
@@ -436,7 +436,9 @@ def run(
     else:
         outlines = collect_dir(index, target)
     if not outlines:
-        reason = languages.unindexed_reason(target)
+        reason = languages.unindexed_reason(target) or unmapped_reason(
+            root or index.root_dir, target, index.provenance
+        )
         why = f" ({reason})" if reason else ""
         print(
             f"dekko: no mapped file or directory '{target}'{why}",

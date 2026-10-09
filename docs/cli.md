@@ -4,7 +4,7 @@
 dekko map                            # (re)generate the map
 dekko map src                        # ...restricted to a subtree
 dekko summary                        # repo digest: dirs, hotspots, entry points
-dekko outline src/server.py          # a file's signatures + docs, no bodies
+dekko outline src/server.py          # a file's signatures + docs, no bodies (a path that exists but isn't mapped says why)
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
 dekko query callers resolve --sites  # who calls resolve, with call sites, then who passes it as a value ('referenced (not called)')
 dekko query callers resolve --no-tests  # production callers only (the MCP get_callers default; the CLI includes tests)
@@ -26,7 +26,7 @@ dekko query env DATABASE_URL         # every statically-known read site for this
 dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
 dekko query cohesion src/app.py      # intra-file connected-components (weak signal, not clustering)
 dekko context run_map --budget 1500  # minimal context pack for an edit
-dekko search "retries failed http requests"  # free-text relevance search
+dekko search "retries failed http requests"  # free-text relevance search (a one-word query that is a symbol's name ranks it first)
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
 dekko search "..." --scorer both             # fuses lexical+embedding; needs dekko[search]
 dekko workset                        # one bundle for your current change
@@ -1398,6 +1398,12 @@ dekko deps --top 20                  # widen the most-depended-on ranking in the
 dekko deps --export mermaid          # emit the module graph via `export`'s existing renderers
 dekko deps --export dot --output deps.dot
 ```
+
+An import the resolver couldn't tie to a file is listed under
+`unresolved` when its source names this repo's own files (a relative
+`./types/message.js` whose target is missing, or a root-relative
+`src/...` path) and under `external` otherwise (`zod`, `crypto`); the
+summary line counts both.
 
 `dekko deps FILE` and `dekko deps --file FILE` are equivalent — the
 bare positional is a convenience alias for interactive use, `--file`

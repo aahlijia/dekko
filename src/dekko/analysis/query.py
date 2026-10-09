@@ -29,6 +29,7 @@ from dekko.render.mapfile import (
     format_unsupported,
 )
 from dekko.core import languages
+from dekko.source import unmapped_reason
 from dekko.core.model import (
     TYPE_KINDS,
     CatchSite,
@@ -4113,7 +4114,9 @@ def _locate_file(index: MapIndex, target: str) -> tuple[str | None, int]:
         wider = index.languages_by_path.keys() | index.hidden_test_symbols
         matches = paths_matching(index, target, wider)
     if not matches:
-        reason = languages.unindexed_reason(target)
+        reason = languages.unindexed_reason(target) or unmapped_reason(
+            index.root_dir, strip_dot_slash(target), index.provenance
+        )
         why = f" ({reason})" if reason else ""
         print(
             f"dekko: no mapped file matches '{target}'{why}", file=sys.stderr

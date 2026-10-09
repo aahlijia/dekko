@@ -882,6 +882,9 @@ class MapIndex:
         notes_stat: ``[mtime_ns, size]`` of ``notes.json`` when
             ``notes`` was read (``load_map`` only), for
             ``refresh_notes``.
+        root_dir: The repository root the map was read from
+            (``load_map`` only), so a reply can look at a path on disk
+            that isn't in the map.
     """
 
     root_label: str
@@ -955,6 +958,7 @@ class MapIndex:
     map_stat: list[int] | None = None
     hidden_test_symbols: dict[str, int] = field(default_factory=dict)
     notes_stat: list[int] | None = None
+    root_dir: Path | None = None
     # ``without_tests``'s result, kept for the next call. The view
     # shares symbols and lists with this index, which no reader
     # mutates; ``refresh_notes`` drops it when the notes change.
@@ -1020,6 +1024,7 @@ class MapIndex:
             root_label=self.root_label,
             provenance=self.provenance,
             doc_version=self.doc_version,
+            root_dir=self.root_dir,
         )
         for sid, sym in self.symbols_by_id.items():
             if _symbol_is_test(sym):
@@ -1574,6 +1579,7 @@ def load_map(root: Path) -> MapIndex | None:
     notes_stat = _stat_sig(root / _MAP_DIR / "notes.json")
     index = MapIndex(
         root_label=doc.get("root", root.name),
+        root_dir=root,
         provenance=doc.get("provenance"),
         notes=_load_notes(root),
         notes_stat=notes_stat,

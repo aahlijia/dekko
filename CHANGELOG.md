@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.19] — 2026-10-09
+
+### Fixed
+- **`search` puts an exact name first.** A one-word query that is a
+  symbol's name (or a dotted query matching its qualname) now ranks it
+  ahead of busier partial matches, exact case first: claude-code
+  `search Text` listed the `Text` component 60th because nothing calls
+  it.
+- **`search --limit 0` no longer prints `(no matches)`** above `N of N
+  omitted`; the marker now means nothing scored.
+- **`deps` lists missing in-repo imports as `unresolved`**, not beside
+  npm packages under `external`: a relative `./types/message.js` whose
+  file doesn't exist, or a root-relative `src/...` path. The summary
+  counts them separately and `--json` carries both lists.
+- **`outline`/`query file` say why an existing path isn't mapped**: no
+  grammar for its extension, a directory with no mapped files, a
+  symlink, over the size cap, or ignored/vendored/excluded. A missing
+  path keeps the plain "no mapped file" line, so a typo and a skipped
+  file no longer read the same.
+
 ## [1.8.18] — 2026-10-09
 
 ### Fixed
