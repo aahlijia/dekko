@@ -1926,9 +1926,10 @@ _JAVA_NEW_QUALIFIER_VERSION = 1
 
 # Bump when ``extractor._collect_definitions`` changes when a Java
 # record's header stands for its canonical constructor (the body
-# declaring one drops it), or ``extractor._jvm_visibility`` changes the
+# declaring one drops it) or how it is numbered among the record's
+# other constructors, or ``extractor._jvm_visibility`` changes the
 # access that header constructor gets. Code outside the query.
-_JAVA_RECORD_CANONICAL_VERSION = 1
+_JAVA_RECORD_CANONICAL_VERSION = 2
 
 # Bump when ``extractor._java_constructor_ref_type`` changes which
 # ``X::new`` heads name a type (simple, generic, ``Outer.X``) and which

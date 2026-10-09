@@ -114,7 +114,11 @@ class Symbol:
             (``#2``, ``#3``, ...) in definition order, keeping every
             symbol's id unique within the map even though ``path``
             and ``qualname`` alone can't tell them apart (see
-            ``extractor._make_symbol``'s ``seen`` dict). Notes,
+            ``extractor._make_symbol``'s ``seen`` dict). A Java
+            record's canonical constructor (header or compact) is
+            numbered after its declared constructors, so an upgrade
+            that starts extracting a new shape never renumbers an
+            existing symbol. Notes,
             call-graph edges, and every other id-keyed structure key
             off this already-disambiguated id, not off the bare
             ``path::qualname`` form.

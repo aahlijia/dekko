@@ -1,7 +1,7 @@
 """Tree-sitter extraction: source file → symbols, raw calls, imports."""
 
 import re
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -210,9 +210,21 @@ def looks_like_cpp_header(source: bytes) -> bool:
 def _collect_definitions(
     spec: LanguageSpec, root: Node, rel: str
 ) -> list[tuple[Node, Symbol]]:
-    """Find every function/method/class definition in the tree."""
+    """Find every function/method/class definition in the tree.
+
+    Same-qualname symbols are numbered (``#2``, ``#3``) in source
+    order, with one exception: a Java record's canonical constructor
+    read off its header or a compact constructor is numbered after the
+    record's declared constructors. Those shapes became symbols after
+    the declared ones had ids, and notes are keyed by id, so a new
+    definition shape must take the next free number rather than
+    renumber a symbol an older release already named.
+    """
     matches = _run_query(spec.grammar, spec.definition_query, root)
     defs: list[tuple[Node, Symbol]] = []
+    # Canonical constructors numbered last: (slot in ``defs``, node,
+    # builder).
+    canonical: list[tuple[int, Node, Callable[[], Symbol]]] = []
     seen: dict[str, int] = {}
     for _, caps in matches:
         class_name = _one(caps, "classname")
@@ -274,48 +286,90 @@ def _collect_definitions(
             defs.append((var_def, sym))
             continue
 
-        name_node = _one(caps, "name")
-        def_node = _one(caps, "def")
+        found = _function_builder(spec, rel, caps, seen)
 
-        if name_node is None or def_node is None:
+        if found is None:
             continue
 
-        if _is_record_header(def_node) and _record_declares_canonical(
-            def_node.parent
-        ):
+        def_node, build = found
+
+        if _is_canonical_constructor(def_node):
+            canonical.append((len(defs), def_node, build))
             continue
 
-        params_node = _one(caps, "params")
+        defs.append((def_node, build()))
 
-        if _looks_like_c_macro_invocation(
-            spec.name, _text(name_node), params_node
-        ) or _is_deleted_function(def_node):
-            continue
-
-        ret_node = _one(caps, "ret")
-        params = _definition_params(
-            spec.param_style, params_node, _one(caps, "recv")
-        )
-
-        returns = None
-
-        if ret_node is not None:
-            returns = _text(ret_node).lstrip(":").strip() or None
-
-        sym = _make_symbol(
-            spec,
-            rel,
-            def_node,
-            _definition_name(spec.name, name_node),
-            "function",
-            params=params,
-            returns=returns,
-            seen=seen,
-            receiver=_receiver_container(_one(caps, "recv")),
-        )
-        defs.append((def_node, sym))
+    # Each slot was taken before the earlier canonical constructors
+    # went back in, so it moves up by how many of them precede it.
+    for shift, (slot, def_node, build) in enumerate(canonical):
+        defs.insert(slot + shift, (def_node, build()))
 
     return defs
+
+
+def _function_builder(
+    spec: LanguageSpec,
+    rel: str,
+    caps: dict[str, list[Node]],
+    seen: dict[str, int],
+) -> tuple[Node, Callable[[], Symbol]] | None:
+    """A function definition match's node and a builder for its
+    symbol, or ``None`` for a match that defines no symbol.
+
+    The symbol is built by calling the builder, which takes its ``#N``
+    from ``seen`` at that moment; ``_collect_definitions`` decides when.
+    """
+    name_node = _one(caps, "name")
+    def_node = _one(caps, "def")
+
+    if name_node is None or def_node is None:
+        return None
+
+    if _is_record_header(def_node) and _record_declares_canonical(
+        def_node.parent
+    ):
+        return None
+
+    params_node = _one(caps, "params")
+
+    if _looks_like_c_macro_invocation(
+        spec.name, _text(name_node), params_node
+    ) or _is_deleted_function(def_node):
+        return None
+
+    ret_node = _one(caps, "ret")
+    params = _definition_params(
+        spec.param_style, params_node, _one(caps, "recv")
+    )
+
+    returns = None
+
+    if ret_node is not None:
+        returns = _text(ret_node).lstrip(":").strip() or None
+
+    build = partial(
+        _make_symbol,
+        spec,
+        rel,
+        def_node,
+        _definition_name(spec.name, name_node),
+        "function",
+        params=params,
+        returns=returns,
+        seen=seen,
+        receiver=_receiver_container(_one(caps, "recv")),
+    )
+    return def_node, build
+
+
+def _is_canonical_constructor(def_node: Node) -> bool:
+    """Whether a definition is a Java record's canonical constructor
+    in a shape that has no declared parameter list of its own: the
+    record header, or a compact constructor."""
+    return (
+        def_node.type == "compact_constructor_declaration"
+        or _is_record_header(def_node)
+    )
 
 
 def _definition_name(language: str, name_node: Node) -> str:

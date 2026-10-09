@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.1] — 2026-10-09
+
+### Fixed
+- **A record's declared constructors keep the ids they had before
+  1.9.0.** 1.9.0 made a Java record's canonical constructor a symbol
+  and numbered it first, so on a record that also declares a
+  constructor, `R.R` moved from the declared one to the canonical one
+  (and `R.R#2` to `R.R#3`). Notes are keyed by id, so a note on the
+  declared constructor silently moved to the other symbol, and
+  `note list --orphaned` couldn't see it. The canonical constructor
+  (from the header or a compact constructor) is now numbered after the
+  record's declared ones, so every id 1.8.0 handed out names the same
+  symbol again. spring-boot: 17 declared constructors across 15 records
+  get their ids back; every other id is unchanged. A note added under
+  1.9.0 to such a record's canonical constructor now sits on the
+  declared one; `dekko note list` shows where each note lands.
+
 ## [1.9.0] — 2026-10-09
 
 Closes the fix cycle 1.8.0 left open: the round 1.8 findings it carried
