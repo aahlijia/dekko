@@ -764,6 +764,7 @@ def changes(
     rev: str | None,
     index: mapfile.MapIndex | None = None,
     jobs: int = 1,
+    persist: bool = False,
 ) -> tuple[list[TestImpact], diff.DiffResult, diff.Snapshot, str, dict] | None:
     """Impacted tests plus the underlying diff for worktree-vs-rev.
 
@@ -787,6 +788,8 @@ def changes(
             ``diff.snapshot``. This is the dominant cost on a
             first-touch/cold-rev-cache call, a separate code path
             ``dekko map --full``'s own ``--jobs`` fix never reached.
+        persist: Write a stale map's in-memory re-map as the map; see
+            ``diff.snapshot_pair``.
 
     Returns:
         ``(impacts, result, new, target_rev, provenance)``, or ``None``
@@ -802,7 +805,9 @@ def changes(
         current = repo_ops.current_side_from_index(root, index)
     prov = current.provenance
     target_rev = rev or prov.get("git_commit") or "HEAD"
-    pair = diff.snapshot_pair(root, target_rev, current, jobs=jobs)
+    pair = diff.snapshot_pair(
+        root, target_rev, current, jobs=jobs, persist=persist
+    )
     if pair is None:
         return None
 
@@ -820,6 +825,7 @@ def run(
     budget: int | None = None,
     jobs: int = 1,
     show_possible: bool = False,
+    no_regen: bool = False,
 ) -> int:
     """Execute ``dekko affected`` against a repository.
 
@@ -832,6 +838,8 @@ def run(
         jobs: Resolved worker count — see ``changes``.
         show_possible: List the possible impacts too, not just their
             count (``--possible``).
+        no_regen: Leave a stale map on disk as it is; the re-map
+            answers this call only.
 
     Returns:
         ``0`` no impact, ``1`` impacted tests found, ``2`` bad rev.
@@ -841,7 +849,7 @@ def run(
     if rev and not diff.check_rev(root, rev):
         return EXIT_ERROR
 
-    outcome = changes(root, rev, jobs=jobs)
+    outcome = changes(root, rev, jobs=jobs, persist=not no_regen)
     if outcome is None:
         return EXIT_ERROR
     impacts, result, new, target_rev, prov = outcome

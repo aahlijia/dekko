@@ -969,6 +969,24 @@ def test_stale_new_side_note_names_the_reuse(
     assert "dekko map" in err
 
 
+def test_stale_new_side_note_says_the_map_is_updated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A call that writes its re-map doesn't send the user to ``map``."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 7\n")
+    capsys.readouterr()
+
+    assert cli.main(["diff", "--root", str(root)]) == diff.EXIT_DIFFERENT
+
+    err = capsys.readouterr().err
+    assert "but 1 of 2 mapped files and updating the map" in err
+    assert "dekko map" not in err
+
+
 def test_stale_new_side_note_when_nothing_can_be_reused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

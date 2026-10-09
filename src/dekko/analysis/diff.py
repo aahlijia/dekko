@@ -34,7 +34,7 @@ from dekko.storage import cache as cache_mod
 from dekko.render import mapfile
 from dekko.storage import filelock, resolvecache, revcache
 from dekko.core import languages, walker
-from dekko.core.model import Import, Symbol
+from dekko.core.model import CallGraph, FileMap, Import, Symbol
 from dekko.textutil import fit_to_budget, signature
 from dekko.core.resolver import MODULE_CALLER_SUFFIX, ResolveReuse, resolve
 
@@ -103,6 +103,25 @@ class Snapshot:
     ambiguous_in: dict[str, list[tuple[str, str]]] = field(
         default_factory=dict
     )
+
+
+@dataclass
+class Remap:
+    """A tree mapped in memory, as ``snapshot`` built it.
+
+    Attributes:
+        files: Every mapped file.
+        skipped: ``(path, reason)`` pairs from discovery.
+        graph: The resolved call graph for ``files``.
+        cache: The extraction cache ``files`` came through, if any.
+        elapsed_ms: Extraction wall time.
+    """
+
+    files: list[FileMap]
+    skipped: list[tuple[str, str]]
+    graph: CallGraph
+    cache: cache_mod.IncrementalCache | None
+    elapsed_ms: int
 
 
 @dataclass
@@ -175,6 +194,7 @@ def snapshot(
     reuse_resolution: bool = False,
     follow_symlinks: bool = False,
     cache_root: Path | None = None,
+    on_remap: Callable[[Remap], None] | None = None,
 ) -> Snapshot:
     """Map a tree and capture its symbols, callers, and body hashes.
 
@@ -215,7 +235,7 @@ def snapshot(
             from the ``.dekko/`` that holds the resolve cache (see
             ``cache_root``). Resolution is most of a snapshot's cost on
             a large repo, so this is what makes a stale-map diff cheap.
-            Nothing is saved.
+            Nothing is saved here; see ``on_remap``.
         follow_symlinks: See ``walker.discover``; pass the map's own
             recorded setting so both sides discover what the map did.
         cache_root: The repository whose resolve cache to reuse when
@@ -223,8 +243,12 @@ def snapshot(
             exported rev with no ``.dekko/`` of its own. Its slow-path
             note is the rev-cache one, printed only when nothing can be
             reused. ``None`` means ``root`` itself, the working tree.
+        on_remap: Called with the mapped files and resolved graph
+            before the snapshot is built, so a stale map's re-map can
+            be written as the map (``snapshot_pair``).
     """
-    files, _ = repo_ops.map_repository(
+    start = time.perf_counter()
+    files, skipped = repo_ops.map_repository(
         root,
         subpath,
         excludes,
@@ -234,16 +258,21 @@ def snapshot(
         candidates=candidates,
         follow_symlinks=follow_symlinks,
     )
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
     reuse = None
     if reuse_resolution and cache is not None:
         reuse = resolvecache.build_reuse(
             root, files, cache, cache_root=cache_root
         )
         if cache_root is None:
-            _maybe_warn_stale_new_side(len(files), reuse, jobs)
+            _maybe_warn_stale_new_side(
+                len(files), reuse, jobs, writes=on_remap is not None
+            )
         elif reuse is None:
             _maybe_warn_sequential(jobs, candidates)
     graph = resolve(files, workers=jobs, root=root, reuse=reuse)
+    if on_remap is not None:
+        on_remap(Remap(files, skipped, graph, cache, elapsed_ms))
     snap = Snapshot()
     all_syms: list[Symbol] = []
     for fm in files:
@@ -305,6 +334,7 @@ def snapshot_new_side(
     load_cache: Callable[[], dict[str, dict]] | None = None,
     follow_symlinks: bool = False,
     fresh: bool | None = None,
+    on_remap: Callable[[Remap], None] | None = None,
 ) -> Snapshot:
     """New-side (working tree) snapshot, reusing a fresh index when possible.
 
@@ -313,9 +343,9 @@ def snapshot_new_side(
     regenerate the map first still gets an accurate diff. That
     fallback reuses the last ``dekko map``'s extraction cache and
     cached call resolution for everything the edit can't have
-    affected, so it costs about what an incremental map does, and
-    writes nothing. ``jobs`` (see ``snapshot``) only matters on the
-    fallback.
+    affected, so it costs about what an incremental map does. It
+    writes nothing itself; ``on_remap`` lets the caller write it.
+    ``jobs`` (see ``snapshot``) only matters on the fallback.
 
     Args:
         root: Repository root (the working tree).
@@ -330,6 +360,8 @@ def snapshot_new_side(
         follow_symlinks: The map's recorded setting.
         fresh: ``index``'s freshness verdict when the caller already
             has one (``snapshot_pair``); ``None`` checks it here.
+        on_remap: Passed to ``snapshot`` on the fallback; never called
+            when the fresh index serves.
     """
     if index is not None:
         if fresh is None:
@@ -347,6 +379,7 @@ def snapshot_new_side(
         jobs=jobs,
         reuse_resolution=True,
         follow_symlinks=follow_symlinks,
+        on_remap=on_remap,
     )
 
 
@@ -540,6 +573,7 @@ def snapshot_pair(
     target_rev: str,
     current: repo_ops.CurrentSide,
     jobs: int = 1,
+    persist: bool = False,
 ) -> tuple[Snapshot, Snapshot] | None:
     """Old- and new-side snapshots for working tree vs. ``target_rev``.
 
@@ -551,8 +585,10 @@ def snapshot_pair(
     already on disk. No rev-cache entry is written on that path, since
     the rev-cache only holds snapshots built from the commit itself.
 
-    A stale map's new side is re-mapped in memory; in a long-lived
-    process that result is kept for the next call on the same tree
+    A stale map's new side is re-mapped in memory. With ``persist``,
+    that re-map is also written as the map (see ``_persist_hook``), so
+    the next call of any read command finds it fresh. Otherwise, in a
+    long-lived process, it is kept for the next call on the same tree
     (see ``_recall_new_side``).
 
     Args:
@@ -562,6 +598,8 @@ def snapshot_pair(
             (``repo_ops.load_current_side``).
         jobs: Worker count for a rev-cache-miss old side or a
             stale-index new side; see ``snapshot``.
+        persist: Write a stale map's re-map over it. ``False`` (the
+            ``--no-regen`` path) leaves the map on disk untouched.
 
     Returns:
         ``(old, new)``, or ``None`` when ``target_rev`` can't be
@@ -603,8 +641,10 @@ def snapshot_pair(
     if new is not None:
         return old, new
 
-    # Hashed before the new side reads a byte: see _NewSideMemo.
-    changes = _memo_changes(root, current)
+    on_remap = _persist_hook(root, current) if persist else None
+    # Hashed before the new side reads a byte: see _NewSideMemo. A
+    # written re-map needs no memo: the next call finds the map fresh.
+    changes = None if on_remap else _memo_changes(root, current)
     new = snapshot_new_side(
         root,
         subpath,
@@ -615,22 +655,54 @@ def snapshot_pair(
         load_cache=load_cache,
         follow_symlinks=follow_symlinks,
         fresh=current.fresh,
+        on_remap=on_remap,
     )
     if changes is not None:
         _remember_new_side(root, changes, new)
     return old, new
 
 
+def _persist_hook(
+    root: Path, current: repo_ops.CurrentSide
+) -> Callable[[Remap], None] | None:
+    """A stale map's writer for its re-map, or ``None`` to leave it be.
+
+    Only over a map that already exists: ``diff``/``affected`` are what
+    people point at a tree they never mapped (CI, a pre-commit hook),
+    and that tree stays unmapped. Never from an outdated long-lived
+    process either, whose extractor code is older than the installed
+    one's; its repeats are what the new-side memo is for.
+    """
+    prov = current.provenance
+    freshness = current.freshness
+    if not prov or freshness is None or freshness.process_outdated:
+        return None
+
+    def write(remap: Remap) -> None:
+        repo_ops.persist_remap(
+            root,
+            prov,
+            remap.files,
+            remap.graph,
+            remap.cache,
+            remap.skipped,
+            remap.elapsed_ms,
+        )
+
+    return write
+
+
 @dataclass
 class _NewSideMemo:
     """A stale map's in-memory new side, kept for the next call.
 
-    A stale-map ``diff``/``affected`` re-maps the working tree and
-    throws the result away, so an agent's edit, ``impacted_tests``,
-    ``impacted_tests`` pays the full re-map every time (3 s on cline,
-    28 s on tensorflow). A long-lived process (the daemon, the MCP
-    server) keeps the last one here and reuses it while the tree
-    still holds the same content.
+    A stale-map ``diff``/``affected`` that may not write the map (the
+    ``--no-regen`` path, an outdated long-lived process) re-maps the
+    working tree and throws the result away, so an agent's edit,
+    ``impacted_tests``, ``impacted_tests`` pays the full re-map every
+    time (3 s on cline, 28 s on tensorflow). A long-lived process (the
+    daemon, the MCP server) keeps the last one here and reuses it while
+    the tree still holds the same content.
 
     Attributes:
         root: The repository it was built for.
@@ -872,7 +944,10 @@ def _workers_phrase(workers: int) -> str:
 
 
 def _maybe_warn_stale_new_side(
-    file_count: int, reuse: ResolveReuse | None, jobs: int
+    file_count: int,
+    reuse: ResolveReuse | None,
+    jobs: int,
+    writes: bool = False,
 ) -> None:
     """Disclose a stale-map new-side resolve before it starts.
 
@@ -886,6 +961,8 @@ def _maybe_warn_stale_new_side(
         file_count: Mapped files in the working tree.
         reuse: The plan ``resolvecache.build_reuse`` returned.
         jobs: Resolved worker count the resolve will run with.
+        writes: The re-map will be written as the map, so the note
+            says that instead of pointing at ``dekko map``.
     """
     if file_count < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
         return
@@ -893,15 +970,23 @@ def _maybe_warn_stale_new_side(
         message = (
             f"note: map is stale; reusing cached call resolution for all "
             f"but {len(reuse.dirty)} of {file_count} mapped files "
-            f"(`dekko map` makes repeat calls faster)"
+        )
+        message += (
+            "and updating the map"
+            if writes
+            else "(`dekko map` makes repeat calls faster)"
         )
     else:
         message = (
             f"note: map is stale and this change can't reuse cached call "
             f"resolution (a file was added, removed or renamed, or a type "
             f"changed); resolving all {file_count} mapped files with "
-            f"{_workers_phrase(jobs)} may take a while -- `dekko map` "
-            f"pays this once and makes repeat calls fast"
+            f"{_workers_phrase(jobs)} may take a while -- "
+        )
+        message += (
+            "the map is updated after, so repeat calls are fast"
+            if writes
+            else "`dekko map` pays this once and makes repeat calls fast"
         )
     print(message, file=sys.stderr)
 
@@ -1281,6 +1366,7 @@ def run(
     limit: int,
     jobs: int = 1,
     budget: int | None = DEFAULT_BUDGET,
+    no_regen: bool = False,
 ) -> int:
     """Execute ``dekko diff`` against a repository.
 
@@ -1295,6 +1381,8 @@ def run(
             (rev-cache hit, fresh index).
         budget: Approximate token budget for the symbol rows; ``0`` or
             ``None`` for no cap.
+        no_regen: Leave a stale map on disk as it is; the re-map
+            answers this call only.
 
     Returns:
         Process exit code (0 no changes, 1 changes, 2 error).
@@ -1304,7 +1392,9 @@ def run(
 
     current = repo_ops.load_current_side(root)
     target_rev = rev or current.provenance.get("git_commit") or "HEAD"
-    pair = snapshot_pair(root, target_rev, current, jobs=jobs)
+    pair = snapshot_pair(
+        root, target_rev, current, jobs=jobs, persist=not no_regen
+    )
     if pair is None:
         return EXIT_ERROR
 

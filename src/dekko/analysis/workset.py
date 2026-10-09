@@ -26,6 +26,7 @@ from dekko.analysis import query
 from dekko.analysis import relevance
 from dekko.classify import relevance_key
 from dekko.analysis.contextpack import Pack, build_pack
+from dekko.render import mapfile
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.analysis.query import report_unresolved, resolve_target
@@ -651,6 +652,13 @@ def run(
         hint = "to start from a symbol, use --symbol, or 'symbol' over MCP"
         if not diff.check_rev(root, rev, hint=hint):
             return EXIT_ERROR
+
+    if symbol is None and rev is None:
+        # The default rev is the commit the map was built at, read
+        # before a stale map's regen re-stamps it with HEAD: with a
+        # commit since the last map, `diff` and `affected` compare
+        # against that older commit, and so must this.
+        rev = (mapfile.load_provenance(root) or {}).get("git_commit")
 
     index, code = repo_ops.load_or_regen(root, no_regen)
     if index is None:

@@ -1860,15 +1860,18 @@ def test_impacted_tests_tool_defaults_budget(
         limit,  # noqa: ANN001
         budget=None,  # noqa: ANN001
         jobs=None,  # noqa: ANN001
+        no_regen=None,  # noqa: ANN001
     ) -> int:
         seen["budget"] = budget
         seen["jobs"] = jobs
+        seen["no_regen"] = no_regen
         print("impacted")
         return 0
 
     monkeypatch.setattr(server.affected, "run", fake_run)
     assert _call(ctx, "impacted_tests", {})["isError"] is False
     assert seen["budget"] == server.affected.DEFAULT_BUDGET
+    assert seen["no_regen"] is False
     # Never the function's own sequential default.
     assert seen["jobs"] == (os.cpu_count() or 1)
 

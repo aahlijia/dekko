@@ -924,6 +924,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
             limit=limit,
             budget=budget,
             jobs=_COLD_REV_JOBS,
+            no_regen=ctx.no_regen,
         )
     )
     if code == affected.EXIT_ERROR:
@@ -995,7 +996,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             budget=budget,
             packs=packs,
             as_json=False,
-            no_regen=False,
+            no_regen=ctx.no_regen,
             task=task,
             type_impact=type_impact,
             jobs=_COLD_REV_JOBS,

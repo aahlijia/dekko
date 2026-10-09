@@ -68,25 +68,25 @@ Other ambiguous names list their candidates instead of guessing;
 have. A mistyped command (`dekko serach`) exits 2 with a suggestion.
 Every read command takes `--json` for structured output.
 Most also regenerate a stale map automatically (`--no-regen` to fail
-instead) — `diff`, `affected`, `status`, and `ledger` don't accept
-`--no-regen` at all: `status`/`ledger` never regenerate regardless,
-and `diff`/`affected` always re-map the current tree in memory
-rather than writing a fresh `map.json` to disk, so `dekko status`
-right after a `dekko diff`/`dekko affected` on a fresh edit can still
-report the map as stale. That in-memory pass reuses the last `dekko
-map`'s caches the same way an incremental map does (see "Incremental
-vs. `--full` map runs"), so it costs about what `dekko map` would. From
-a plain shell, nothing gets cheaper on the next call until you run
-`dekko map`. Under the daemon or the MCP server (`impacted_tests`), a
-repeat call on a tree that hasn't changed since the last one reuses
-that call's in-memory pass instead of redoing it; any edit, or a new
-`dekko map`, starts over. A stale map is also never parsed just to be
-rejected: freshness is judged from the small provenance sidecar, and
-`map.json` is loaded only when it's current. On a
-large repo (5,000+ mapped files) both waits print a `note:` to stderr
-first: a stale map's in-memory pass, and the regen every other read
-command does. A missing map is always announced, since the first build
-is a cold one.
+instead). `status` and `ledger` never regenerate and don't accept
+`--no-regen`. `diff` and `affected` re-map a stale tree in memory
+(they need a snapshot of it, not a loaded map), reusing the last map's
+caches the same way an incremental map does (see "Incremental vs.
+`--full` map runs"), and then write that re-map as the map, so the next
+call of any read command finds it fresh. With `--no-regen` they still
+answer from the in-memory re-map but leave the map on disk as it is;
+under the daemon or the MCP server (`impacted_tests` under `serve
+--no-regen`), a repeat call on a tree that hasn't changed since then
+reuses that re-map instead of redoing it. They also never write over a
+tree that has no map yet, over a map another process is regenerating,
+from an MCP server older than the installed dekko, or into a read-only
+checkout (one `note:`); the answer is the same either way. A stale map
+is also never parsed just to be rejected: freshness is judged from the
+small provenance sidecar, and `map.json` is loaded only when it's
+current. On a large repo (5,000+ mapped files) both waits print a
+`note:` to stderr first: a stale map's re-map, and the regen every
+other read command does. A missing map is always announced, since the
+first build is a cold one.
 
 `diff`/`affected` compare at symbol-body-hash granularity, not a whole-file
 diff: an edit outside every symbol's body span (a trailing comment after the
@@ -1873,15 +1873,15 @@ first comparison cost about an incremental map instead of a full one.
 A rev that adds, removes or renames a file relative to the map, or
 changes a type, still resolves in full.
 
-On a stale map the current-tree side is the in-memory re-map described
-under the read commands above. The daemon keeps the last one it built
-and reuses it while the working tree holds the same content, so an
-agent that edits once and then calls `affected` several times pays for
-the re-map once (cline: ~3.3 s per call before, ~0.4 s for a repeat;
-tensorflow: ~29 s before, ~3 s). That costs memory: one extra
-current-tree snapshot, about the size of the map, held while the tree
-stays dirty and unmapped, and dropped as soon as a call finds the map
-fresh again. The MCP server does the same.
+On a stale map the current-tree side is the re-map described under the
+read commands above, written as the map afterwards, so an agent that
+edits once and then calls `diff`, `affected` and `workset` pays for the
+re-map once (tensorflow: ~27 s for every stale call before, ~8 s for
+each call after the first). When the re-map isn't written
+(`--no-regen`, an outdated MCP server), the daemon and the MCP server
+keep the last one and reuse it while the working tree holds the same
+content. That costs memory: one extra current-tree snapshot, about the
+size of the map, dropped as soon as a call finds the map fresh again.
 
 Even for the current-tree side, the warm cache's win is specifically
 skipping map *loading* (re-parsing `map.json` into an in-memory

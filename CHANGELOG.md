@@ -9,6 +9,34 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.24] — 2026-10-09
+
+### Performance
+- **A stale map costs `diff` and `affected` one re-map, not one per
+  call.** On a stale map both commands re-mapped the whole tree in
+  memory and threw the result away, so every call paid it again (27 s
+  each on tensorflow, 2.9 s on cline) until something else rewrote the
+  map. They now write that re-map as the map, like every other read
+  command, and the next call of any kind takes the fresh path (7.8 s
+  and ~0.7 s). The write reuses the re-map they already built, so it
+  costs the render alone; the first stale call on tensorflow goes from
+  27 s to about 41 s. A `workset` right after a stale `diff` no longer
+  re-maps the tree a second time either.
+- `diff` and `affected` take `--no-regen` to answer from memory and
+  leave a stale map on disk as it is. A tree with no map yet, a map
+  another process is regenerating, an outdated long-lived process (an
+  MCP server older than the installed dekko), and a read-only checkout
+  (one `note:`) are never written either.
+
+### Fixed
+- **`workset` compares against the same commit as `diff`.** With a
+  commit since the last map, `diff` and `affected` default to the
+  commit the map was built at, but `workset` regenerated first and then
+  read the *new* map's commit (HEAD), so it showed only the uncommitted
+  part of the change.
+- **MCP `workset` honors `dekko serve --no-regen`.** It regenerated a
+  stale map regardless; `impacted_tests` now passes the setting on too.
+
 ## [1.8.23] — 2026-10-09
 
 ### Fixed

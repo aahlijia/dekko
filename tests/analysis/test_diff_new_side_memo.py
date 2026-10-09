@@ -1,9 +1,10 @@
 """A stale map's new side, kept for the next call in long-lived processes.
 
-``diff``/``affected`` re-map a stale working tree in memory and never
-write the map. A long-lived process (the daemon, the MCP server) keeps
-that result and reuses it while the tree holds the same content; a
-one-shot CLI process keeps nothing.
+When ``diff``/``affected`` may not write a stale map (``--no-regen``,
+an outdated long-lived process), they re-map the working tree in memory
+only. A long-lived process (the daemon, the MCP server) keeps that
+result and reuses it while the tree holds the same content; a one-shot
+CLI process keeps nothing.
 """
 
 import subprocess
@@ -232,9 +233,9 @@ def test_memo_hit_output_matches_the_first_call(
     run = diff.run if command == "diff" else affected.run
 
     for as_json in (False, True):
-        first_code = run(stale_root, None, as_json, 10)
+        first_code = run(stale_root, None, as_json, 10, no_regen=True)
         first = capsys.readouterr().out
-        second_code = run(stale_root, None, as_json, 10)
+        second_code = run(stale_root, None, as_json, 10, no_regen=True)
         second = capsys.readouterr().out
 
         assert diff._new_side_memo is not None

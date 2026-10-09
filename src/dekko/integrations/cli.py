@@ -783,6 +783,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "no cap)",
     )
     p_diff.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="answer a stale map from an in-memory re-map and leave the "
+        "map on disk as it is (by default the re-map is also written "
+        "as the map, so the next call is fast)",
+    )
+    p_diff.add_argument(
         "--jobs",
         type=int,
         default=0,
@@ -833,6 +840,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="approximate token budget; drops weakest-tier files first "
         f"(default: {affected.DEFAULT_BUDGET}; 0 = no cap, including "
         "the runner line's path list)",
+    )
+    p_affected.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="answer a stale map from an in-memory re-map and leave the "
+        "map on disk as it is (by default the re-map is also written "
+        "as the map, so the next call is fast)",
     )
     p_affected.add_argument(
         "--jobs",
@@ -2189,6 +2203,7 @@ def run_diff(args: argparse.Namespace) -> int:
         limit=args.limit,
         jobs=repo_ops.resolve_workers(getattr(args, "jobs", 0)),
         budget=getattr(args, "budget", diff.DEFAULT_BUDGET),
+        no_regen=getattr(args, "no_regen", False),
     )
 
 
@@ -2203,6 +2218,7 @@ def run_affected(args: argparse.Namespace) -> int:
         budget=args.budget,
         jobs=repo_ops.resolve_workers(getattr(args, "jobs", 0)),
         show_possible=getattr(args, "show_possible", False),
+        no_regen=getattr(args, "no_regen", False),
     )
 
 
