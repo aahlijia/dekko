@@ -131,7 +131,12 @@ def test_the_written_map_is_the_one_dekko_map_writes(
     (stale_root / ".dekko" / "map.json").unlink()
 
     assert cli.main(["map", str(stale_root), "--quiet", "--full"]) == 0
-    assert _map_bytes(stale_root) == persisted
+    rewritten = json.loads(_map_bytes(stale_root))
+    written = json.loads(persisted)
+    # A second apart on a slow runner: the one field that may differ.
+    for doc in (rewritten, written):
+        doc.pop("generated_at")
+    assert rewritten == written
 
 
 def test_no_regen_leaves_the_map_untouched(
