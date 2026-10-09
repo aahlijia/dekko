@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.20] — 2026-10-09
+
+### Fixed
+- **`diff` has a budget.** It had no cap: `diff HEAD~500` on cline
+  printed 2 MB. `--budget TOKENS` (default 4,000, `0` for no cap) keeps
+  changed symbols first, then added and removed, with an `N of M
+  omitted` footer; `--json` gets `meta`.
+- **`affected` says what it saw when nothing is certain.** With only
+  possible impacts it now reads `no certain impacted tests ...; N
+  possible`, and after an edit that changed no symbol (a comment,
+  whitespace, top-level code) it says how many files changed, instead
+  of a bare "no impacted tests" that read as "safe". `--json` gets
+  `changed_files` and `changed_symbols`.
+- **The symlink note counts code files only.** A symlinked
+  `LICENSE-GPL` or `AGENTS.md` can't hold a symbol, yet zed's 262 of
+  them put a 600-character note on every empty reply. Takes effect on
+  the next `dekko map`.
+- **A closed pipe ends the command quietly.** `dekko lean | head`
+  printed a `BrokenPipeError` traceback; it now exits 141 with nothing
+  on stderr.
+
 ## [1.8.19] — 2026-10-09
 
 ### Fixed

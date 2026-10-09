@@ -33,14 +33,19 @@ from dekko import selfcheck
 from dekko.storage import cache as cache_mod
 from dekko.render import mapfile
 from dekko.storage import filelock, resolvecache, revcache
-from dekko.core import walker
+from dekko.core import languages, walker
 from dekko.core.model import Import, Symbol
-from dekko.textutil import signature
+from dekko.textutil import fit_to_budget, signature
 from dekko.core.resolver import MODULE_CALLER_SUFFIX, ResolveReuse, resolve
 
 EXIT_SAME = 0
 EXIT_DIFFERENT = 1
 EXIT_ERROR = 2
+
+# Default token budget for the symbol rows. Most diffs fit in it with
+# room to spare; one across hundreds of commits (cline `diff HEAD~500`,
+# 2 MB) gets an "N of M omitted" footer instead.
+DEFAULT_BUDGET = 4000
 
 # A bare `diff`/`affected`/`workset` invocation with no rev-cache entry for
 # its target commit falls into old_snapshot()'s cache-miss path,
@@ -947,6 +952,47 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     print(message, file=sys.stderr)
 
 
+def changed_source_paths(root: Path, rev: str) -> list[str] | None:
+    """Mappable files that differ between ``rev`` and the working tree.
+
+    Tracked changes (staged or not) plus untracked files git doesn't
+    ignore, kept to the files a grammar maps. ``affected`` uses the
+    count to tell "nothing changed" from "a file changed but none of
+    its symbols did" (a comment, whitespace, top-level code).
+
+    Args:
+        root: Repository root.
+        rev: The old side's rev.
+
+    Returns:
+        Repo-relative paths, or ``None`` when git can't answer.
+    """
+    paths: set[str] = set()
+    for args in (
+        ["diff", "--name-only", "-z", rev, "--"],
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    ):
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(root), *args],
+                capture_output=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        text = proc.stdout.decode("utf-8", errors="replace")
+        paths.update(p for p in text.split("\0") if p)
+
+    return sorted(
+        p
+        for p in paths
+        if languages.spec_for_path(p) is not None
+        or languages.tier2_grammar_for_path(p) is not None
+    )
+
+
 def tracked_at_rev(root: Path, rev: str) -> list[str] | None:
     """Repo-relative paths tracked at ``rev``, or ``None`` on failure.
 
@@ -1147,44 +1193,85 @@ def _delta_json(delta: SymbolDelta) -> dict:
     }
 
 
-def _print_delta(marker: str, delta: SymbolDelta, limit: int) -> None:
-    """Print one symbol delta and a capped list of its callers."""
+def _delta_text(marker: str, delta: SymbolDelta, limit: int) -> str:
+    """One symbol delta and a capped list of its callers, as one row."""
     sym = delta.symbol
-    print(f"{marker} {sym.path}:{sym.start_line}  {signature(sym)}")
-    for caller in delta.callers[:limit]:
-        print(f"    called by: {caller}")
+    lines = [f"{marker} {sym.path}:{sym.start_line}  {signature(sym)}"]
+    lines.extend(
+        f"    called by: {caller}" for caller in delta.callers[:limit]
+    )
     extra = len(delta.callers) - limit
     if extra > 0:
-        print(f"    ... and {extra} more callers")
+        lines.append(f"    ... and {extra} more callers")
+    return "\n".join(lines)
 
 
-def render(result: DiffResult, as_json: bool, limit: int) -> None:
-    """Emit a diff result as text or JSON."""
+def _ordered_deltas(result: DiffResult) -> list[tuple[str, SymbolDelta]]:
+    """Every delta with its marker: changed, then added, then removed.
+
+    Changed symbols come first because they are what callers already
+    depend on, so they are the last to go under a budget.
+    """
+    return [
+        (marker, delta)
+        for marker, deltas in (
+            ("~", result.changed),
+            ("+", result.added),
+            ("-", result.removed),
+        )
+        for delta in deltas
+    ]
+
+
+def _render_json(result: DiffResult, budget: int | None) -> None:
+    """``render``'s JSON form, with the budget applied across all three
+    lists in ``_ordered_deltas`` order."""
+    ordered = _ordered_deltas(result)
+    entries = [_delta_json(d) for _, d in ordered]
+    kept, meter = fit_to_budget([json.dumps(e) for e in entries], budget, None)
+    doc: dict = {"rev": result.rev, "changed": [], "added": [], "removed": []}
+    key = {"~": "changed", "+": "added", "-": "removed"}
+    for (marker, _), entry in zip(ordered[: len(kept)], entries):
+        doc[key[marker]].append(entry)
+    doc["meta"] = meter.as_dict()
+    print(json.dumps(doc, indent=2))
+
+
+def render(
+    result: DiffResult,
+    as_json: bool,
+    limit: int,
+    budget: int | None = DEFAULT_BUDGET,
+) -> None:
+    """Emit a diff result as text or JSON.
+
+    Args:
+        result: The compared snapshots.
+        as_json: Emit structured JSON instead of text.
+        limit: Max callers listed per symbol.
+        budget: Approximate token budget for the symbol rows; ``0`` or
+            ``None`` for no cap. A diff across hundreds of commits
+            printed megabytes before there was one.
+    """
     if as_json:
-        doc = {
-            "rev": result.rev,
-            "added": [_delta_json(d) for d in result.added],
-            "removed": [_delta_json(d) for d in result.removed],
-            "changed": [_delta_json(d) for d in result.changed],
-        }
-        print(json.dumps(doc, indent=2))
+        _render_json(result, budget)
         return
 
     if result.empty():
         print(f"dekko: no symbol changes vs {result.rev[:12]}")
         return
 
-    print(
+    header = (
         f"dekko: {len(result.changed)} changed, {len(result.added)} added, "
         f"{len(result.removed)} removed vs {result.rev[:12]}"
     )
-    for marker, deltas in (
-        ("~", result.changed),
-        ("+", result.added),
-        ("-", result.removed),
-    ):
-        for delta in deltas:
-            _print_delta(marker, delta, limit)
+    rows = [_delta_text(m, d, limit) for m, d in _ordered_deltas(result)]
+    kept, meter = fit_to_budget(rows, budget, None, prefix=header)
+    print(header)
+    for row in kept:
+        print(row)
+    if meter.omitted:
+        print(meter.footer())
 
 
 def run(
@@ -1193,6 +1280,7 @@ def run(
     as_json: bool,
     limit: int,
     jobs: int = 1,
+    budget: int | None = DEFAULT_BUDGET,
 ) -> int:
     """Execute ``dekko diff`` against a repository.
 
@@ -1205,6 +1293,8 @@ def run(
             snapshot or a stale-index new-side re-parse — see
             ``snapshot``. No effect when both sides are already warm
             (rev-cache hit, fresh index).
+        budget: Approximate token budget for the symbol rows; ``0`` or
+            ``None`` for no cap.
 
     Returns:
         Process exit code (0 no changes, 1 changes, 2 error).
@@ -1220,5 +1310,5 @@ def run(
 
     old, new = pair
     result = compare(target_rev, old, new)
-    render(result, as_json, limit)
+    render(result, as_json, limit, budget)
     return EXIT_SAME if result.empty() else EXIT_DIFFERENT

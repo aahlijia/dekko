@@ -33,7 +33,7 @@ dekko workset                        # one bundle for your current change
 dekko workset --symbol Config --type-impact  # + type-usage + heritage impact, unioned
 dekko affected                       # test files impacted by your changes (exit 0/1)
 dekko affected --possible            # + tests reaching the change only through unresolved calls
-dekko diff                           # symbols changed since the map's commit (exit 0/1)
+dekko diff                           # symbols changed since the map's commit (exit 0/1; --budget 4000 by default, 0 = no cap)
 dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
 dekko unused --kinds all             # callables + types, unioned

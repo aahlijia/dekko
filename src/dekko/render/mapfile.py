@@ -19,7 +19,7 @@ from functools import cached_property
 from pathlib import Path
 
 from dekko import selfcheck
-from dekko.core import walker
+from dekko.core import languages, walker
 from dekko.classify import is_test_path
 from dekko.core.model import (
     CallGraph,
@@ -461,6 +461,14 @@ def _too_large_summary(
     }
 
 
+def _is_mappable(path: str) -> bool:
+    """Whether a Tier-1 or Tier-2 grammar would map ``path``."""
+    return (
+        languages.spec_for_path(path) is not None
+        or languages.tier2_grammar_for_path(path) is not None
+    )
+
+
 def _symlink_summary(
     skipped: list[tuple[str, str]] | None,
 ) -> dict | None:
@@ -470,7 +478,10 @@ def _symlink_summary(
     aggregated by directory) rather than ``_vendored_summary`` — a
     symlinked source file is rare enough that the actual path is the
     useful signal: a user wants to know *which* file quietly became
-    invisible, not just a count.
+    invisible, not just a count. Only a link a grammar would map
+    counts: a symlinked ``LICENSE-GPL`` or ``AGENTS.md`` can't hold a
+    symbol even when followed (zed has 262 of them, and the note rode
+    on every empty reply).
 
     Args:
         skipped: ``(path, reason)`` pairs from ``walker.discover``.
@@ -483,7 +494,9 @@ def _symlink_summary(
     if not skipped:
         return None
     paths = sorted(
-        path for path, reason in skipped if reason == _SYMLINK_REASON
+        path
+        for path, reason in skipped
+        if reason == _SYMLINK_REASON and _is_mappable(path)
     )
     if not paths:
         return None

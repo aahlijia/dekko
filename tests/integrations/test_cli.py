@@ -3,6 +3,7 @@
 import contextlib
 import json
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -1230,3 +1231,44 @@ def test_load_or_regen_concurrent_callers_regen_exactly_once(
     assert len(regen_calls) == 1
     assert len(results) == 3
     assert all(code == 0 and index is not None for index, code in results)
+
+
+def test_a_closed_pipe_exits_quietly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            f"pkg/m{i}.py": "".join(
+                f"def fn_{i}_{j}(x: int) -> int:\n    return x\n\n\n"
+                for j in range(40)
+            )
+            for i in range(30)
+        }
+    )
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from dekko.integrations.cli import main; "
+            "sys.exit(main(sys.argv[1:]))",
+            "outline",
+            "pkg",
+            "--budget",
+            "0",
+            "--limit",
+            "100000",
+            "--root",
+            str(root),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    proc.stdout.readline()
+    proc.stdout.close()
+    err = proc.stderr.read().decode()
+    proc.wait(timeout=60)
+    assert "Traceback" not in err
+    assert "BrokenPipeError" not in err
+    assert proc.returncode == 141

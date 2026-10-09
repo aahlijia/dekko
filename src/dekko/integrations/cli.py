@@ -8,6 +8,7 @@ writes a human-readable MAP.md plus a machine-readable map.json.
 import argparse
 import difflib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -770,6 +771,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         type=_row_count,
         default=8,
         help="max impacted callers shown per symbol (default: 8)",
+    )
+    p_diff.add_argument(
+        "--budget",
+        type=_token_budget,
+        default=diff.DEFAULT_BUDGET,
+        metavar="TOKENS",
+        help="approximate token budget for the symbol rows; changed "
+        f"symbols are kept first (default: {diff.DEFAULT_BUDGET}; 0 for "
+        "no cap)",
     )
     p_diff.add_argument(
         "--jobs",
@@ -2177,6 +2187,7 @@ def run_diff(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         limit=args.limit,
         jobs=repo_ops.resolve_workers(getattr(args, "jobs", 0)),
+        budget=getattr(args, "budget", diff.DEFAULT_BUDGET),
     )
 
 
@@ -2986,8 +2997,20 @@ def _report_daemon_request_abandoned(
     return daemon_mod.EXIT_DAEMON_ABANDONED
 
 
+# What a process killed by SIGPIPE reports (128 + 13), so a reader
+# that closed the pipe early (``dekko lean | head``) sees the usual
+# status.
+EXIT_BROKEN_PIPE = 141
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point.
+
+    A reader that stops early (``| head``) closes the pipe under us;
+    that ends the command quietly instead of with a traceback. The
+    flush is inside the guard because a buffered write fails only when
+    it is flushed, and the interpreter's own exit flush would otherwise
+    print ``Exception ignored ... BrokenPipeError``.
 
     Args:
         argv: Argument list, or ``None`` for ``sys.argv``.
@@ -2995,6 +3018,32 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Process exit code.
     """
+    try:
+        code = _main(argv)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _discard_stdout()
+        return EXIT_BROKEN_PIPE
+
+    return code
+
+
+def _discard_stdout() -> None:
+    """Point the stdout descriptor at the null device.
+
+    Python's documented fix for a closed pipe: the exit-time flush of
+    whatever is still buffered then has somewhere to go. A captured
+    stdout with no descriptor (tests) has nothing to redirect.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        return
+
+
+def _main(argv: list[str] | None) -> int:
+    """``main``'s dispatch, outside the closed-pipe guard."""
     args_list = list(sys.argv[1:] if argv is None else argv)
 
     no_daemon = "--no-daemon" in args_list
