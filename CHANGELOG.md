@@ -9,6 +9,49 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-10-09
+
+Closes the fix cycle 1.8.0 left open: the round 1.8 findings it carried
+forward, and what their round-close gates turned up on seven real
+repositories. The code is 1.8.26; this release is the version line
+catching up, per `CONTRIBUTING.md`'s "Testing rounds and the version
+line". All 26 fixes, by area:
+
+- **Java and Kotlin construction (1.8.1-1.8.4)**: a record's canonical
+  constructor is a symbol, `X::new` is a reference to `X`, a type tie
+  is settled by the caller's own package (spring-boot +1,495 call
+  sites, none lost), and a Kotlin `f<T>(x)` is a call, not two
+  comparisons.
+- **Rust paths (1.8.5-1.8.8)**: `use` paths and globs are walked to the
+  type they name, a path whose head the repo doesn't have is external,
+  `uses <crate>` finds a crate called by path (zed `serde_json` 36
+  sites -> 1,963), and `Self::name`, `<T>::name` and bare calls get the
+  same narrowing. Callers of zed's `Point.new`: 16 -> 569.
+- **Calls through fields (1.8.9-1.8.10)**: `map.json` records each
+  type's fields, and a call through a field, with or without `this`,
+  reaches the field's type. Ambiguous rows: spring-boot 61,299 ->
+  45,316, zed 83,424 -> 75,139. A bare call to a parameter no longer
+  lands on a repo function of that name.
+- **`dekko map` no longer hangs at exit (1.8.11)** after writing the
+  map on Python 3.12+.
+- **`sanity` explains what it finds (1.8.12-1.8.16, 1.8.26)**: comments,
+  strings, same-named locals, type mentions and other languages' lines
+  are labeled as such, qualified calls carry the resolver's verdict,
+  and test-only symbols are checked. zed `WorkflowInput.bool`
+  unexplained rows 2,394 -> 0; cline "no record" rows 5,967 -> 257.
+- **CLI and MCP edges (1.8.17-1.8.22)**: `./` paths and `path:id#N` ids
+  resolve, `query --lang` narrows any target, `search` puts an exact
+  name first, `diff` has a `--budget`, MCP booleans are booleans, a
+  missing `root` is an error, and a closed pipe ends quietly on
+  Windows.
+- **The prompt-submit hook (1.8.23)** lists files only through the
+  prompt's own words, not every recently changed file (1,108 on
+  cline).
+- **A stale map costs `diff` and `affected` one re-map (1.8.24)**, not
+  one per call (tensorflow 27 s per call -> 7.8 s after the first).
+- **A map written by a newer dekko loads in an older one (1.8.25)**, so
+  a long-running MCP server no longer crashes on a newer map's keys.
+
 ## [1.8.26] — 2026-10-09
 
 ### Fixed
