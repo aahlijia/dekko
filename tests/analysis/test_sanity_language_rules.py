@@ -2,6 +2,7 @@
 another language can't call the target, and (below) a bare identifier
 can't be a method, a Rust type position doesn't construct the type."""
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -92,6 +93,12 @@ def test_typescript_variants_are_one_family(
     assert _cause(rows, ("src/d.py", 1)) == sanity.CAUSE_OTHER_LANGUAGE
 
 
+# Lua is a Tier-2 grammar: without the optional pack the target file
+# isn't mapped at all and there is no symbol to check.
+@pytest.mark.skipif(
+    importlib.util.find_spec("tree_sitter_language_pack") is None,
+    reason="Tier-2 grammar pack not installed (dekko[all])",
+)
 def test_an_unknown_grammar_on_either_side_is_skipped(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
