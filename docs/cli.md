@@ -1281,7 +1281,14 @@ with a supertype outside the repo stops the search when it has no
 `m` of its own, and so does a name a class has without a symbol for
 it (`equals` and `Object`'s other methods, an enum's `values()`, a
 record's zero-argument accessor); a call inside an anonymous class
-body is left to the ladder. A
+body is left to the ladder. Since 1.9.6 a bare Java call whose pick is
+no method of an enclosing class (own or inherited from an in-repo
+supertype) and that no import in the file binds is counted external:
+Java has no other way to name it, so `getProject()` in a class
+extending Gradle's `DefaultTask` is `DefaultTask`'s, not the one
+repo class's that happens to declare it. A class whose supertype
+clause names an in-repo type that couldn't be read (a Kotlin class,
+say) keeps the pick. A
 low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before

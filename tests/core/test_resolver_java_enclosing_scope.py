@@ -814,3 +814,170 @@ def test_a_kotlin_bare_call_is_unchanged(tmp_path: Path) -> None:
         },
     )
     assert _callees(g, "Outer.kt::Outer.Task.check") == set()
+
+
+def _external(graph: CallGraph, caller: str) -> set[str]:
+    return {e.callee for e in graph.external if e.caller == caller}
+
+
+# A JVM source root, so a static import reads as an in-repo path.
+SRC = "src/main/java/"
+CONTRIBUTION = {
+    "Contribution.java": """
+        class Contribution {
+            Object getProject() { return null; }
+        }
+    """,
+}
+
+
+def test_a_pick_no_enclosing_class_has_is_external(tmp_path: Path) -> None:
+    # ``getProject`` is ``DefaultTask``'s; the repo's one ``getProject``
+    # belongs to a class a bare call here can't name.
+    g = _graph(
+        tmp_path,
+        {
+            **CONTRIBUTION,
+            "Playbook.java": """
+                import org.gradle.api.DefaultTask;
+                abstract class Playbook extends DefaultTask {
+                    void write() { getProject(); }
+                }
+            """,
+        },
+    )
+    caller = "Playbook.java::Playbook.write"
+    assert _callees(g, caller) == set()
+    assert _external(g, caller) == {"getProject"}
+
+
+def test_a_records_own_accessor_is_external(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Library.java": "class Library { int minor() { return 1; } }",
+            "ComposeVersion.java": """
+                record ComposeVersion(int major, int minor) {
+                    boolean isLessThan(int m) { return minor() < m; }
+                }
+            """,
+        },
+    )
+    caller = "ComposeVersion.java::ComposeVersion.isLessThan"
+    assert _callees(g, caller) == set()
+    assert _external(g, caller) == {"minor"}
+
+
+def test_a_statically_imported_pick_is_kept(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            f"{SRC}p/Util.java": (
+                "package p;\npublic class Util "
+                "{ public static Object getProject() { return null; } }\n"
+            ),
+            f"{SRC}r/Playbook.java": """
+                package r;
+                import static p.Util.getProject;
+                import org.gradle.api.DefaultTask;
+                abstract class Playbook extends DefaultTask {
+                    void write() { getProject(); }
+                }
+            """,
+        },
+    )
+    assert _callees(g, f"{SRC}r/Playbook.java::Playbook.write") == {
+        f"{SRC}p/Util.java::Util.getProject"
+    }
+
+
+def test_a_pick_through_an_on_demand_static_import_is_kept(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            f"{SRC}p/Util.java": (
+                "package p;\npublic class Util "
+                "{ public static Object getProject() { return null; } }\n"
+            ),
+            f"{SRC}r/Playbook.java": """
+                package r;
+                import static p.Util.*;
+                import org.gradle.api.DefaultTask;
+                abstract class Playbook extends DefaultTask {
+                    void write() { getProject(); }
+                }
+            """,
+        },
+    )
+    assert _callees(g, f"{SRC}r/Playbook.java::Playbook.write") == {
+        f"{SRC}p/Util.java::Util.getProject"
+    }
+
+
+def test_an_outer_method_past_an_outside_supertype_is_kept(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Outer.java": """
+                import java.util.AbstractList;
+                class Outer {
+                    Object getProject() { return null; }
+                    abstract static class Task extends AbstractList<String> {
+                        void check() { getProject(); }
+                    }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "Outer.java::Outer.Task.check") == {
+        "Outer.java::Outer.getProject"
+    }
+
+
+def test_a_pick_in_an_anonymous_class_is_not_judged(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            **CONTRIBUTION,
+            "Use.java": """
+                class Use {
+                    Runnable make() {
+                        return new Runnable() {
+                            public void run() { getProject(); }
+                        };
+                    }
+                }
+            """,
+        },
+    )
+    targets = {e.callee for e in g.edges if e.caller.startswith("Use.java")}
+    assert targets == {"Contribution.java::Contribution.getProject"}
+
+
+def test_an_unread_in_repo_supertype_name_abstains(tmp_path: Path) -> None:
+    # ``KMid`` is the repo's Kotlin class, which the scope walk doesn't
+    # read, and ``JBase.reset`` is inherited through it: the ladder's
+    # pick stays.
+    g = _graph(
+        tmp_path,
+        {
+            f"{SRC}r/JBase.java": (
+                "package r;\npublic class JBase "
+                "{ protected void reset() {} }\n"
+            ),
+            f"{SRC}r/KMid.kt": "package r\nopen class KMid : JBase()\n",
+            f"{SRC}r/Sub.java": """
+                package r;
+                class Sub extends KMid {
+                    void check() { reset(); }
+                }
+            """,
+        },
+    )
+    assert _callees(g, f"{SRC}r/Sub.java::Sub.check") == {
+        f"{SRC}r/JBase.java::JBase.reset"
+    }

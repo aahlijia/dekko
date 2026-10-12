@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.6] — 2026-10-12
+
+### Fixed
+- **A bare Java call no enclosing class can name is external.** A bare
+  `m(..)` in Java reaches a method of an enclosing class (declared or
+  inherited) or a static import, nothing else; the name-only rungs
+  took any one same-named method in the repo. So `getProject()` in a
+  Gradle task extending `DefaultTask` landed on an unrelated build
+  class's `getProject`, a record's own accessor `minor()` on another
+  type's `minor`, and `withCommand(..)` in a Testcontainers subclass
+  on a docker-API builder. Such a pick is now external when no level
+  of the enclosing classes has it and no import in the file names it
+  or a type it sits in. A class whose supertype clause names an
+  in-repo type dekko couldn't read (a Kotlin class) keeps the pick,
+  since the method may be inherited through it. spring-boot: 21
+  wrong edges (32 call sites) now external, nothing else changed.
+
 ## [1.9.5] — 2026-10-12
 
 ### Fixed

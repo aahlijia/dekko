@@ -3163,8 +3163,11 @@ def _resolve_call(
     )
     if target is _NOISE or (
         isinstance(target, Symbol)
-        and not _call_target_visible(
-            call, target, file_imports, repo_stems, stars
+        and (
+            not _call_target_visible(
+                call, target, file_imports, repo_stems, stars
+            )
+            or _java_out_of_scope(call, caller, target, file_imports, ctx)
         )
     ):
         external.setdefault((caller_id, call.text), set()).add(call.line)
@@ -4259,6 +4262,107 @@ def _java_scope_methods(
     ]
 
     return _walk_own_members(level, call.name, ctx) + inherited, is_open
+
+
+def _java_out_of_scope(
+    call: RawCall,
+    caller: Symbol | None,
+    target: Symbol,
+    file_imports: dict[str, Import],
+    ctx: "_WalkCtx",
+) -> bool:
+    """Whether a bare Java call's pick is a method it can't name.
+
+    A bare ``m(..)`` reaches a method two ways: a member of an
+    enclosing class, declared or inherited, or a static import. The
+    name-only rungs needed neither, so one same-named method anywhere
+    was enough: ``getProject()`` in a Gradle task (``DefaultTask``'s)
+    landed on an unrelated build class's ``getProject``, and a record's
+    own accessor ``minor()`` on another type's ``minor``. A pick that no
+    level has (``_java_scope_methods``, every level, past an open one)
+    and no import binds is outside the repo. The import test is loose:
+    the target's name, or the simple name of any type its qualname runs
+    through (``import static a.B.*`` is recorded as an import of
+    ``B``).
+
+    Not judged: a call in an anonymous class body, a caller whose
+    levels can't be read, and one where some level's supertype clause
+    names an in-repo JVM type but read to no Java one
+    (``_java_scope_unread``), since the method may be inherited through
+    it.
+
+    Args:
+        call: The raw call.
+        caller: Its enclosing symbol.
+        target: The ladder's pick.
+        file_imports: The call's file's bound import names.
+        ctx: The repo-wide tables.
+
+    Returns:
+        True when the call should be counted external.
+    """
+    if (
+        caller is None
+        or call.anonymous
+        or call.receiver is not None
+        or call.text.startswith("new ")
+        or not call.path.endswith(".java")
+        or target.language != "java"
+    ):
+        return False
+    levels = _java_scope_levels(caller, ctx)
+    if not levels or any(_java_scope_unread(t, ctx) for t in levels):
+        return False
+    if any(
+        m.id == target.id
+        for level in levels
+        for m in _java_scope_methods(level, call, ctx)[0]
+    ):
+        return False
+    owners = target.qualname.split(".")[:-1]
+
+    return target.name not in file_imports and not any(
+        owner in file_imports for owner in owners
+    )
+
+
+def _java_scope_unread(owner: Symbol, ctx: "_WalkCtx") -> bool:
+    """Whether a supertype clause of ``owner`` or of one of its in-repo
+    supertypes names an in-repo JVM type but read to no Java one
+    (memoized).
+
+    The scope walk reads Java supertypes only, so a Java class
+    extending the repo's Kotlin class inherits methods it can't see;
+    and an import naming an outside package, or a nested path that
+    didn't resolve, may still mean a type in the repo.
+    """
+    hit = _SCOPE_UNREAD.get(owner.id)
+    if hit is None:
+        hit = any(
+            not _java_supertype_read(stand_in, sub, ctx)
+            and _jvm_type_named(stand_in.name, ctx)
+            for sub in (owner, *_java_scope_supertypes(owner, ctx)[0])
+            for stand_in in ctx.index.get(_SUPERS_KEY + sub.id, [])
+        )
+        _SCOPE_UNREAD[owner.id] = hit
+    return hit
+
+
+def _java_supertype_read(
+    stand_in: Symbol, sub: Symbol, ctx: "_WalkCtx"
+) -> bool:
+    """Whether one supertype clause reads to an in-repo Java type."""
+    return any(
+        s.language == "java" for s in _walk_supertype(stand_in, sub, ctx)
+    )
+
+
+def _jvm_type_named(name: str, ctx: "_WalkCtx") -> bool:
+    """Whether some in-repo Java or Kotlin type is called ``name``."""
+    return any(
+        s.kind in TYPE_KINDS and s.language in _JVM_TYPE_LANGUAGES
+        for s in ctx.index.get(name, ())
+    )
 
 
 def _java_scope_may_hide(level: Symbol, call: RawCall, is_open: bool) -> bool:
@@ -6469,6 +6573,9 @@ _WALK_MEMBERS: dict[tuple[str, str, bool], list[Symbol]] = {}
 # supertypes with whether any is outside the repo, per type id.
 _SCOPE_LEVELS: dict[str, tuple[Symbol, ...] | None] = {}
 _SCOPE_SUPERS: dict[str, tuple[tuple[Symbol, ...], bool]] = {}
+# Whether a type's supertype clauses (its own or an in-repo
+# supertype's) name an in-repo Java type that didn't resolve, per id.
+_SCOPE_UNREAD: dict[str, bool] = {}
 
 
 def _reset_walk_memo() -> None:
@@ -6481,6 +6588,7 @@ def _reset_walk_memo() -> None:
         _WALK_MEMBERS,
         _SCOPE_LEVELS,
         _SCOPE_SUPERS,
+        _SCOPE_UNREAD,
     ):
         memo.clear()
 
