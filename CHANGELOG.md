@@ -9,6 +9,20 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **`dekko install <target>` / `dekko uninstall <target>`: one command
+  family for wiring dekko into agents.** Targets are `claude` (the
+  plugin, or just the MCP server with `--mcp-only`), `cline` (`--scope`,
+  `--config`, `--force`) and `claude-md` (`--root`). `--dry-run` works
+  on `claude` and is refused with exit 2 on the targets that edit files
+  directly, the same rule the legacy flags already followed. This
+  replaces adding one more `--<client>-install` flag per client, and
+  Codex (#38) joins as a target next. Every old flag
+  (`--claude-install`, `--mcp-install`, `--cline-install` with its
+  `--cline-*` options, `--claude-md-install`, and each `--*-uninstall`)
+  still works as an alias and calls the same code. `dekko doctor`'s
+  fix-it lines, `install.sh` and the docs now use the new form.
+
 ## [1.9.2] — 2026-10-09
 
 ### Fixed

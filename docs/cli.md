@@ -327,6 +327,36 @@ Run `dekko <command> --help` for the full flag list, or see
 `ledger`, `orient`, `deps` cover more specialized workflows; hooks are
 documented in [claude-code.md](claude-code.md#push-hooks-opt-in)).
 
+## Wiring dekko into an agent: `dekko install`
+
+`dekko install <target>` connects dekko to an agent client or writes a
+standing usage policy into a file the agent reads. `dekko uninstall
+<target>` takes the same targets and reverses each one.
+
+| Target | What it wires up | Options |
+|---|---|---|
+| `claude` | The Claude Code plugin: MCP server, skills and slash commands (`claude plugin install`) | `--mcp-only` registers just the MCP server (`claude mcp add`); `--dry-run` prints the `claude` commands instead of running them |
+| `cline` | The MCP server in Cline's `cline_mcp_settings.json` | `--scope vscode\|global`, `--config PATH`, `--force` (reset a malformed file instead of aborting) |
+| `claude-md` | A marker-bounded usage-policy block in the repo's `CLAUDE.md` | `--root DIR` (default: cwd) |
+
+```sh
+dekko install claude               # then restart Claude Code
+dekko install claude --dry-run     # show the claude commands, change nothing
+dekko uninstall claude --mcp-only  # drop a standalone MCP registration
+dekko install claude-md --root .   # add/refresh the CLAUDE.md policy block
+```
+
+`--dry-run` exists only on the targets that run another CLI; the
+targets that edit a file directly (`cline`, `claude-md`) reject it with
+exit 2 rather than ignore it and write for real. Push hooks are opt-in
+per event and stay under `dekko hooks install` (see
+[claude-code.md](claude-code.md#push-hooks-opt-in)).
+
+The older flags still work as aliases and call the same code:
+`--claude-install`, `--mcp-install`, `--cline-install` (with
+`--cline-scope`, `--cline-config`, `--cline-force`) and
+`--claude-md-install`, plus each one's `--*-uninstall` pair.
+
 ## Diagnosing environment issues
 
 `dekko doctor` reports, in one shot: whether a bare `dekko` on `$PATH`

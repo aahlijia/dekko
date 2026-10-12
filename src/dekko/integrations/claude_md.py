@@ -13,8 +13,8 @@ idempotent read/merge/write shape :mod:`dekko.hooks` already uses for
 ``.claude/settings.json`` and :mod:`dekko.cline` uses for
 ``cline_mcp_settings.json`` — except the target here is a file the user
 directly owns and reads, so it is a **separate, explicitly-opt-in**
-command (``dekko --claude-md-install`` / ``--claude-md-uninstall``), not
-bundled into ``dekko hooks install`` or ``dekko --claude-install``.
+command (``dekko install claude-md`` / ``dekko uninstall claude-md``),
+not bundled into ``dekko hooks install`` or ``dekko install claude``.
 
 Re-running install always replaces the marked block in place (so a
 wording update ships by re-running the same command); uninstall strips

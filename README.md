@@ -98,7 +98,7 @@ required.
 
 ```sh
 uv tool install dekko      # or: pip install dekko / pipx install dekko
-dekko --claude-install     # add the /map command + MCP server to Claude Code, then restart
+dekko install claude      # add the /map command + MCP server to Claude Code, then restart
 ```
 
 Extras (`dekko[all]` for 43 more languages, `dekko[search]` for
