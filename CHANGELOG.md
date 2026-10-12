@@ -9,6 +9,30 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.5] — 2026-10-12
+
+### Fixed
+- **A bare Java call names its enclosing classes' methods.** Java
+  looks a method name up in the enclosing classes, innermost out, and
+  stops at the first one with a method of that name, declared or
+  inherited; dekko settled a bare call only when its file held one
+  symbol of the name. So `test(value)` in a class whose nested class
+  also declares `test` went external (`test` is a JS test global), a
+  test's call to a helper its base class declares tied with every
+  same-named method in the repo, and an overload calling its sibling
+  overload stayed ambiguous. A bare `m(..)` now takes the methods
+  called `m` of the nearest enclosing class that has any (its own and
+  those its in-repo supertypes declare, less a private one in another
+  file), narrowed by argument count: one fit is the target, several
+  make the ambiguous row list only them. A class with a supertype
+  outside the repo stops the search when it has no `m`, as do
+  `Object`'s and an enum's implicit methods and a record's
+  zero-argument accessor; on such a class a lone fit that is the
+  caller itself isn't taken (`write(buf)` inside `write(int)` of an
+  `OutputStream` means the outside `write(byte[])`). spring-boot:
+  +2,770 edges, 6 lost (picks a bare call can't name), 10 calls no
+  longer external, ambiguous rows 45,076 -> 42,349.
+
 ## [1.9.4] — 2026-10-12
 
 ### Fixed

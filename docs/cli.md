@@ -1272,7 +1272,16 @@ compiler does: one the class declares, else one an in-repo supertype
 declares (an interface's nested record), else the class itself when it
 is called `X`. A class with a supertype outside the repo stops the
 search, since that type may declare an `X` dekko can't see, and a
-construction inside an anonymous class body is left to the ladder. A
+construction inside an anonymous class body is left to the ladder.
+Since 1.9.5 a bare Java call `m(..)` names the methods of the nearest
+enclosing class that has a method called `m`, declared or inherited
+from an in-repo supertype, narrowed by argument count: one fit is the
+target, and several make the ambiguous row list only those. A class
+with a supertype outside the repo stops the search when it has no
+`m` of its own, and so does a name a class has without a symbol for
+it (`equals` and `Object`'s other methods, an enum's `values()`, a
+record's zero-argument accessor); a call inside an anonymous class
+body is left to the ladder. A
 low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before

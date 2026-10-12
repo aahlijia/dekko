@@ -3,8 +3,10 @@
 ``new Node(..)`` inside a class that implements an interface declaring
 a nested ``Node`` means that ``Node``, whatever other ``Node`` types
 the repo has; a nested type's own name inside its own body means
-itself. A call inside an anonymous class body sits in a class whose
-supertype dekko doesn't record, so the rule leaves it alone.
+itself. A bare ``m(..)`` means the methods called ``m`` of the nearest
+enclosing class that has any, declared or inherited, by argument
+count. A call inside an anonymous class body sits in a class whose
+supertype dekko doesn't record, so neither rule judges it.
 """
 
 import textwrap
@@ -399,3 +401,416 @@ def test_a_class_declared_inside_an_anonymous_body_is_anonymous(
         """,
     )
     assert flags["inDeeper"] is True
+
+
+def test_each_class_calls_its_own_method(tmp_path: Path) -> None:
+    # ``test`` is also a JS test global; a Java bare call that names an
+    # enclosing class's method is that method, not noise.
+    g = _graph(
+        tmp_path,
+        {
+            "Source.java": """
+                class Source {
+                    private boolean test(Object value) { return true; }
+                    void apply(Object v) { test(v); }
+                    static class Always {
+                        boolean test(Object value) { return true; }
+                        void run(Object v) { test(v); }
+                    }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "Source.java::Source.apply") == {
+        "Source.java::Source.test"
+    }
+    assert _callees(g, "Source.java::Source.Always.run") == {
+        "Source.java::Source.Always.test"
+    }
+
+
+def test_the_outer_class_method_beats_a_nested_namesake(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Metrics.java": """
+                class Metrics {
+                    Object getAvailableTags(Object meters) { return null; }
+                    Object metric(Object meters) {
+                        return getAvailableTags(meters);
+                    }
+                    static class Response {
+                        Object getAvailableTags(Object tags) { return null; }
+                    }
+                }
+            """,
+        },
+    )
+    caller = "Metrics.java::Metrics.metric"
+    assert _callees(g, caller) == {"Metrics.java::Metrics.getAvailableTags"}
+    assert _ambiguous(g, caller) == {}
+
+
+def test_an_own_overload_is_picked_by_count(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Other.java": """
+                class Other {
+                    Object convert(Object a, String b) { return null; }
+                }
+            """,
+            "ConvTests.java": """
+                class ConvTests {
+                    void check() { convert(null, "10"); }
+                    Object convert(Object s, String v) { return null; }
+                    Object convert(Object s, String v, Object u) {
+                        return null;
+                    }
+                }
+            """,
+        },
+    )
+    caller = "ConvTests.java::ConvTests.check"
+    assert _callees(g, caller) == {"ConvTests.java::ConvTests.convert"}
+    assert _ambiguous(g, caller) == {}
+
+
+def test_a_method_inherited_from_an_in_repo_superclass(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Base.java": """
+                abstract class Base {
+                    protected Object createEvent() { return null; }
+                }
+            """,
+            "Other.java": (
+                "class Other { Object createEvent() { return null; } }"
+            ),
+            "Json.java": """
+                class Json extends Base {
+                    void check() { createEvent(); }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "Json.java::Json.check") == {
+        "Base.java::Base.createEvent"
+    }
+
+
+def test_an_interface_default_method_is_inherited(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Details.java": """
+                interface Details {
+                    default Object getContainer() { return null; }
+                }
+            """,
+            "Other.java": (
+                "class Other { Object getContainer() { return null; } }"
+            ),
+            "Props.java": """
+                class Props implements Details {
+                    Object url() { return getContainer(); }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "Props.java::Props.url") == {
+        "Details.java::Details.getContainer"
+    }
+
+
+def test_a_nested_class_calls_its_outer_classs_method(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Other.java": (
+                "class Other { Object createDataSource(Object p) "
+                "{ return null; } }"
+            ),
+            "Config.java": """
+                class Config {
+                    static Object createDataSource(Object p) { return null; }
+                    static class Hikari {
+                        Object dataSource(Object p) {
+                            return createDataSource(p);
+                        }
+                    }
+                    static class Dbcp {
+                        Object createDataSource(Object p) { return null; }
+                    }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "Config.java::Config.Hikari.dataSource") == {
+        "Config.java::Config.createDataSource"
+    }
+
+
+def test_the_innermost_class_with_the_method_wins(tmp_path: Path) -> None:
+    # ``Inner`` inherits ``compile`` from ``Base``: that shadows the
+    # outer class's own ``compile``.
+    g = _graph(
+        tmp_path,
+        {
+            "Base.java": """
+                class Base {
+                    protected void compile(Object source) {}
+                }
+            """,
+            "Gen.java": """
+                class Gen {
+                    void compile(Object source) {}
+                    class Inner extends Base {
+                        void check() { compile(null); }
+                    }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "Gen.java::Gen.Inner.check") == {
+        "Base.java::Base.compile"
+    }
+
+
+def test_a_private_superclass_method_in_another_file_is_not_inherited(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Base.java": "class Base { private void reset() {} }",
+            "Other.java": "class Other { void reset() {} }",
+            "Sub.java": """
+                class Sub extends Base {
+                    void check() { reset(); }
+                }
+            """,
+        },
+    )
+    assert "Base.java::Base.reset" not in _callees(g, "Sub.java::Sub.check")
+
+
+def test_a_private_superclass_method_in_the_same_file_is_reachable(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Other.java": "class Other { void reset() {} }",
+            "Sub.java": """
+                class Base { private void reset() {} }
+                class Sub extends Base {
+                    void check() { reset(); }
+                }
+                class Pool { void reset() {} }
+            """,
+        },
+    )
+    assert _callees(g, "Sub.java::Sub.check") == {"Sub.java::Base.reset"}
+
+
+def test_two_count_fits_make_a_row_of_just_those_two(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Other.java": "class Other { void bind(Object a) {} }",
+            "Binder.java": """
+                class Binder {
+                    void bind(String a) {}
+                    void bind(Integer a) {}
+                    void bind(String a, String b) {}
+                    void check(Object x) { bind(x); }
+                }
+            """,
+        },
+    )
+    caller = "Binder.java::Binder.check"
+    assert _callees(g, caller) == set()
+    assert _ambiguous(g, caller) == {
+        "bind": {"Binder.java::Binder.bind", "Binder.java::Binder.bind#2"}
+    }
+
+
+def test_an_outside_supertype_stops_before_an_outer_method(
+    tmp_path: Path,
+) -> None:
+    # ``AbstractList`` may declare ``refresh`` itself: the ladder
+    # decides, as it did before the rule.
+    g = _graph(
+        tmp_path,
+        {
+            "Outer.java": """
+                import java.util.AbstractList;
+                class Outer {
+                    void refresh() {}
+                    abstract static class Task extends AbstractList<String> {
+                        void check() { refresh(); }
+                    }
+                }
+                class Side {
+                    void refresh() {}
+                }
+            """,
+        },
+    )
+    caller = "Outer.java::Outer.Task.check"
+    assert _callees(g, caller) == set()
+    assert _ambiguous(g, caller) == {
+        "refresh": {"Outer.java::Outer.refresh", "Outer.java::Side.refresh"}
+    }
+
+
+def test_an_own_fit_on_an_outside_supertype_is_taken(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Side.java": "class Side { void refresh() {} }",
+            "Ctx.java": """
+                import java.util.AbstractList;
+                abstract class Ctx extends AbstractList<String> {
+                    void refresh() {}
+                    void start() { refresh(); }
+                    static class Two { void refresh() {} }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "Ctx.java::Ctx.start") == {"Ctx.java::Ctx.refresh"}
+
+
+def test_a_self_fit_on_an_outside_supertype_is_left_to_the_ladder(
+    tmp_path: Path,
+) -> None:
+    # ``write(buf)`` inside ``write(int)`` means ``OutputStream``'s
+    # ``write(byte[])``, which dekko can't see.
+    g = _graph(
+        tmp_path,
+        {
+            "Side.java": "class Side { void write(byte[] b) {} }",
+            "Out.java": """
+                import java.io.OutputStream;
+                class Out extends OutputStream {
+                    private final byte[] buf = new byte[1];
+                    public void write(int b) { write(this.buf); }
+                }
+            """,
+        },
+    )
+    caller = "Out.java::Out.write"
+    assert _callees(g, caller) == set()
+    assert _ambiguous(g, caller) == {
+        "write": {"Out.java::Out.write", "Side.java::Side.write"}
+    }
+
+
+def test_plain_recursion_on_a_closed_class_is_itself(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Side.java": "class Side { int depth(int n) { return n; } }",
+            "Tree.java": """
+                class Tree {
+                    int depth(int n) { return n == 0 ? 0 : depth(n - 1); }
+                }
+            """,
+        },
+    )
+    caller = "Tree.java::Tree.depth"
+    assert _callees(g, caller) == set()
+    assert _ambiguous(g, caller) == {}
+
+
+def test_implicit_members_are_left_to_the_ladder(tmp_path: Path) -> None:
+    # ``equals`` is every class's (``Object``), ``values`` every enum's,
+    # and a zero-argument call in a record may be a component accessor:
+    # none of them is a symbol dekko has, so the search stops there.
+    g = _graph(
+        tmp_path,
+        {
+            "Outer.java": """
+                class Outer {
+                    public boolean equals(Object o) { return true; }
+                    static Object values() { return null; }
+                    int major() { return 1; }
+                    static class Plain {
+                        void check(Object o) { equals(o); }
+                    }
+                    enum Kind {
+                        A;
+                        void check() { values(); }
+                    }
+                    record Version(int major) {
+                        int check() { return major(); }
+                    }
+                }
+                class Side {
+                    public boolean equals(Object o) { return true; }
+                    static Object values() { return null; }
+                    int major() { return 1; }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "Outer.java::Outer.Plain.check") == set()
+    assert _callees(g, "Outer.java::Outer.Kind.check") == set()
+    assert _callees(g, "Outer.java::Outer.Version.check") == set()
+
+
+def test_a_bare_call_in_an_anonymous_class_is_left_alone(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Use.java": """
+                class Use {
+                    void refresh() {}
+                    Runnable make() {
+                        return new Runnable() {
+                            public void run() { refresh(); }
+                        };
+                    }
+                }
+                class Side {
+                    void refresh() {}
+                }
+            """,
+        },
+    )
+    rows = [
+        set(ids)
+        for c, name, ids in g.ambiguous
+        if c.startswith("Use.java::") and name == "refresh"
+    ]
+    assert rows == [{"Use.java::Use.refresh", "Use.java::Side.refresh"}]
+
+
+def test_a_kotlin_bare_call_is_unchanged(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "Side.kt": "class Side { fun refresh() {} }\n",
+            "Outer.kt": (
+                "class Outer {\n"
+                "    fun refresh() {}\n"
+                "    class Task {\n"
+                "        fun check() { refresh() }\n"
+                "    }\n"
+                "    class Two { fun refresh() {} }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert _callees(g, "Outer.kt::Outer.Task.check") == set()

@@ -4148,6 +4148,131 @@ def _java_scope_supertypes_uncached(
     return tuple(found), is_open
 
 
+# Methods every Java class has, and every enum, without declaring them.
+_JAVA_OBJECT_METHODS = frozenset(
+    {
+        "equals",
+        "hashCode",
+        "toString",
+        "getClass",
+        "notify",
+        "notifyAll",
+        "wait",
+        "clone",
+        "finalize",
+    }
+)
+_JAVA_ENUM_METHODS = frozenset(
+    {
+        "name",
+        "ordinal",
+        "compareTo",
+        "getDeclaringClass",
+        "valueOf",
+        "values",
+        "describeConstable",
+    }
+)
+
+
+def _java_scope_verdict(
+    call: RawCall,
+    caller: Symbol | None,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    ctx: "_WalkCtx",
+) -> tuple[Symbol | None, list[Symbol], list[Symbol]]:
+    """The method a bare Java call ``m(..)`` names through its
+    enclosing classes, when one of them settles it.
+
+    Java searches the enclosing classes innermost out and stops at the
+    first one with a member method called ``m``, declared or inherited
+    (JLS 15.12.1); overload resolution then runs among that class's
+    methods only. No rung read this: a bare call was settled only when
+    its file held one symbol of the name, so ``test(value)`` in a class
+    whose nested class also declares ``test`` went to the noise guard
+    (a JS test global), and a test's call to a helper its base class
+    declares tied with every same-named method in the repo. On
+    spring-boot, 3,247 sites. At each level (``_java_scope_levels``)
+    the methods called ``m`` it declares or its in-repo supertypes do
+    (``_java_scope_methods``) are counted (``_java_call_excludes``):
+    one fit is the target, several go to the ladder as the only
+    candidates, none leaves the call to the ladder. A level with no
+    such method moves the search out, unless it may have one dekko
+    can't see (``_java_scope_may_hide``).
+
+    One exception: on a level with a supertype outside the repo, a
+    lone fit that is the caller itself is not taken. ``write(buf)``
+    inside ``write(int b)`` of a class extending ``OutputStream``
+    means ``OutputStream.write(byte[])``.
+
+    Args:
+        call: The raw call.
+        caller: Its enclosing symbol.
+        candidates: The ladder's candidates so far.
+        same_file: Those in the call's file.
+        ctx: The repo-wide tables.
+
+    Returns:
+        ``(target, candidates, same_file)``: the target, or ``None``
+        with the candidates narrowed to the level's fits (or unchanged)
+        for the ladder to decide.
+    """
+    unchanged = None, candidates, same_file
+    if (
+        caller is None
+        or call.anonymous
+        or call.receiver is not None
+        or call.text.startswith("new ")
+        or not call.path.endswith(".java")
+    ):
+        return unchanged
+    for level in _java_scope_levels(caller, ctx) or ():
+        members, is_open = _java_scope_methods(level, call, ctx)
+        if not members:
+            if _java_scope_may_hide(level, call, is_open):
+                return unchanged
+            continue
+        fits = [m for m in members if not _java_call_excludes(call, m)]
+        if len(fits) == 1 and not (is_open and fits[0].id == caller.id):
+            return fits[0], candidates, same_file
+        if len(fits) < 2:
+            return unchanged
+        ids = {m.id for m in fits}
+        return None, fits, [s for s in same_file if s.id in ids]
+
+    return unchanged
+
+
+def _java_scope_methods(
+    level: Symbol, call: RawCall, ctx: "_WalkCtx"
+) -> tuple[list[Symbol], bool]:
+    """The methods called ``call.name`` that ``level`` declares or
+    inherits from an in-repo supertype the call's file can reach, and
+    whether ``level`` has a supertype outside the repo."""
+    supers, is_open = _java_scope_supertypes(level, ctx)
+    inherited = [
+        m
+        for s in supers
+        for m in _walk_own_members(s, call.name, ctx)
+        if not jvm_unreachable(call.path, m)
+    ]
+
+    return _walk_own_members(level, call.name, ctx) + inherited, is_open
+
+
+def _java_scope_may_hide(level: Symbol, call: RawCall, is_open: bool) -> bool:
+    """Whether ``level`` may have a method ``call`` names that dekko
+    has no symbol for: one inherited from outside the repo, one of
+    ``Object``'s or an enum's, or a record component's accessor."""
+    if is_open or call.name in _JAVA_OBJECT_METHODS:
+        return True
+    if level.kind == "enum" and call.name in _JAVA_ENUM_METHODS:
+        return True
+
+    return level.kind == "record" and call.arg_count == 0
+
+
 def _pick_candidate_retried(
     call: _Referable,
     candidates: list[Symbol],
@@ -7319,7 +7444,9 @@ def _walk_verdict(
     ``typed``: see ``_walk_typed_verdict``. ``unknown`` on a
     ``self.field.name(..)`` chain: the caller's own container's ``name``
     is dropped from the candidates, since a field of a type is not,
-    without a declared type saying so, the type itself.
+    without a declared type saying so, the type itself. A bare Java
+    call has no receiver to walk; its enclosing classes decide it
+    (``_java_scope_verdict``).
 
     Returns:
         ``(target, candidates, same_file)``: the target is a symbol, the
@@ -7330,7 +7457,7 @@ def _walk_verdict(
         return _walk_typed_verdict(walk, call, candidates, same_file, ctx)
     own = _walk_self_field_members(call, caller, ctx)
     if not own:
-        return None, candidates, same_file
+        return _java_scope_verdict(call, caller, candidates, same_file, ctx)
     ids = {m.id for m in own}
 
     return (
