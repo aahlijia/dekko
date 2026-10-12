@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.7] — 2026-10-12
+
+### Fixed
+- **A Rust method call no longer ties with a same-file free function
+  of its name.** `recv.name(..)` can't call a function without `self`,
+  but that was only checked on a pick: when the calling file also
+  defined a free `name`, the call stayed ambiguous between the two
+  and nothing was picked (zed's `picker.delegate.delete_recent_project
+  (..)` beside the file's `async fn delete_recent_project`, and
+  `rpc.rs`'s handlers calling the `Database` methods they're named
+  after). Such a call now resolves to the repo's one `name` that takes
+  `self`, when there is exactly one and the receiver isn't one of the
+  caller's typed parameters, and the argument count is still checked.
+  zed: +85 edges at 199 sites, none lost, ambiguous rows 75,137 ->
+  75,053; `RecentProjectsDelegate.delete_recent_project` has its 2
+  callers.
+
 ## [1.9.6] — 2026-10-12
 
 ### Fixed

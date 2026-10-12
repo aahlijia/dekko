@@ -1223,7 +1223,11 @@ those members. A lowercase path through a workspace crate
 or one of its modules) keeps the candidates inside that crate's
 directory, functions before methods, when it has any. A Rust dot-call
 `x.name(..)` row lists only the methods that take `self` and the
-written count, when two or more do. A Rust call
+written count, when two or more do. Since 1.9.7 a dot-call whose own
+file defines a free `name` (which it can't call) resolves to the
+repo's one `name` that takes `self`, when there is exactly one and the
+receiver isn't one of the caller's typed parameters; with no such
+same-file function, or two methods, the call stays as it was. A Rust call
 through a `use` rooted at `std`, `core` or `alloc` (`use std::path::
 Path; Path::new(..)`) is counted external even when the repo defines a
 type of that name. The same goes for a `use` rooted at any crate the

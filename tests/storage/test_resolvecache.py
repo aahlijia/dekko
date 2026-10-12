@@ -1530,3 +1530,56 @@ def test_cache_root_checks_the_resolved_trees_config(
 
     assert _build_from(other, root) is None
     assert _build(root) is not None
+
+
+_RUST_DOT_SRC = {
+    "src/lib.rs": (
+        "mod other;\n"
+        "pub async fn delete(id: u8) {}\n"
+        "pub struct D;\n"
+        "impl D {\n"
+        "    pub fn delete(&self, ix: u8) {}\n"
+        "}\n"
+        "fn make() -> D {\n"
+        "    D\n"
+        "}\n"
+        "pub fn use_it() {\n"
+        "    let d = make();\n"
+        "    d.delete(1);\n"
+        "}\n"
+    ),
+    "src/other.rs": "pub struct E;\n",
+}
+_RUST_DOT_SECOND = (
+    "pub struct E;\nimpl E {\n    pub fn delete(&self, ix: u8) {}\n}\n"
+)
+
+
+@pytest.mark.parametrize("before", ["one", "two"])
+def test_a_second_self_method_elsewhere_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    # A dot-call tie with a same-file free function narrows to the
+    # repo's one ``delete(&self)``. Another file gaining (or losing) a
+    # second one has to re-resolve the caller, whose file didn't change.
+    source = dict(_RUST_DOT_SRC)
+    after = _RUST_DOT_SECOND
+    if before == "two":
+        source["src/other.rs"] = _RUST_DOT_SECOND
+        after = _RUST_DOT_SRC["src/other.rs"]
+    root = make_mapped_repo(source)
+    (root / "src/other.rs").write_text(after)
+    assert _fired(root)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = full["ids"]
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    pair = ("src/lib.rs::use_it", "src/lib.rs::D.delete")
+    assert (pair in edges) == (before == "two")

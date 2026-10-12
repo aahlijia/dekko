@@ -3826,7 +3826,7 @@ def _pick_candidate_ladder(
     )
     same_file = _without_own_constructors(same_file)
     candidates, same_file, shape_narrowed = _rust_shape_narrowed_candidates(
-        call, candidates, same_file, index, file_imports, repo_stems
+        call, candidates, same_file, index, file_imports, repo_stems, caller
     )
     if shape_narrowed and not candidates:
         return _NOISE if repo_stems is not None else None
@@ -4491,7 +4491,7 @@ def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
     ):
         return False
     params = candidate.params
-    has_self = bool(params) and _is_receiver_param(params[0], "rust")
+    has_self = _rust_has_self(candidate)
     if _rust_is_dot_call(call):
         if not has_self:
             return True
@@ -7769,6 +7769,7 @@ def _rust_shape_narrowed_candidates(
     index: dict[str, list[Symbol]],
     file_imports: dict[str, Import] | None = None,
     repo_stems: set[str] | None = None,
+    caller: Symbol | None = None,
 ) -> tuple[list[Symbol], list[Symbol], bool]:
     """Narrow candidates by Rust call shape, before the rest of
     ``_pick_candidate``'s ladder runs.
@@ -7782,7 +7783,9 @@ def _rust_shape_narrowed_candidates(
     (``_owned_by_receiver_type``), the same path rooted at a type the
     repo doesn't define can reach nothing at all
     (``_rust_unknown_type_path``), and a ``recv.name`` dot-call can
-    never reach a free function (``_drop_free_functions``). Split out of
+    never reach a free function (``_drop_free_functions``, when every
+    candidate is one; ``_rust_dot_call_narrowed`` for the tie a
+    same-file one causes). Split out of
     ``_pick_candidate`` purely to keep that function's cyclomatic
     complexity under the project's Ruff limit — mirrors
     ``_structural_match``'s own reason for existing.
@@ -7801,6 +7804,8 @@ def _rust_shape_narrowed_candidates(
         file_imports: The calling file's import bindings by local
             name, for the unknown-type rule's in-repo ``use`` check.
         repo_stems: Every repo file's matching stem, same purpose.
+        caller: The call's enclosing symbol, for the dot-call tie's
+            typed-parameter test.
 
     Returns:
         ``(candidates, same_file, narrowed)`` — the (possibly)
@@ -7840,9 +7845,18 @@ def _rust_shape_narrowed_candidates(
         return [], [], True
     if _rust_is_dot_call(call) and not _drop_free_functions(candidates):
         # Every candidate is a free function: nothing a dot-call could
-        # mean. Anything less than that is left alone here on purpose,
-        # see ``_pick_candidate``'s veto.
+        # mean. Dropping only some of them repo-wide is wrong: with
+        # fewer candidates the sole-candidate rung hands a std call to
+        # the repo's one method of the name (``.values()`` on a
+        # ``HashMap`` to ``TreeMap.values``). ``_pick_candidate``'s veto
+        # removes one once it's picked, and ``_rust_dot_call_narrowed``
+        # handles the one tie it can't reach.
         return [], [], True
+    dotted = _rust_dot_call_narrowed(
+        call, candidates, same_file, index, caller
+    )
+    if dotted is not None:
+        return dotted
     if _rust_is_bare_call(call):
         # A method or associated function needs ``x.`` or ``Type::``;
         # a bare ``new(cx)`` can only be a free function (or a
@@ -8083,6 +8097,83 @@ def _rust_is_bare_call(call: _Referable) -> bool:
         and not call.receiver
         and call.path.endswith(".rs")
     )
+
+
+def _rust_dot_call_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    index: dict[str, list[Symbol]],
+    caller: Symbol | None,
+) -> tuple[list[Symbol], list[Symbol], bool] | None:
+    """A Rust dot-call's one candidate, when a same-file function it
+    can't call is all that keeps the ladder from it.
+
+    ``recv.name(..)`` can't reach a function without ``self``, but
+    ``_rust_call_excludes`` only vetoes a pick: when the calling file
+    also defines a free ``name``, the same-file rung sees two symbols
+    and declines, and the call stays tied with a target it can never
+    mean (zed's ``picker.delegate.delete_recent_project(..)`` beside the
+    file's ``async fn delete_recent_project``). So when the file
+    defines such a function, the repo has exactly one ``name`` that
+    takes ``self`` (``_RUST_DOT_KEY``), and the receiver isn't one of
+    the caller's typed parameters, that function is the only
+    candidate. Each condition was measured on zed: without the
+    same-file one, std calls go to the one in-repo method of their name
+    (``.values()``, ``.or(..)``); with two methods, file locality alone
+    chooses (``branch.name()`` on git's ``Branch`` to ``Entry.name``);
+    and a typed parameter already went through ``_typed_param_match``,
+    so a method its type doesn't own is an outside one (alacritty's
+    ``term: &Term`` wrappers). The count is still checked on the pick.
+
+    Returns:
+        ``(candidates, same_file, False)`` narrowed to the one method,
+        or ``None`` to leave the call alone.
+    """
+    if not _rust_is_dot_call(call) or not any(
+        _rust_takes_no_self(s) for s in same_file
+    ):
+        return None
+    methods = index.get(_RUST_DOT_KEY + call.name, ())
+    if len(methods) != 1 or _rust_typed_param_receiver(call, caller):
+        return None
+    only = methods[0]
+    if not any(c.id == only.id for c in candidates):
+        return None
+
+    return [only], [s for s in same_file if s.id == only.id], False
+
+
+def _rust_has_self(sym: Symbol) -> bool:
+    """Whether ``sym`` is a Rust function or method taking ``self``."""
+    return (
+        sym.language == "rust"
+        and sym.kind in ("function", "method")
+        and bool(sym.params)
+        and _is_receiver_param(sym.params[0], "rust")
+    )
+
+
+def _rust_takes_no_self(sym: Symbol) -> bool:
+    """Whether ``sym`` is a Rust function or method a dot-call can't
+    reach: one with no ``self``."""
+    return (
+        sym.language == "rust"
+        and sym.kind in ("function", "method")
+        and not _rust_has_self(sym)
+    )
+
+
+def _rust_typed_param_receiver(
+    call: _Referable, caller: Symbol | None
+) -> bool:
+    """Whether a dot-call's receiver is one of the caller's parameters
+    with a declared type (``term`` in ``fn lines(term: &Term)``)."""
+    head = (call.receiver or "").strip().lstrip("&*").rstrip("?!")
+    if caller is None or not head:
+        return False
+
+    return any(p.type and p.name.split()[-1] == head for p in caller.params)
 
 
 def _drop_free_functions(symbols: list[Symbol]) -> list[Symbol]:
@@ -10266,6 +10357,11 @@ _RUST_PATH_KEY = "::rust-path::"
 # binding for (``_rust_head_entries``). Only a call written
 # ``serde_json::..`` reads it, never a local ``serde_json.f()``.
 _RUST_HEAD_KEY = "::rust-head::"
+# Reserved ``index`` namespace: ``_RUST_DOT_KEY + name`` holds the Rust
+# functions and methods called ``name`` that take ``self``, the ones a
+# dot-call can mean (``_rust_dot_call_narrowed``). Read only by
+# ``.get``, so no per-call rule scans ``candidates`` for them.
+_RUST_DOT_KEY = "::rust-dot::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -10279,15 +10375,12 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
     ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
     ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY``,
-    ``_RUST_RENAMED_KEY`` and ``_SUPERS_KEY`` entries."""
+    ``_RUST_RENAMED_KEY``, ``_RUST_DOT_KEY`` and ``_SUPERS_KEY``
+    entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
-            index.setdefault(sym.name, []).append(sym)
-            if sym.language in _CPP_FAMILY:
-                for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
-                    if scope:
-                        index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
+            _index_symbol(sym, index)
         for entry in fm.enum_variants:
             owner, _, variant = entry.partition("::")
             index.setdefault(_RUST_VARIANT_KEY + variant, []).extend(
@@ -10305,6 +10398,18 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
         )
 
     return index
+
+
+def _index_symbol(sym: Symbol, index: dict[str, list[Symbol]]) -> None:
+    """File one symbol under its name, and under ``_RUST_DOT_KEY`` and
+    ``_CPP_SCOPE_KEY`` where those apply."""
+    index.setdefault(sym.name, []).append(sym)
+    if _rust_has_self(sym):
+        index.setdefault(_RUST_DOT_KEY + sym.name, []).append(sym)
+    if sym.language in _CPP_FAMILY:
+        for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
+            if scope:
+                index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
 
 
 def _stand_in(name: str, path: str = "", qualname: str = "") -> Symbol:
