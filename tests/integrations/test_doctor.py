@@ -396,7 +396,7 @@ def test_hooks_all_installed(tmp_path: Path) -> None:
 def test_claude_md_absent(tmp_path: Path) -> None:
     finding = doctor._check_claude_md(tmp_path)
     assert finding.status == "missing"
-    assert finding.fix == "dekko --claude-md-install"
+    assert finding.fix == "dekko install claude-md"
 
 
 def test_claude_md_present(tmp_path: Path) -> None:

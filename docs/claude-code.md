@@ -7,7 +7,7 @@
 /map src/       # map a subtree only
 ```
 
-`dekko --claude-install` wires up both the `/map` command and the MCP
+`dekko install claude` wires up both the `/map` command and the MCP
 server (see below); the plugin just runs the installed `dekko` CLI, so
 install the package first — see [install.md](install.md).
 
@@ -108,14 +108,14 @@ overriding default agent behavior instead — a materially stronger,
 one-time lever:
 
 ```sh
-dekko --claude-md-install     # add/update a marker-bounded usage-policy block
-dekko --claude-md-uninstall   # remove just that block, leave the rest of the file
+dekko install claude-md       # add/update a marker-bounded usage-policy block
+dekko uninstall claude-md     # remove just that block, leave the rest of the file
 ```
 
 Writes a short block bounded by `<!-- dekko:usage-policy:start -->` /
 `...:end` markers into the project's `CLAUDE.md`, pointing Claude at
 `search_code`/`outline`/`get_callers`/`workset` before `grep`/`Read`.
-Idempotent: re-running `--claude-md-install` replaces the block in
+Idempotent: re-running `dekko install claude-md` replaces the block in
 place rather than duplicating it. This is a separate, explicit opt-in
 from everything else on this page — it edits a file you own and read,
 unlike `.claude/settings.json` or the plugin registration.
@@ -178,7 +178,7 @@ never blocks a session or a tool call, it just produces no output (for
 
 ## Skills
 
-`dekko --claude-install` also ships eight Claude Code skills alongside
+`dekko install claude` also ships eight Claude Code skills alongside
 the `/map` command and MCP server — Claude discovers and invokes them
 automatically when their trigger conditions match, no separate install
 step:
@@ -227,8 +227,8 @@ tool uses. Two of those names with different values is an error,
 whichever one the tool's own is. Every `budget` argument takes `0` for
 no cap.
 
-`dekko --claude-install` registers this automatically for Claude Code.
-For a standalone registration: `dekko --mcp-install` (runs
+`dekko install claude` registers this automatically for Claude Code.
+For a standalone registration: `dekko install claude --mcp-only` (runs
 `claude mcp add dekko -- dekko serve --mcp`; add `--dry-run` to print
 the command instead).
 
@@ -259,10 +259,10 @@ the installed dekko code last changed, naming the pids to restart.
 ## Cline
 
 ```sh
-dekko --cline-install      # merge dekko into cline_mcp_settings.json
-dekko --cline-uninstall    # remove just the dekko entry
+dekko install cline        # merge dekko into cline_mcp_settings.json
+dekko uninstall cline      # remove just the dekko entry
 ```
 
 Cline has no plugin system, so only the MCP tools are available (no
-`/map`-equivalent slash command). See `dekko --cline-install --help`
+`/map`-equivalent slash command). See `dekko install cline --help`
 for scope/config overrides if auto-detection picks the wrong file.

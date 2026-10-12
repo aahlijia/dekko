@@ -2,10 +2,11 @@
 extraction. Reuses ``mapfile``'s freshness signal, ``hooks``'s
 ``.claude/settings.json`` shape, and ``claude_md``'s marker string.
 
-Three independent opt-in installers exist (``dekko --claude-install``,
-``dekko hooks install``, ``dekko --claude-md-install``, plus a separate
-``--mcp-install``) and nothing answers "what's actually wired up in
-this session" — only ``dekko status`` answers "is the map fresh."
+Three independent opt-in installers exist (``dekko install claude``,
+``dekko hooks install``, ``dekko install claude-md``, plus a separate
+``dekko install claude --mcp-only``) and nothing answers "what's
+actually wired up in this session" — only ``dekko status`` answers
+"is the map fresh."
 Meanwhile the single most-repeated friction point is PATH
 shadowing: a stale
 globally-installed ``dekko`` binary resolving ahead of the one a
@@ -307,15 +308,15 @@ def _check_mcp_registered(exe: str | None) -> Finding:
         exe,
         ("mcp", "list"),
         "mcp-registered",
-        "dekko --mcp-install (or dekko --claude-install, which also "
-        "registers the plugin's bundled MCP server)",
+        "dekko install claude --mcp-only (or dekko install claude, "
+        "which also registers the plugin's bundled MCP server)",
     )
 
 
 def _check_plugin_installed(exe: str | None) -> Finding:
     """Whether ``dekko`` shows up in ``claude plugin list``."""
     return _check_claude_registration(
-        exe, ("plugin", "list"), "plugin-installed", "dekko --claude-install"
+        exe, ("plugin", "list"), "plugin-installed", "dekko install claude"
     )
 
 
@@ -517,7 +518,7 @@ def _check_claude_md(root: Path) -> Finding:
         "claude-md-policy",
         "missing",
         f"no dekko usage-policy block in {path}",
-        "dekko --claude-md-install",
+        "dekko install claude-md",
     )
 
 

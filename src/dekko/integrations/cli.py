@@ -70,6 +70,8 @@ SUBCOMMANDS = (
     "sanity",
     "ledger",
     "hooks",
+    "install",
+    "uninstall",
     "daemon",
     "serve",
     "unused",
@@ -163,12 +165,12 @@ def build_legacy_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--claude-install",
         action="store_true",
-        help="install the dekko plugin into Claude Code",
+        help="alias of 'dekko install claude'",
     )
     parser.add_argument(
         "--claude-uninstall",
         action="store_true",
-        help="remove the dekko plugin from Claude Code",
+        help="alias of 'dekko uninstall claude'",
     )
     parser.add_argument(
         "--dry-run",
@@ -180,17 +182,12 @@ def build_legacy_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--claude-md-install",
         action="store_true",
-        help="write/update an idempotent dekko usage-policy block in "
-        "this repo's CLAUDE.md, so Claude reaches for dekko's tools "
-        "over grep/Read as a standing instruction, not just per-turn "
-        "context (separate opt-in from --claude-install/hooks — edits "
-        "a file you own and read)",
+        help="alias of 'dekko install claude-md'",
     )
     parser.add_argument(
         "--claude-md-uninstall",
         action="store_true",
-        help="remove the dekko usage-policy block from CLAUDE.md, "
-        "leaving the rest of the file untouched",
+        help="alias of 'dekko uninstall claude-md'",
     )
     parser.add_argument(
         "--root",
@@ -202,22 +199,22 @@ def build_legacy_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mcp-install",
         action="store_true",
-        help="register the MCP server with Claude Code (claude mcp add)",
+        help="alias of 'dekko install claude --mcp-only'",
     )
     parser.add_argument(
         "--mcp-uninstall",
         action="store_true",
-        help="remove the MCP server from Claude Code (claude mcp remove)",
+        help="alias of 'dekko uninstall claude --mcp-only'",
     )
     parser.add_argument(
         "--cline-install",
         action="store_true",
-        help="register the MCP server in Cline's cline_mcp_settings.json",
+        help="alias of 'dekko install cline'",
     )
     parser.add_argument(
         "--cline-uninstall",
         action="store_true",
-        help="remove the MCP server from Cline's cline_mcp_settings.json",
+        help="alias of 'dekko uninstall cline'",
     )
     parser.add_argument(
         "--cline-scope",
@@ -466,9 +463,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         epilog=(
             "note: 'map' takes DIR positionally; every other command "
             "uses --root DIR\n"
-            "legacy aliases: dekko --map [DIR] [SUBPATH], "
-            "dekko --claude-install, dekko --claude-md-install, "
-            "dekko --version"
+            "legacy aliases: dekko --map [DIR] [SUBPATH], dekko --version; "
+            "--claude-install, --mcp-install, --cline-install and "
+            "--claude-md-install (and their --*-uninstall pairs) still "
+            "work as aliases of 'dekko install|uninstall TARGET'"
         ),
     )
     sub = parser.add_subparsers(
@@ -1256,6 +1254,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_hooks_run.set_defaults(func=run_hooks_run)
 
+    for action in ("install", "uninstall"):
+        _add_install_parser(sub, action)
+
     p_daemon = sub.add_parser(
         "daemon",
         help="manage the per-repo warm-cache daemon (start/stop/status)",
@@ -1741,6 +1742,90 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_export.set_defaults(func=run_export)
     return parser
+
+
+def _add_install_parser(
+    sub: argparse._SubParsersAction,
+    action: str,
+) -> None:
+    """Attach ``dekko install`` or ``dekko uninstall`` and its targets.
+
+    Shape A from the rubric in :func:`build_subcommand_parser`: each
+    target takes its own options (only the CLI-driven ones can preview
+    with ``--dry-run``; Cline's takes a scope and a config path), so a
+    single positional couldn't carry them. Both verbs share one target
+    list, and each target's handler reads ``args.command`` to pick the
+    install or the uninstall side.
+
+    Args:
+        sub: The top-level subparsers to add the verb to.
+        action: ``"install"`` or ``"uninstall"``.
+    """
+    removing = action == "uninstall"
+    p_action = sub.add_parser(
+        action,
+        help=(
+            "remove what 'dekko install' wired up"
+            if removing
+            else "wire dekko into an agent client or a policy file"
+        ),
+    )
+    targets = p_action.add_subparsers(
+        dest="install_target", required=True, metavar="TARGET"
+    )
+
+    p_claude = targets.add_parser(
+        "claude",
+        help="Claude Code: the dekko plugin (MCP server, skills, "
+        "slash commands)",
+    )
+    p_claude.add_argument(
+        "--mcp-only",
+        action="store_true",
+        help=f"{action} only the MCP server (claude mcp "
+        f"{'remove' if removing else 'add'}), not the plugin",
+    )
+    p_claude.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the claude command(s) instead of running them",
+    )
+    p_claude.set_defaults(func=run_target_claude)
+
+    p_cline = targets.add_parser(
+        "cline", help="Cline: the MCP server in cline_mcp_settings.json"
+    )
+    p_cline.add_argument(
+        "--scope",
+        choices=cline_mod.SCOPES,
+        default="vscode",
+        help="the VS Code extension (default) or a standalone cline "
+        "CLI's global config",
+    )
+    p_cline.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="explicit cline_mcp_settings.json path, overriding --scope",
+    )
+    p_cline.add_argument(
+        "--force",
+        action="store_true",
+        help="reset a malformed cline_mcp_settings.json instead of aborting",
+    )
+    p_cline.set_defaults(func=run_target_cline)
+
+    p_claude_md = targets.add_parser(
+        "claude-md",
+        help="the dekko usage-policy block in this repo's CLAUDE.md",
+    )
+    p_claude_md.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose CLAUDE.md to edit (default: cwd)",
+    )
+    p_claude_md.set_defaults(func=run_target_claude_md)
 
 
 def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -2427,6 +2512,35 @@ def run_hooks_uninstall(args: argparse.Namespace) -> int:
 def run_hooks_run(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks run <event>`` (reads JSON on stdin)."""
     return hooks_mod.dispatch(args.event, sys.stdin.read(), strict=args.strict)
+
+
+def run_target_claude(args: argparse.Namespace) -> int:
+    """Handle ``dekko install|uninstall claude [--mcp-only]``."""
+    if args.command == "install":
+        handler = mcp_install if args.mcp_only else claude_install
+    else:
+        handler = mcp_uninstall if args.mcp_only else claude_uninstall
+
+    return handler(dry_run=args.dry_run)
+
+
+def run_target_cline(args: argparse.Namespace) -> int:
+    """Handle ``dekko install|uninstall cline``."""
+    config = Path(args.config) if args.config else None
+    handler = (
+        cline_mod.install if args.command == "install" else cline_mod.uninstall
+    )
+    return handler(config, args.scope, force=args.force)
+
+
+def run_target_claude_md(args: argparse.Namespace) -> int:
+    """Handle ``dekko install|uninstall claude-md``."""
+    handler = (
+        claude_md_mod.install
+        if args.command == "install"
+        else claude_md_mod.uninstall
+    )
+    return handler(Path(args.root).resolve())
 
 
 def run_daemon_start(args: argparse.Namespace) -> int:

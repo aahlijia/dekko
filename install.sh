@@ -19,10 +19,10 @@ uv tool install --force --reinstall --refresh-package dekko \
 
 # Invoke the freshly installed tool by its absolute path. Inside a repo
 # checkout, a local .venv/bin/dekko (an editable install with no bundled
-# _plugin directory) can shadow it on PATH and break --claude-install.
+# _plugin directory) can shadow it on PATH and break the plugin install.
 DEKKO_BIN="$(uv tool dir)/dekko/bin/dekko"
 
 printf 'Installing the dekko plugin into Claude Code...\n'
-"$DEKKO_BIN" --claude-install
+"$DEKKO_BIN" install claude
 
 printf '\n\033[32mDone.\033[0m Restart Claude Code to activate \033[1m/map\033[0m.\n'
