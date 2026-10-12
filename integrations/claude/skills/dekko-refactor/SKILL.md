@@ -37,7 +37,8 @@ Rules that make the list complete:
   ending `(as fn)` means that file calls the symbol as `fn`: the
   import line and those calls are both sites.
 - **Read only the sites.** `get_context_pack` with `with_source=true`
-  for the target's own body, a line-ranged Read for each site row.
+  for the target's own body, a line-ranged Read (or
+  `sed -n 'A,Bp'`) for each site row.
 - A low count on a widely used or short, common name: run
   `check_ambiguous` or `dekko-verify` before trusting it.
 

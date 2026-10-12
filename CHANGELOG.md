@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Changed
+- **The bundled skills, the usage-policy block and the session-start
+  preamble read correctly on any MCP client, not only Claude Code.**
+  First step toward Codex support (#38), which loads the same plugin
+  bundle. Wording is only added: every phrase a skill's description
+  already used to trigger in Claude Code is kept, with the Codex or
+  shell equivalent alongside it (`cat`/`sed -n` next to Read, a shell
+  tool next to Bash, `spawn_agent` and `codex exec` next to the Agent
+  tool and `claude -p`). `dekko-review-context` now writes bare MCP
+  tool names like the other skills, instead of hard-coding the
+  `mcp__dekko__` prefix that the plugin install doesn't use. The
+  preamble's line about the pre-bash hook no longer promises a
+  confirmation prompt, since not every client has one. A new guard
+  test keeps all of it shared: Codex's frontmatter limits, the Claude
+  trigger phrases, and no client-only term without its counterpart.
+
 ## [1.9.2] — 2026-10-09
 
 ### Fixed
