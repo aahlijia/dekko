@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.3] — 2026-10-12
+
+### Fixed
+- **A Java or Kotlin type written as a nested path is read as that
+  path.** A parameter typed `Health.Builder builder` was read by its
+  outer type, so `builder.up()` landed on the static factory
+  `Health.up()` and `Health.Builder.up` had no callers at all; a
+  receiver typed `LoaderZipEntries.@Nullable WrittenEntries` (a
+  type-use annotation inside the path) wasn't read at all, and its
+  calls went external. Now a nested-path parameter is typed by the
+  path, type-use annotations are dropped before any declared type is
+  read, and a supertype written as a nested path (`class Options
+  extends InterpreterApi.Options`) is found by its path rather than
+  as the `Options` declaring it. spring-boot: +143 edges, 29 lost (all
+  29 were wrong), ambiguous rows 45,263 -> 45,134, and 63 methods get
+  their first caller (`Health.Builder.up`: 0 -> 22). A nested path no
+  repo type has
+  (`ServletRegistration.Dynamic`) is external. Stored type texts keep
+  their annotations for signatures and `query type`.
+
 ## [1.9.2] — 2026-10-09
 
 ### Fixed

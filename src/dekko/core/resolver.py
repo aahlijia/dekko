@@ -5996,6 +5996,10 @@ def _typed_param_token_candidates(
     ``needs_refresh.changed()`` regressed exactly this way while this
     fix was in progress).
 
+    A JVM nested path (``Health.Builder``) yields its outer type first;
+    a parameter typed that way is walked by its path instead
+    (``_walk_nested_param``) and never reaches these tokens.
+
     Args:
         type_text: A declared parameter's type, as written.
 
@@ -6093,6 +6097,13 @@ _WALK_TRANSPARENT_CALLS = frozenset(
 _WALK_SELF_RETURN = re.compile(r"\b(?:Self|this|SELF)\b")
 # A field type named by a nested-type path, ``ZipContent.Entry``.
 _WALK_DOTTED_TYPE = re.compile(r"[A-Z]\w*(?:\.[A-Z]\w*)+\Z")
+# A type-use annotation inside a declared JVM type text:
+# ``Outer.@Nullable Inner``, ``@Size(max = 3)``, Kotlin's
+# ``@field:Valid``.
+_DECLARED_TYPE_ANNOTATION = re.compile(r"@[\w.:]+(?:\([^)]*\))?\s*")
+# Languages whose declared types can carry type-use annotations, and
+# whose nested types are written ``Outer.Inner``.
+_JVM_TYPE_LANGUAGES = frozenset({"java", "kotlin"})
 # The first generic or indexed head in a type text: ``list[`` /
 # ``std::vector<`` / ``map[``.
 _WALK_GENERIC_HEAD = re.compile(r"([A-Za-z_]\w*)\s*[<\[]")
@@ -6128,8 +6139,12 @@ _WALK_SPREAD_MEMBER_LANGUAGES = frozenset({"c", "cpp", "kotlin"})
 # Reserved ``index`` namespace: ``_SUPERS_KEY + type id`` holds one
 # stand-in per supertype name the type declares, and ``_SUPERS_KEY +
 # "@" + name`` the same for a Rust ``impl Trait for Name`` the extractor
-# couldn't attach to a symbol (``RawHeritage.subtype_name``).
+# couldn't attach to a symbol (``RawHeritage.subtype_name``). A
+# stand-in's ``name`` is the clause's last segment and its ``qualname``
+# the clause as written, without type arguments (``Api.Options``).
 _SUPERS_KEY = "::supers::"
+# A written type's arguments, ``<T>`` in ``Foo.Bar<T>``.
+_TYPE_ARGUMENTS_TAIL = re.compile(r"<.*", re.S)
 # Reserved ``index`` namespace: ``_SUBS_KEY + name`` holds every type
 # that declares a supertype called ``name`` (its implementors).
 _SUBS_KEY = "::subs::"
@@ -6177,8 +6192,9 @@ def _index_supertypes(
                 "@" + clause.subtype_name if clause.subtype_name else ""
             )
             if owner:
+                written = _TYPE_ARGUMENTS_TAIL.sub("", clause.text or "")
                 index.setdefault(_SUPERS_KEY + owner, []).append(
-                    _stand_in(clause.name, fm.path)
+                    _stand_in(clause.name, fm.path, written or clause.name)
                 )
             sub = by_id.get(clause.subtype_id)
             if sub is not None:
@@ -6193,8 +6209,11 @@ def _call_walk(
     """Type a call's chained receiver by walking its segments.
 
     A receiver of one segment (``self``, ``w``, ``Type``) is left to
-    the structural rungs, which already read it: the walk changes
-    nothing about a depth-zero call.
+    the structural rungs, which already read it, unless it is a bare
+    field or a JVM parameter typed by a nested path
+    (``_walk_one_segment``): the typed-parameter rung reads only a
+    type's outer token, which for ``Health.Builder`` lands on
+    ``Health``'s same-named method.
 
     Args:
         call: The raw call being resolved.
@@ -6257,18 +6276,48 @@ def _settled_before_lookup(
 def _walk_one_segment(
     call: RawCall, caller: Symbol | None, ctx: _WalkCtx
 ) -> WalkResult:
-    """A one-segment receiver: walked only when it is a bare field.
+    """A one-segment receiver: walked when it is a bare field, or a JVM
+    parameter typed by a nested path.
 
     ``repository.findAll()`` in Java, Kotlin or C++ is a call on the
-    caller's field. Every other one-segment receiver (self, a typed
-    parameter, a type name) stays with the structural rungs.
+    caller's field. ``builder.up()`` on a ``Health.Builder builder``
+    parameter is walked too (``_walk_nested_param``). Every other
+    one-segment receiver (self, a typed parameter, a type name) stays
+    with the structural rungs.
     """
     receiver = call.receiver or ""
     if not _WALK_PLAIN_NAME.match(receiver):
         return _WALK_UNKNOWN
+    nested = _walk_nested_param(receiver, call, caller, ctx)
+    if nested is not None:
+        return nested
     result, _ = _walk_bare_field(receiver, None, call, caller, ctx)
 
     return result
+
+
+def _walk_nested_param(
+    name: str, call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> WalkResult | None:
+    """A JVM parameter typed by a nested path (``Health.Builder``), walked.
+
+    The typed-parameter rung reads a declared type by its outermost
+    token, which for a nested path is the outer type: ``builder.up()``
+    would land on the static ``Health.up``. Walked, the path is read by
+    qualname, and its members (own, then inherited) decide. ``None``
+    when ``name`` isn't such a parameter, which leaves the call as it
+    was.
+    """
+    if caller is None or _site_language(call.path) not in _JVM_TYPE_LANGUAGES:
+        return None
+    param = _walk_param(caller, name)
+    if param is None or not param.type:
+        return None
+    text = _declared_type_text(param.type, caller.path).strip()
+    if not _WALK_DOTTED_TYPE.match(text):
+        return None
+
+    return _walk_type_text(text, caller.path, ctx)
 
 
 def _walk_bare_field(
@@ -6600,22 +6649,45 @@ def _walk_type_fields_uncached(
 
 
 def _walk_supertypes(owner: Symbol, ctx: _WalkCtx) -> list[Symbol]:
-    """The in-repo types ``owner`` declares as its supertypes (memoized)."""
+    """The in-repo types ``owner`` declares as its supertypes (memoized).
+
+    A JVM supertype is read by its written path (``_walk_supertype``).
+    """
     hit = _WALK_SUPERS.get(owner.id)
     if hit is None:
-        names = [
-            s.name
-            for s in ctx.index.get(_SUPERS_KEY + owner.id, [])
-            + ctx.index.get(_SUPERS_KEY + "@" + owner.name, [])
-        ]
-        names += _go_embedded_types(owner)
-        hit = [
+        stand_ins = ctx.index.get(_SUPERS_KEY + owner.id, []) + ctx.index.get(
+            _SUPERS_KEY + "@" + owner.name, []
+        )
+        hit = [t for s in stand_ins for t in _walk_supertype(s, owner, ctx)]
+        hit += [
             t
-            for name in names
+            for name in _go_embedded_types(owner)
             for t in _walk_type_token(name, owner.path, ctx) or ()
         ]
         _WALK_SUPERS[owner.id] = hit
     return hit
+
+
+def _walk_supertype(
+    stand_in: Symbol, owner: Symbol, ctx: _WalkCtx
+) -> tuple[Symbol, ...]:
+    """The in-repo types one supertype clause names.
+
+    A JVM clause written as a nested path is read by that path:
+    ``class Options extends Api.Options`` by its last segment alone
+    would find the ``Options`` declaring it, and see no supertype at
+    all. Every other clause is read by its name, as a type token.
+    """
+    written = _declared_type_text(stand_in.qualname, owner.path).strip()
+    if (
+        owner.language in _JVM_TYPE_LANGUAGES
+        and written != stand_in.name
+        and _WALK_DOTTED_TYPE.match(written)
+    ):
+        found = _walk_nested_type(written, owner.path, ctx)
+        return found.layers[0] if found.kind == "typed" else ()
+
+    return _walk_type_token(stand_in.name, owner.path, ctx) or ()
 
 
 def _go_embedded_types(owner: Symbol) -> list[str]:
@@ -6629,8 +6701,24 @@ def _go_embedded_types(owner: Symbol) -> list[str]:
     ]
 
 
+def _declared_type_text(text: str, path: str) -> str:
+    """``text`` without its type-use annotations, at a JVM site.
+
+    ``LoaderZipEntries.@Nullable WrittenEntries`` is the nested type
+    ``LoaderZipEntries.WrittenEntries``; read with the annotation, its
+    first PascalCase token is the outer type (or, in
+    ``a.b.@Nullable Logger``, the annotation itself). Stored type texts
+    keep the annotation for display and type search; the resolver drops
+    it when it reads one.
+    """
+    if "@" not in text or _site_language(path) not in _JVM_TYPE_LANGUAGES:
+        return text
+    return _DECLARED_TYPE_ANNOTATION.sub("", text)
+
+
 def _walk_type_text(text: str, path: str, ctx: _WalkCtx) -> WalkResult:
     """The types a declared type text names, read in ``path`` (memoized)."""
+    text = _declared_type_text(text, path)
     key = (path, text)
     hit = _WALK_TEXTS.get(key)
     if hit is None:
@@ -7960,6 +8048,7 @@ def _typed_param_match(
     )
     if not param_type:
         return None
+    param_type = _declared_type_text(param_type, call.path)
     tokens = _object_type_field_tokens(param_type, call.receiver)
     if tokens is None:
         tokens = _typed_param_token_candidates(param_type)
@@ -9794,13 +9883,14 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     return index
 
 
-def _stand_in(name: str, path: str = "") -> Symbol:
+def _stand_in(name: str, path: str = "", qualname: str = "") -> Symbol:
     """A placeholder carrying a name or a directory through the index
-    to pool workers (see ``_RUST_RENAMED_KEY``); never a candidate."""
+    to pool workers (see ``_RUST_RENAMED_KEY``); never a candidate.
+    ``qualname`` defaults to ``name``."""
     return Symbol(
         id="",
         name=name,
-        qualname=name,
+        qualname=qualname or name,
         kind="module",
         path=path,
         language="rust",

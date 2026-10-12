@@ -428,9 +428,10 @@ def _is_record_header(def_node: Node) -> bool:
     )
 
 
-# A type annotation inside a Java parameter's type text
-# (``java.lang.@Nullable String``, ``String @NonNull []``).
-_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(\([^)]*\))?\s*")
+# A type annotation inside a Java type text (``java.lang.@Nullable
+# String``, ``String @NonNull []``, ``new @A Foo()``). Readers drop the
+# whitespace it leaves themselves.
+_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(?:\([^)]*\))?")
 
 
 def _record_declares_canonical(record: Node) -> bool:
@@ -4017,7 +4018,6 @@ def _callee_java(node: Node) -> tuple[str, str, str | None] | None:
     return None
 
 
-_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(?:\([^)]*\))?")
 _JAVA_TYPE_ARGUMENTS = re.compile(r"<[^<>]*>")
 
 
