@@ -249,6 +249,11 @@ class RawCall:
             a bare name that is a parameter or a local is not a field of
             the enclosing type, and a bare call to a parameter is not a
             call to a repo function of that name.
+        anonymous: Whether the call sits inside a Java anonymous class
+            body (``new Foo() { .. }``, an enum constant with a body),
+            at any depth. That class's supertype isn't recorded, so the
+            resolver can't read the scope a simple name is looked up
+            in there. Always ``False`` outside Java.
     """
 
     caller_id: str | None
@@ -260,6 +265,7 @@ class RawCall:
     arg_count: int | None = None
     arg_kinds: tuple[str, ...] | None = None
     bound: str | None = None
+    anonymous: bool = False
 
 
 @dataclass
@@ -299,6 +305,8 @@ class RawRef:
             in the extractor on purpose: whether a bound reference
             still earns an edge (a pytest fixture parameter does) is a
             question about the *target*, which only the resolver has.
+        anonymous: Whether the reference sits inside a Java anonymous
+            class body; see ``RawCall.anonymous``.
     """
 
     caller_id: str | None
@@ -308,6 +316,7 @@ class RawRef:
     line: int = 0
     arg_count: int | None = None
     bound: str | None = None
+    anonymous: bool = False
 
 
 @dataclass

@@ -1699,6 +1699,7 @@ def _resolve_refs_chunk(
     dict — the reference-resolution analog of ``_resolve_files_chunk``,
     same pure-function/worker-safety shape."""
     edges: dict[tuple[str, str], set[int]] = {}
+    ctx = _WalkCtx(index, by_name_path, imports_by_file, repo_stems)
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
         file_exports = any(sym.exported for sym in fm.symbols)
@@ -1712,6 +1713,7 @@ def _resolve_refs_chunk(
                 edges=edges,
                 repo_stems=repo_stems,
                 file_exports=file_exports,
+                ctx=ctx,
             )
     return edges
 
@@ -1849,6 +1851,7 @@ def _resolve_ref(
     edges: dict[tuple[str, str], set[int]],
     repo_stems: set[str],
     file_exports: bool = False,
+    ctx: "_WalkCtx | None" = None,
 ) -> None:
     """Resolve one reference; ambiguous/unmatched refs are dropped.
 
@@ -1857,6 +1860,8 @@ def _resolve_ref(
     or more than one with no disambiguating signal) simply contributes
     no edge, mirroring how a call with no in-repo candidates already
     falls through to ``external`` with nothing further tracked.
+    ``ctx`` (the walk's tables) lets a Java ``X::new`` name a member
+    type of its enclosing classes (``_java_member_type``).
     """
     caller_id = ref.caller_id or f"{ref.path}{MODULE_CALLER_SUFFIX}"
     candidates = _language_filtered(ref, index.get(ref.name, []))
@@ -1877,12 +1882,14 @@ def _resolve_ref(
             edges.setdefault((caller_id, alias[0].id), set()).add(ref.line)
         return
     same_file = by_name_path.get((ref.name, ref.path), [])
-    target = _pick_candidate(
+    caller = symbols_by_id.get(ref.caller_id or "")
+    member = _java_member_type(ref, caller, ctx) if ctx is not None else None
+    target = member or _pick_candidate(
         ref,
         candidates,
         same_file,
         file_imports,
-        symbols_by_id.get(ref.caller_id or ""),
+        caller,
         index,
     )
     if (
@@ -3142,7 +3149,8 @@ def _resolve_call(
     )
     target = walked or _within_scope(
         scoped,
-        _pick_candidate(
+        _java_member_type(call, caller, ctx)
+        or _pick_candidate(
             call,
             candidates,
             same_file,
@@ -3963,6 +3971,181 @@ def _java_same_package_type(
     ]
 
     return types[0] if len(types) == 1 else None
+
+
+def _java_member_type(
+    call: RawCall | RawRef, caller: Symbol | None, ctx: "_WalkCtx"
+) -> Symbol | None:
+    """The type a Java ``new X(..)`` or ``X::new`` names through its
+    enclosing classes, when one of them settles it.
+
+    Java looks a simple type name up in the enclosing classes first,
+    innermost out, before any import or the package (JLS 6.4.1,
+    8.5). At each level ``T`` (``_java_scope_levels``): a member type
+    ``X`` that ``T`` declares is the type; else one that exactly one
+    in-repo supertype declares (an interface's nested record,
+    inherited); else, when ``T`` has a supertype outside the repo
+    (which may declare an ``X`` dekko can't see), the search stops;
+    else ``T`` itself when it is called ``X`` (a record's own name in
+    its field initializer); else the next level out. ``new
+    Outer.Inner(..)`` is written through its scope and left to the
+    written-path rung.
+
+    Args:
+        call: The raw call or reference.
+        caller: Its enclosing symbol.
+        ctx: The repo-wide tables.
+
+    Returns:
+        The type, or ``None`` when the call isn't a Java simple-name
+        construction or constructor reference, sits in an anonymous
+        class body, or no level settles it (the ladder decides).
+    """
+    if (
+        caller is None
+        or call.anonymous
+        or not call.path.endswith(".java")
+        or not _java_names_simple_type(call)
+    ):
+        return None
+    for level in _java_scope_levels(caller, ctx) or ():
+        own = _java_member_types(level, call.name, ctx)
+        if len(own) == 1:
+            return own[0]
+        supers, is_open = _java_scope_supertypes(level, ctx)
+        inherited = [
+            m for s in supers for m in _java_member_types(s, call.name, ctx)
+        ]
+        if len(inherited) == 1:
+            return inherited[0]
+        if own or inherited or is_open:
+            return None
+        if level.name == call.name:
+            return level
+
+    return None
+
+
+def _java_names_simple_type(call: RawCall | RawRef) -> bool:
+    """A ``new X(..)`` with no ``.`` before its type arguments, or an
+    ``X::new`` reference (its name is the type's)."""
+    if isinstance(call, RawRef):
+        return call.name[:1].isupper()
+    if call.receiver is not None or not call.text.startswith("new "):
+        return False
+
+    return "." not in call.text[4:].split("<", 1)[0]
+
+
+def _java_scope_levels(
+    caller: Symbol, ctx: "_WalkCtx"
+) -> tuple[Symbol, ...] | None:
+    """The Java types enclosing ``caller``, innermost first (memoized).
+
+    The caller itself when it is a type (a field initializer or an
+    initializer block), else the type its qualname sits in, then each
+    type further out. ``None`` when a level isn't a type symbol in the
+    caller's file, which leaves every call there to the ladder.
+    """
+    if caller.id not in _SCOPE_LEVELS:
+        _SCOPE_LEVELS[caller.id] = _java_scope_levels_uncached(caller, ctx)
+    return _SCOPE_LEVELS[caller.id]
+
+
+def _java_scope_levels_uncached(
+    caller: Symbol, ctx: "_WalkCtx"
+) -> tuple[Symbol, ...] | None:
+    """``_java_scope_levels`` without the memo."""
+    if caller.kind in TYPE_KINDS:
+        inner: Symbol | None = caller
+    else:
+        inner = _java_type_at(
+            caller.path, caller.qualname.rpartition(".")[0], ctx
+        )
+    if inner is None:
+        return None
+    chain = [inner]
+    parts = inner.qualname.split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        outer = _java_type_at(inner.path, ".".join(parts[:cut]), ctx)
+        if outer is None:
+            return None
+        chain.append(outer)
+
+    return tuple(chain)
+
+
+def _java_type_at(path: str, qualname: str, ctx: "_WalkCtx") -> Symbol | None:
+    """The type symbol ``qualname`` names in ``path``, if any."""
+    name = qualname.rpartition(".")[2]
+    return next(
+        (
+            s
+            for s in ctx.by_name_path.get((name, path), ())
+            if s.kind in TYPE_KINDS and s.qualname == qualname
+        ),
+        None,
+    )
+
+
+def _java_member_types(
+    owner: Symbol, name: str, ctx: "_WalkCtx"
+) -> list[Symbol]:
+    """The types ``owner`` declares as its member called ``name``."""
+    qualname = f"{owner.qualname}.{name}"
+    return [
+        s
+        for s in ctx.by_name_path.get((name, owner.path), ())
+        if s.kind in TYPE_KINDS and s.qualname == qualname
+    ]
+
+
+def _java_scope_supertypes(
+    owner: Symbol, ctx: "_WalkCtx"
+) -> tuple[tuple[Symbol, ...], bool]:
+    """``owner``'s in-repo Java supertypes, nearest first, and whether
+    any supertype is outside the repo (memoized).
+
+    Followed ``_WALK_SUPER_DEPTH`` levels up, each clause read as the
+    receiver walk reads it (``_walk_supertype``). A clause that names no
+    in-repo Java type makes ``owner`` open: what it inherits from there
+    can't be seen.
+    """
+    hit = _SCOPE_SUPERS.get(owner.id)
+    if hit is None:
+        hit = _java_scope_supertypes_uncached(owner, ctx)
+        _SCOPE_SUPERS[owner.id] = hit
+    return hit
+
+
+def _java_scope_supertypes_uncached(
+    owner: Symbol, ctx: "_WalkCtx"
+) -> tuple[tuple[Symbol, ...], bool]:
+    """``_java_scope_supertypes`` without the memo."""
+    found: list[Symbol] = []
+    is_open = False
+    seen = {owner.id}
+    level = [owner]
+    for _ in range(_WALK_SUPER_DEPTH):
+        nxt: list[Symbol] = []
+        for sub in level:
+            for stand_in in ctx.index.get(_SUPERS_KEY + sub.id, []):
+                read = [
+                    s
+                    for s in _walk_supertype(stand_in, sub, ctx)
+                    if s.language == "java"
+                ]
+                is_open = is_open or not read
+                for s in read:
+                    if s.id not in seen:
+                        seen.add(s.id)
+                        nxt.append(s)
+        if not nxt:
+            break
+        found.extend(nxt)
+        level = nxt
+
+    return tuple(found), is_open
 
 
 def _pick_candidate_retried(
@@ -6157,6 +6340,10 @@ _WALK_SUPERS: dict[str, list[Symbol]] = {}
 _WALK_TEXTS: dict[tuple[str, str], WalkResult] = {}
 _WALK_TOKENS: dict[tuple[str, str], tuple[Symbol, ...] | None] = {}
 _WALK_MEMBERS: dict[tuple[str, str, bool], list[Symbol]] = {}
+# The Java enclosing-scope chain per caller id, and each type's in-repo
+# supertypes with whether any is outside the repo, per type id.
+_SCOPE_LEVELS: dict[str, tuple[Symbol, ...] | None] = {}
+_SCOPE_SUPERS: dict[str, tuple[tuple[Symbol, ...], bool]] = {}
 
 
 def _reset_walk_memo() -> None:
@@ -6167,6 +6354,8 @@ def _reset_walk_memo() -> None:
         _WALK_TEXTS,
         _WALK_TOKENS,
         _WALK_MEMBERS,
+        _SCOPE_LEVELS,
+        _SCOPE_SUPERS,
     ):
         memo.clear()
 

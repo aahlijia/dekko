@@ -1698,6 +1698,8 @@ def _collect_calls(
         if call is None:
             continue
         _tag_bound(spec, call, callee, bindings)
+        if spec.name == "java":
+            call.anonymous = _java_in_anonymous_body(callee)
         if (
             spec.name == "java"
             and call_node is not None
@@ -1772,6 +1774,33 @@ def _callee_head(text: str) -> str:
     """The first segment of a callee text: ``a`` of ``a.b.c``,
     ``a?.b``, ``a->b`` or ``a::b``; the text itself when it has one."""
     return _CALLEE_JOINERS.split(text, maxsplit=1)[0]
+
+
+# The nodes whose ``class_body`` declares a Java anonymous class.
+_JAVA_ANONYMOUS_OWNERS = frozenset(
+    {"object_creation_expression", "enum_constant"}
+)
+
+
+def _java_in_anonymous_body(node: Node) -> bool:
+    """Whether ``node`` sits inside a Java anonymous class body.
+
+    ``new Foo() { .. }`` and an enum constant with a body declare a
+    class whose supertype dekko doesn't record. Anything inside one, at
+    any depth (a local class declared in one of its methods too), is in
+    a scope the resolver can't read (``RawCall.anonymous``).
+    """
+    parent = node.parent
+    while parent is not None:
+        owner = parent.parent
+        if (
+            parent.type == "class_body"
+            and owner is not None
+            and owner.type in _JAVA_ANONYMOUS_OWNERS
+        ):
+            return True
+        parent = owner
+    return False
 
 
 def _tag_bound(
@@ -3091,6 +3120,7 @@ def _collect_refs(
                         path=rel,
                         name=type_name,
                         line=ctor_ref.start_point[0] + 1,
+                        anonymous=_java_in_anonymous_body(ctor_ref),
                     )
                 )
             continue
@@ -3108,6 +3138,9 @@ def _collect_refs(
                 name=name,
                 line=ref_node.start_point[0] + 1,
                 bound=_bound_kind(spec, ref_node, bindings.get(name)),
+                anonymous=(
+                    spec.name == "java" and _java_in_anonymous_body(ref_node)
+                ),
             )
         )
     return refs

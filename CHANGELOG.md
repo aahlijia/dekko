@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.4] — 2026-10-12
+
+### Fixed
+- **A Java `new X(..)` names the member type of its enclosing classes
+  first.** Java looks a simple type name up in the enclosing classes,
+  innermost out, before imports and the package; dekko didn't, so
+  `new Node(host, port)` in a class implementing an interface that
+  declares a nested `Node` record stayed ambiguous among every `Node`
+  in the repo, and a record's own name in its field initializer
+  (`static final GitHub OPEN = new GitHub(..)`) tied with other
+  `GitHub` types. A `new X(..)` or `X::new` with a simple name now
+  takes a member type the enclosing class declares, else one exactly
+  one in-repo supertype declares, else the class itself when it's
+  called `X`, else the next class out. A class with a supertype
+  outside the repo stops the search (it could declare an `X` dekko
+  can't see), and a construction inside an anonymous class body is
+  left to the ladder: calls and references there are now marked as
+  such when a Java file is extracted. spring-boot: +93 edges, none
+  lost, ambiguous rows 45,134 -> 45,076, and 10 constructors and types
+  leave `unused`, none join it.
+
 ## [1.9.3] — 2026-10-12
 
 ### Fixed

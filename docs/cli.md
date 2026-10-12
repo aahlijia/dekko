@@ -1265,7 +1265,15 @@ X(..)` or `X::new` that is still ambiguous, with no import of `X` in
 the file, takes the one top-level `X` in the file's own package, as
 Java does (the package is the directory under the source root, so
 `src/test/java/org/x` and `src/main/java/org/x` are one package). Two
-`X` in that package, or none, leave it ambiguous. A low ambiguous rate
+`X` in that package, or none, leave it ambiguous. Since 1.9.4 a Java
+`new X(..)` or `X::new` (a simple name, not `new Outer.X(..)`) first
+names a member type of the enclosing classes, innermost out, as the
+compiler does: one the class declares, else one an in-repo supertype
+declares (an interface's nested record), else the class itself when it
+is called `X`. A class with a supertype outside the repo stops the
+search, since that type may declare an `X` dekko can't see, and a
+construction inside an anonymous class body is left to the ladder. A
+low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output
