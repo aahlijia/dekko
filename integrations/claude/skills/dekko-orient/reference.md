@@ -17,7 +17,7 @@ are in `docs/cli.md` in the dekko repo.
 | `type_impact` | `--type-impact` | `workset` on a type: pull in every type-usage site and implementor |
 | `transitive` | `--transitive` | Supertypes/subtypes: the full chain |
 
-## CLI-only queries (no MCP tool, use Bash)
+## CLI-only queries (no MCP tool, run them in Bash or your shell tool)
 
 | Need | Use | Instead of |
 |---|---|---|

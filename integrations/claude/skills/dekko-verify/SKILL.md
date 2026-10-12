@@ -14,7 +14,7 @@ impacted tests, `unused`, heritage, throws), not `outline`,
 
 ## How to check
 
-Run `dekko sanity` (the `/sanity` command). It compares dekko's answer
+Run `dekko sanity` (the `/sanity` command in Claude Code). It compares dekko's answer
 with one targeted grep sweep, buckets the results into matches /
 dekko-only / grep-only, and names a likely cause for every grep-only
 miss:

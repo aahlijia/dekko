@@ -11,15 +11,16 @@ run, and where dekko's own resolver is unsure. `workset`,
 `impacted_tests`, and `check_ambiguous` already answer these — this
 skill composes them into review context, run *before* the diff itself,
 so the read is top-down (structure first, then lines) instead of
-bottom-up.
+bottom-up. Tool names below are the bare MCP names (`dekko-orient`
+has the client prefixes and the CLI fallback).
 
 ## Procedure
 
 | Need | Use |
 |---|---|
-| What changed and what calls it | `mcp__dekko__workset [rev]` (or `dekko workset [REV]`) |
-| What tests should run | `mcp__dekko__impacted_tests [rev]` (or `dekko affected [REV]`) |
-| Where the resolver itself is unsure | `mcp__dekko__check_ambiguous` (or `dekko ambiguous`) |
+| What changed and what calls it | `workset [rev]` (CLI `dekko workset [REV]`) |
+| What tests should run | `impacted_tests [rev]` (CLI `dekko affected [REV]`) |
+| Where the resolver itself is unsure | `check_ambiguous` (CLI `dekko ambiguous`) |
 | Just the changed-symbol list with callers, no outlines | `dekko diff [REV]` (CLI only) |
 
 1. **Determine the diff scope.** A git rev range, or the same default

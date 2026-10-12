@@ -1,6 +1,6 @@
 ---
 name: dekko-notes
-description: Read and write dekko's symbol-anchored notes in any repo with a .dekko/ directory. Trigger every time you pull a symbol's context (query_symbol, get_context_pack, dekko query/context), right after a non-obvious change, and right after any rename/move/signature edit (to sweep orphaned notes). Notes are durable, committed annotations keyed by symbol id — they carry rationale grep/Read cannot show.
+description: Read and write dekko's symbol-anchored notes in any repo with a .dekko/ directory. Trigger every time you pull a symbol's context (query_symbol, get_context_pack, dekko query/context), right after a non-obvious change, and right after any rename/move/signature edit (to sweep orphaned notes). Notes are durable, committed annotations keyed by symbol id — they carry rationale grep/Read (or cat) cannot show.
 ---
 
 # Keeping dekko notes current
@@ -10,7 +10,7 @@ symbol id (`path::Qualified.name`). They are committed to git and shown
 inline by `query_symbol` / `get_context_pack` (CLI: `dekko query
 symbol` / `dekko context`). See the `dekko-orient` skill for target
 syntax (bare name, `Class.method`, `file.py:name`, or the tolerated
-`::` form) and for when to reach for dekko over grep/Read generally.
+`::` form) and for when to reach for dekko over grep/Read/cat generally.
 
 ## Consult notes before editing
 
