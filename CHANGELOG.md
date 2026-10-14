@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.24] — 2026-10-14
+
+### Fixed
+- **A Java or Kotlin call on a parameter takes the method of the type
+  the parameter is declared with, own or inherited.** The typed-
+  parameter rung read only the type's own name, so `server.setPort
+  (9000)` on a `ConfigurableReactiveWebServerFactory server` missed the
+  `setPort` its in-repo superinterface declares, and `context.getBean
+  (..)` on an in-repo test interface extending Spring's
+  `ApplicationContext` never read as external; the ladder then tied
+  every `setPort` or `getBean` in the repo. A parameter is now walked
+  from its declared type ahead of that rung, as a field or a local is:
+  one member is the edge, same-count overloads stay an ambiguous row
+  among that type's methods, and a method only an outside supertype can
+  declare is external. A parameter whose type the walk can't read keeps
+  the rung. spring-boot: +718 caller -> callee pairs at 820 sites, -30
+  (every lost pair read moved to the declared type's method, a tie
+  among its overloads, or external for a type parameter bounded by an
+  outside type), ambiguous rows 25,207 -> 24,535, `unused` 1,778 ->
+  1,740 with none new, `sanity --all` unchanged, map 26.8 s -> 26.7 s.
+
 ## [1.9.23] — 2026-10-14
 
 ### Fixed

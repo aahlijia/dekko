@@ -6819,9 +6819,8 @@ def _walk_declared_receiver(
     Python: ``self``/``cls``, declared by the method's class
     (``_walk_python_self``).
 
-    Java and Kotlin: a parameter or local declared with an outside type,
-    and a Java local declared with an in-repo one
-    (``_walk_jvm_declared``).
+    Java and Kotlin: a parameter or local declared with a type the walk
+    can read, outside or in-repo (``_walk_jvm_declared``).
     """
     local = _walk_local_type(call, ctx)
     if local is not None:
@@ -6856,15 +6855,20 @@ def _walk_jvm_declared(
     in-repo class (``Resource res = new OriginTrackedResource(..)``),
     which is then walked instead (``RawCall.receiver_init``).
 
-    A Java local declared with an in-repo type is walked like a field
-    of that type: ``health.getStatus()`` on ``Health health`` takes
-    ``Health``'s own or inherited ``getStatus``, where the ladder saw
-    every ``getStatus`` in the repo.
+    A parameter or Java local declared with an in-repo type is walked
+    like a field of that type: ``health.getStatus()`` on ``Health
+    health`` takes ``Health``'s own or inherited ``getStatus``, where
+    the ladder saw every ``getStatus`` in the repo. For a parameter
+    this runs ahead of the typed-parameter rung, which reads only the
+    type's own name, so it missed a method an in-repo supertype
+    declares and couldn't tell a method only an outside supertype holds
+    (``getBean`` on an interface extending Spring's
+    ``ApplicationContext``) from one the repo has.
 
     Java reads the type the extractor recorded
     (``RawCall.receiver_type``); Kotlin reads a parameter's (its locals
-    are mostly inferred). Any other verdict is ``None``, so an in-repo
-    typed parameter stays with the rungs that read it today.
+    are mostly inferred). An ``unknown`` verdict is ``None``, so a
+    receiver the walk can't type stays with the rungs below.
     """
     if call.bound not in ("param", "local"):
         return None
@@ -6880,9 +6884,7 @@ def _walk_jvm_declared(
         built = _walk_type_text(call.receiver_init, call.path, ctx)
         if built.kind == "typed":
             return built
-    if result.kind == "foreign":
-        return result
-    if result.kind == "typed" and call.bound == "local":
+    if result.kind in ("foreign", "typed"):
         return result
 
     return None
