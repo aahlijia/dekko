@@ -6535,6 +6535,8 @@ _WALK_TRANSPARENT_CALLS = frozenset(
 _WALK_SELF_RETURN = re.compile(r"\b(?:Self|this|SELF)\b")
 # A field type named by a nested-type path, ``ZipContent.Entry``.
 _WALK_DOTTED_TYPE = re.compile(r"[A-Z]\w*(?:\.[A-Z]\w*)+\Z")
+# The same nested path written with type arguments, ``Outer.Inner<T>``.
+_WALK_JVM_NESTED_GENERIC = re.compile(r"([A-Z]\w*(?:\.[A-Z]\w*)+)\s*<.*>\Z")
 # A type-use annotation inside a declared JVM type text:
 # ``Outer.@Nullable Inner``, ``@Size(max = 3)``, Kotlin's
 # ``@field:Valid``.
@@ -7595,11 +7597,17 @@ def _walk_type_text_uncached(
     Otherwise each token of the wrapper chain that names an in-repo
     type becomes a layer (``_walk_type_tokens``). A C/C++ text written
     with a scope is read by that whole path first
-    (``_walk_cpp_written_type``).
+    (``_walk_cpp_written_type``), and a JVM nested path with type
+    arguments (``JsonWriter.Members<LogEvent>``) by its path, not its
+    outer type.
     """
     written = _walk_cpp_written_type(text, path, ctx)
     if written is not None:
         return written
+    if _site_language(path) in _JVM_TYPE_LANGUAGES:
+        generic = _WALK_JVM_NESTED_GENERIC.match(text.strip())
+        if generic:
+            return _walk_nested_type(generic.group(1), path, ctx)
     stripped = _walk_unwrapped(text.strip().lstrip("&*").strip())
     if stripped is None:
         return _WALK_FOREIGN
@@ -8071,8 +8079,9 @@ def _walk_type_token(
     nor defines, which is a global like the DOM's ``Request``. ``()``
     when it names only a Rust ``type`` alias, which the walk can't see
     through. Otherwise the types the import was followed to, else the
-    same-file types, else those nearest ``path``. A C/C++ type nested
-    in a class counts only where C++ lookup sees it
+    same-file types, else (Java, Kotlin) the type the file's import or
+    package names (``_walk_jvm_named``), else those nearest ``path``. A
+    C/C++ type nested in a class counts only where C++ lookup sees it
     (``_cpp_nested_visible``).
     """
     key = (path, token)
@@ -8133,13 +8142,65 @@ def _walk_type_token_uncached(
         return () if types else None
     if language == "rust" and imp is not None:
         real = _walk_in_import_crate(real, imp, path, ctx)
+
+    return _walk_pick_type(real, imp, path, language)
+
+
+def _walk_pick_type(
+    real: list[Symbol], imp: Import | None, path: str, language: str
+) -> tuple[Symbol, ...] | None:
+    """Which of the in-repo types ``real`` a bare name in ``path`` means.
+
+    The same-file ones, else (Java, Kotlin) the one the file's import or
+    package names, else those nearest ``path``. A JS/TS name the file
+    neither imports nor defines is a global: ``None``.
+    """
     same = tuple(s for s in real if s.path == path)
     if same:
         return same
     if language in _JS_FAMILY and imp is None:
         return None
+    if language in _JVM_TYPE_LANGUAGES:
+        named = _walk_jvm_named(real, imp, path)
+        if named:
+            return named
 
     return tuple(_walk_nearest(real, path))
+
+
+def _walk_jvm_named(
+    types: list[Symbol], imp: Import | None, path: str
+) -> tuple[Symbol, ...]:
+    """The JVM ``types`` a Java or Kotlin file means by their simple name.
+
+    A single-type import names its type by fully qualified name, so
+    ``Status`` in a file importing ``com.acme.health.Status`` is that
+    one, not a nearer nested ``GrpcProperties.Status``; one name in
+    several modules (sample apps) reads as the nearest copy. With no
+    import, a top-level type of the file's own package. ``()`` when
+    neither names one, so the nearest by path stands.
+    """
+    jvm = [s for s in types if s.language in _JVM_TYPE_LANGUAGES]
+    if imp is not None and imp.source:
+        exact = [s for s in jvm if _jvm_qualified_name(s) == imp.source]
+        return tuple(_walk_nearest(exact, path))
+    here = jvm_package_dir(path)
+    if here is None:
+        return ()
+    own = [
+        s
+        for s in jvm
+        if "." not in s.qualname and jvm_package_dir(s.path) == here
+    ]
+
+    return tuple(_walk_nearest(own, path))
+
+
+def _jvm_qualified_name(sym: Symbol) -> str:
+    """A JVM type's fully qualified name: its package, then qualname."""
+    package = (jvm_package_dir(sym.path) or "").replace("/", ".")
+
+    return f"{package}.{sym.qualname}"
 
 
 def _cpp_enclosing_type(sym: Symbol, ctx: _WalkCtx) -> Symbol | None:

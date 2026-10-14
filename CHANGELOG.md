@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.22] — 2026-10-14
+
+### Fixed
+- **The receiver walk reads a Java or Kotlin type name the way the
+  file does.** A type name used to mean the same-file type, else the
+  in-repo type of that name nearest by path, so `this.gradleBuild.
+  build()` in a file importing the test kit's `GradleBuild` tied with a
+  private nested `GradleBuild` in another file, and `Status status`
+  in a grpc file importing the health contributor `Status` read as the
+  module's own nested `GrpcServerHealthProperties.Status`. After the same-file types, which still
+  shadow an import of the same name, a single-type import now names
+  its type by fully qualified name (the nearest copy when one name is
+  in several modules), else a top-level type of the file's own
+  package. And `JsonWriter.Members<LogEvent>`, a nested path with type
+  arguments, is read as that nested type instead of `JsonWriter`.
+  spring-boot: +463 caller -> callee pairs at 544 call sites, 4 sites
+  in 2 callers moved to the type the file imports or shares a package
+  with, ambiguous rows 33,189 -> 32,676 (296 of the 298 `GradleBuild`
+  ties settled), `unused` 2,052 -> 2,050 with none new, `sanity --all`
+  unchanged.
+
 ## [1.9.21] — 2026-10-14
 
 ### Fixed
