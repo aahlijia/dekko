@@ -21,7 +21,6 @@ _JAVA = "src/main/java/com/acme"
 _URL = f"{_JAVA}/env/OriginTrackedResource.java"
 _URL_ID = f"{_URL}::OriginTrackedResource.getURL"
 _REPO = f"{_JAVA}/data/Repo.java"
-_REPO_ID = f"{_REPO}::Repo.run"
 _ENTRY = f"{_JAVA}/data/Entry.java"
 _ENTRY_ID = f"{_ENTRY}::Entry.getDn"
 
@@ -70,10 +69,6 @@ def _callees(graph: CallGraph, caller: str) -> set[str]:
 
 def _external(graph: CallGraph, caller: str) -> set[str]:
     return {e.callee for e in graph.external if e.caller == caller}
-
-
-def _ambiguous(graph: CallGraph, caller: str) -> dict[str, set[str]]:
-    return {name: set(ids) for c, name, ids in graph.ambiguous if c == caller}
 
 
 def test_a_chain_off_an_outside_local_or_parameter_is_external(
