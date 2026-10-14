@@ -9,6 +9,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.11] — 2026-10-14
+
+### Fixed
+- **A C/C++ call on a typed parameter or a cast is walked from its
+  type.** A one-segment receiver never entered the receiver walk, and
+  the typed-parameter rung compares `Type.name` with qualnames, which
+  a namespaced C++ member (`tensorflow.Tensor.dtype`) never matches,
+  so `result_type.getElementType()` on an `mlir::ShapedType`
+  parameter and `v.size()` on a `std::vector<int>&` landed on the
+  repo's one `getElementType` and `size`, and `t.dtype()` on a
+  `Tensor&` tied across every `dtype`. A receiver that is one of the
+  caller's typed parameters is now read from the declared type: an
+  outside type sends the call external, an in-repo one narrows it to
+  that type's members. A cast receiver (`llvm::cast<T>(v)`,
+  `static_cast<const T*>(p)`, `reinterpret_cast`, `down_cast`, ...)
+  is typed by its template argument the same way. tensorflow: +8,318
+  / -4,242 call sites, ambiguous rows 185,740 -> 178,352; gained
+  `OpKernelConstruction.GetAttr` 479, `Tensor.dtype`/`shape`/
+  `dim_size`/`NumElements` ~1,100, `OpKernelContext.device` 235;
+  `MlirTensor.getElementType` loses 301 wrong sites and
+  `DataTypeSet.size` 195. Calls on classes the extractor can't see
+  (flatbuffers accessors, `RuntimeShape`, a nested class defined out
+  of line as `class A::B`) or on a type behind a `using` alias now go
+  external instead of to a same-named stand-in. Map time unchanged.
+
 ## [1.9.10] — 2026-10-14
 
 ### Fixed

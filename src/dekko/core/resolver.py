@@ -6527,6 +6527,15 @@ _WALK_RUST_LOCAL_HEADS = frozenset({"crate", "self", "super"})
 _WALK_MODULE_HEAD_LANGUAGES = frozenset(
     {"python", "go", "javascript", "typescript", "tsx"}
 )
+# A C/C++ cast receiver, ``llvm::cast<T>()`` or ``static_cast<const
+# T*>()`` with its argument dropped: the value is a ``T``.
+_WALK_CPP_CAST = re.compile(
+    r"(?:[A-Za-z_]\w*\s*::\s*)*(?:static_cast|dynamic_cast|"
+    r"reinterpret_cast|const_cast|cast|dyn_cast|cast_or_null|"
+    r"dyn_cast_or_null|down_cast|cast_if_present|dyn_cast_if_present)"
+    r"\s*<(.+)>\s*\(\)\Z",
+    re.S,
+)
 # Lowercase smart pointers whose methods are reached through ``->``.
 _WALK_LOWER_WRAPPERS = frozenset(
     {"unique_ptr", "shared_ptr", "optional", "reference_wrapper"}
@@ -6631,11 +6640,12 @@ def _call_walk(
     """Type a call's chained receiver by walking its segments.
 
     A receiver of one segment (``self``, ``w``, ``Type``) is left to
-    the structural rungs, which already read it, unless it is a bare
-    field or a JVM parameter typed by a nested path
-    (``_walk_one_segment``): the typed-parameter rung reads only a
-    type's outer token, which for ``Health.Builder`` lands on
-    ``Health``'s same-named method.
+    the structural rungs, which already read it, unless its declaration
+    types it, it is a bare field, or it is a JVM parameter typed by a
+    nested path (``_walk_one_segment``): the typed-parameter rung reads
+    only a type's outer token, which for ``Health.Builder`` lands on
+    ``Health``'s same-named method. A C/C++ cast receiver
+    (``llvm::cast<T>(v)``) is typed by its template argument.
 
     Args:
         call: The raw call being resolved.
@@ -6649,6 +6659,10 @@ def _call_walk(
     spec = languages.spec_for_path(call.path)
     if spec is None or spec.field_query is None:
         return _WALK_UNKNOWN
+    if _site_language(call.path) in _CPP_FAMILY:
+        cast = _WALK_CPP_CAST.match((call.receiver or "").strip())
+        if cast is not None:
+            return _walk_type_text(cast.group(1), call.path, ctx)
     segments = _walk_segments(call.receiver)
     if segments is None:
         return _walk_one_segment(call, caller, ctx)
@@ -6698,9 +6712,11 @@ def _settled_before_lookup(
 def _walk_one_segment(
     call: RawCall, caller: Symbol | None, ctx: _WalkCtx
 ) -> WalkResult:
-    """A one-segment receiver: walked when it is a bare field, or a JVM
-    parameter typed by a nested path.
+    """A one-segment receiver: walked when its declaration types it, it
+    is a bare field, or it is a JVM parameter typed by a nested path.
 
+    ``result_type.getElementType()`` on a C++ ``ShapedType`` parameter
+    is read from the declaration (``_walk_declared_receiver``).
     ``repository.findAll()`` in Java, Kotlin or C++ is a call on the
     caller's field. ``builder.up()`` on a ``Health.Builder builder``
     parameter is walked too (``_walk_nested_param``). Every other
@@ -6710,12 +6726,47 @@ def _walk_one_segment(
     receiver = call.receiver or ""
     if not _WALK_PLAIN_NAME.match(receiver):
         return _WALK_UNKNOWN
+    declared = _walk_declared_receiver(receiver, call, caller, ctx)
+    if declared is not None:
+        return declared
     nested = _walk_nested_param(receiver, call, caller, ctx)
     if nested is not None:
         return nested
     result, _ = _walk_bare_field(receiver, None, call, caller, ctx)
 
     return result
+
+
+def _walk_declared_receiver(
+    name: str, call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> WalkResult | None:
+    """A one-segment receiver typed by its declaration, walked from it.
+
+    The one place a language reads a plain-name receiver's declared
+    type (a parameter's, or a local's where the extractor records it)
+    ahead of the structural rungs. A branch returns the walk's verdict,
+    which the resolver applies like any walk: ``foreign`` sends the
+    call external, ``typed`` narrows it to that type's members (one is
+    the target, several narrow the ladder), ``unknown`` leaves it to
+    the ladder. ``None`` means the language has no reading for this
+    receiver, and the one-segment rules below run as before.
+
+    C and C++: a typed parameter of the caller. The typed-parameter
+    rung compares ``Type.name`` with qualnames, which a namespaced C++
+    member never matches, and an outside type (``mlir::Value``,
+    ``std::vector<int>``) gives it nothing to say, so the ladder's sole
+    candidate took the call.
+    """
+    if caller is None:
+        return None
+    if _site_language(call.path) in _CPP_FAMILY:
+        param = _walk_param(caller, name)
+        if param is None or not param.type:
+            return None
+        result, _ = _walk_param_type(param, None, caller, ctx)
+        return result
+
+    return None
 
 
 def _walk_nested_param(
