@@ -3144,6 +3144,7 @@ def _resolve_call(
             return
         candidates = scoped.candidates
         same_file = [s for s in same_file if s in candidates]
+    unwalked = candidates
     walked, candidates, same_file = _walk_verdict(
         walk, call, caller, candidates, same_file, ctx
     )
@@ -3159,6 +3160,9 @@ def _resolve_call(
             index,
             repo_stems,
             raw_imports,
+            noise_guard=not _walk_skips_noise_guard(
+                walk, call, unwalked, candidates
+            ),
         ),
     )
     if target is _NOISE or (
@@ -3749,6 +3753,8 @@ def _pick_candidate_ladder(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    *,
+    noise_guard: bool = True,
 ) -> Symbol | _Noise | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
@@ -3784,6 +3790,10 @@ def _pick_candidate_ladder(
     built-in method names like ``trim``). Callers that pass a
     non-``None`` ``repo_stems`` must check for ``_NOISE`` before
     treating a non-``None`` return as a resolved ``Symbol``.
+
+    ``noise_guard=False`` skips that check: the caller already narrowed
+    the candidates to a typed receiver's own members, so the name is
+    evidence enough (``_walk_skips_noise_guard``).
 
     ``raw_imports``, when given, is the calling file's full (undeduped)
     import list — passed only for whole-file-include languages
@@ -3863,8 +3873,10 @@ def _pick_candidate_ladder(
     if hinted is not None:
         return hinted
 
-    if repo_stems is not None and _is_noise_call(
-        call, file_imports, repo_stems
+    if (
+        noise_guard
+        and repo_stems is not None
+        and _is_noise_call(call, file_imports, repo_stems)
     ):
         return _NOISE
 
@@ -3898,6 +3910,8 @@ def _pick_candidate(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    *,
+    noise_guard: bool = True,
 ) -> Symbol | _Noise | None:
     """Pick a candidate, then let Java's package scope settle a tie.
 
@@ -3917,6 +3931,7 @@ def _pick_candidate(
         raw_imports,
         crate_roots,
         tiebreak_hits,
+        noise_guard=noise_guard,
     )
     if picked is not None:
         return picked
@@ -4388,6 +4403,8 @@ def _pick_candidate_retried(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    *,
+    noise_guard: bool = True,
 ) -> Symbol | _Noise | None:
     """Pick a candidate, skipping a pick the call can't mean.
 
@@ -4421,6 +4438,7 @@ def _pick_candidate_retried(
             raw_imports,
             crate_roots,
             tiebreak_hits,
+            noise_guard=noise_guard,
         )
         if picked is None and _java_unanswerable(call, candidates):
             return _NOISE if repo_stems is not None else None
@@ -4894,6 +4912,8 @@ def _pick_candidate_vetoed(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    *,
+    noise_guard: bool = True,
 ) -> Symbol | _Noise | None:
     """Run the candidate ladder, then veto a structurally impossible pick.
 
@@ -4925,6 +4945,7 @@ def _pick_candidate_vetoed(
         raw_imports,
         crate_roots,
         tiebreak_hits,
+        noise_guard=noise_guard,
     )
     if (
         isinstance(picked, Symbol)
@@ -8415,6 +8436,39 @@ def _walk_member_is_local(
         return posixpath.dirname(member.path) == posixpath.dirname(owner.path)
 
     return owner.language in _WALK_SPREAD_MEMBER_LANGUAGES
+
+
+def _walk_skips_noise_guard(
+    walk: WalkResult,
+    call: RawCall,
+    unwalked: list[Symbol],
+    candidates: list[Symbol],
+) -> bool:
+    """Whether a typed walk narrowed a JVM call to its type's members.
+
+    The ladder's noise guard sends a common name (``build``, ``parse``,
+    ``get``) external because a pick on the name alone is usually a
+    library call. Once the walk has read the receiver's type and handed
+    the ladder only that type's members, the name is no longer the
+    only evidence: ``this.gradleBuild.build("x")`` on a ``GradleBuild``
+    field is ``GradleBuild``'s ``build``. ``_walk_typed_verdict`` hands
+    over a new list exactly when it narrowed, and passes ``unwalked``
+    through otherwise.
+
+    Args:
+        walk: The call's receiver walk.
+        call: The call being resolved.
+        unwalked: The candidates before ``_walk_verdict``.
+        candidates: The candidates it handed the ladder.
+
+    Returns:
+        True when the ladder should skip the noise guard.
+    """
+    return (
+        walk.kind == "typed"
+        and candidates is not unwalked
+        and _site_language(call.path) in _JVM_TYPE_LANGUAGES
+    )
 
 
 def _walk_verdict(

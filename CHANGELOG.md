@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.21] — 2026-10-14
+
+### Fixed
+- **A Java or Kotlin call the receiver walk typed keeps a common
+  method name.** `this.gradleBuild.build("x")` on a `GradleBuild`
+  field went external: the walk had read the field's type and handed
+  the ladder only `GradleBuild`'s own `build` overloads, but the
+  guard that sends `build`, `parse`, `resolve`, `write` and other
+  common names external still fired. That guard is for picks made on
+  the name alone, so it no longer overrules a typed narrowing in a
+  JVM file; an untyped receiver still meets it. spring-boot: +196
+  caller -> callee pairs at 212 call sites, all read right
+  (`RestTemplateBuilder.build`, `StandardConfigDataLocationResolver.
+  resolve`, `DurationStyle.parse`), and 204 calls that were external
+  are now ambiguous rows among in-repo candidates: 164 of them
+  between the imported test-kit `GradleBuild.build` and a private
+  nested `GradleBuild` in another file, the rest overload ties within
+  one type. `unused` 2,054 -> 2,052 with none new; `sanity --all`
+  unchanged.
+
 ## [1.9.20] — 2026-10-14
 
 ### Fixed
