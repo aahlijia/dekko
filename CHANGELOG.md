@@ -9,6 +9,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.17] — 2026-10-14
+
+### Fixed
+- **An unqualified C++ type name is looked up from where it's
+  written.** `Status s;` in a `tensorflow::data` file read `Status` as
+  the nearest type of that name by file path, which was
+  `tensorflow::experimental::cc::Status`, so every `s.ok()` on an
+  `absl::Status` local landed on that class. A type name written
+  without a scope in front of it is now looked up in C++ order: a
+  `using ns::Name;` in the file, then a type of that name in the same
+  file, then the one in the innermost scope the file's own
+  definitions sit in. `Status` there is `tensorflow`'s alias of
+  `absl::Status`, so the call goes external; `node->name()` on a
+  `Node*` in a `tensorflow::` file reaches the graph's
+  `tensorflow::Node`, not `tensorflow::data::model::Node`. A name with
+  a scope in front of it (`model::Node`) keeps its by-path reading,
+  and when no visible scope declares the name (a `using namespace`
+  directive, which isn't read) the old pick stands. tensorflow: +592 /
+  -422 call sites (every lost site read was wrong before), ambiguous
+  rows 136,021 -> 135,360, `experimental.cc.Status.ok` 157 -> 19
+  callers, `unused` unchanged at 36,471.
+
 ## [1.9.16] — 2026-10-14
 
 ### Fixed

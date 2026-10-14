@@ -7573,7 +7573,7 @@ def _walk_type_tokens(stripped: str, path: str, ctx: _WalkCtx) -> WalkResult:
     # (``WalkResult.type_args``), though the text naming it has no ``<``.
     foreign = _WALK_FOREIGN
     for token, _ in _typed_param_token_candidates(stripped):
-        found = _walk_type_token(token, path, ctx)
+        found = _walk_text_token(token, stripped, path, ctx)
         if found and any(_is_cpp_alias(s) for s in found):
             args = _cpp_template_args(stripped, token)
             through = _walk_cpp_aliases(found, args, ctx)
@@ -7593,6 +7593,78 @@ def _walk_type_tokens(stripped: str, path: str, ctx: _WalkCtx) -> WalkResult:
         return WalkResult("typed", tuple(layers), is_open)
 
     return _WALK_UNKNOWN if is_open else foreign
+
+
+def _walk_text_token(
+    token: str, stripped: str, path: str, ctx: _WalkCtx
+) -> tuple[Symbol, ...] | None:
+    """The types one ``token`` of ``stripped`` names (as
+    ``_walk_type_token``), an unqualified C/C++ token looked up from
+    its scope first (``_walk_cpp_bare_token``)."""
+    found = _walk_type_token(token, path, ctx)
+    if _site_language(path) not in _CPP_FAMILY or re.search(
+        r"::\s*" + re.escape(token) + r"\b", stripped
+    ):
+        return found
+    bare = _walk_cpp_bare_token(token, path, ctx)
+    if bare is None:
+        return found
+
+    return bare or None
+
+
+def _walk_cpp_bare_token(
+    token: str, path: str, ctx: _WalkCtx
+) -> tuple[Symbol, ...] | None:
+    """The C/C++ types an unqualified ``token`` names from ``path``, in
+    C++ lookup order.
+
+    1. The file's own ``using ns::Name;`` for it, read as that written
+       path (``()`` when the path leads outside the repo).
+    2. The types of that name in the same file.
+    3. The types and visible aliases whose scope is the innermost of
+       the scopes ``path``'s definitions sit in (or global), so
+       ``Status`` in a ``tf::data`` file is ``tf``'s alias, not
+       ``tf::exp``'s class.
+
+    Returns ``None`` when no candidate's scope is visible (a ``using
+    namespace`` directive, which this doesn't read), so the by-path
+    reading stands.
+    """
+    for decl in ctx.index.get(_CPP_FILE_USING_KEY + path, ()):
+        if decl.name == token:
+            used = _walk_cpp_written_type(decl.qualname, path, ctx)
+            if used is None or used.kind == "unknown":
+                return None
+            return used.layers[0] if used.kind == "typed" else ()
+    types = [
+        s
+        for s in (
+            *ctx.index.get(token, ()),
+            *ctx.index.get(_CPP_ALIAS_KEY + token, ()),
+        )
+        if _is_cpp_type(s)
+        and (not _is_cpp_alias(s) or _cpp_alias_visible(s, path, ctx, True))
+    ]
+    same = tuple(s for s in types if s.path == path)
+    if same or not types:
+        return same or None
+    scopes = {
+        "",
+        *(s.name for s in ctx.index.get(_CPP_FILE_SCOPES_KEY + path, ())),
+    }
+    best: list[Symbol] = []
+    best_len = -1
+    for sym in types:
+        prefix = [s for s in _PATH_SPLIT.split(sym.qualname) if s][:-1]
+        if ".".join(prefix) not in scopes:
+            continue
+        if len(prefix) > best_len:
+            best, best_len = [sym], len(prefix)
+        elif len(prefix) == best_len:
+            best.append(sym)
+
+    return tuple(_walk_nearest(best, path)) or None
 
 
 # A C/C++ type written as a path: an optional leading ``::``, the
@@ -11091,6 +11163,11 @@ _CPP_ALIAS_KEY = "::cpp-alias::"
 # dotted qualname prefix, the stand-in's ``name``), for
 # ``_cpp_innermost``.
 _CPP_FILE_SCOPES_KEY = "::cpp-file-scopes::"
+# Reserved ``index`` namespace holding stand-ins: ``_CPP_FILE_USING_KEY
+# + path`` has one per namespace-scope ``using ns::Name;`` in that C/C++
+# file (``name`` the declared name, ``qualname`` the written path), for
+# ``_walk_cpp_bare_token``.
+_CPP_FILE_USING_KEY = "::cpp-file-using::"
 
 # Reserved ``index`` namespace for C/C++ definitions whose arity a
 # prototype declares: ``_CPP_DECLARED_KEY + sym.id`` holds one copy of
@@ -11148,9 +11225,10 @@ _UNNAMED_CTOR_LANGUAGES = frozenset(_UNNAMED_CTOR_NAMES)
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
     ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
-    ``_CPP_FILE_SCOPES_KEY``, ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``,
-    ``_EXTENDS_KEY``, ``_RUST_RENAMED_KEY``, ``_RUST_DOT_KEY`` and
-    ``_SUPERS_KEY`` entries."""
+    ``_CPP_FILE_SCOPES_KEY``, ``_CPP_FILE_USING_KEY``,
+    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY``,
+    ``_RUST_RENAMED_KEY``, ``_RUST_DOT_KEY`` and ``_SUPERS_KEY``
+    entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -11163,6 +11241,7 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     for fm in files:
         for entry in fm.cpp_using:
             _index_cpp_using(entry, index)
+        _index_cpp_file_using(fm, index)
         _index_cpp_file_scopes(fm, index)
     _index_cpp_declared(files, index)
     _index_constructions(files, index)
@@ -11189,6 +11268,18 @@ def _index_symbol(sym: Symbol, index: dict[str, list[Symbol]]) -> None:
         for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
             if scope:
                 index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
+
+
+def _index_cpp_file_using(fm: FileMap, index: dict[str, list[Symbol]]) -> None:
+    """File ``fm``'s ``using ns::Name;`` declarations under
+    ``_CPP_FILE_USING_KEY``, whatever namespace they sit in."""
+    for entry in fm.cpp_using:
+        written = entry.partition("=")[2]
+        name = written.rsplit("::", 1)[-1]
+        if "::" in written and name:
+            index.setdefault(_CPP_FILE_USING_KEY + fm.path, []).append(
+                _stand_in(name, qualname=written)
+            )
 
 
 def _index_cpp_file_scopes(
