@@ -1583,3 +1583,48 @@ def test_a_second_self_method_elsewhere_keeps_incremental_equal_to_full(
     edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
     pair = ("src/lib.rs::use_it", "src/lib.rs::D.delete")
     assert (pair in edges) == (before == "two")
+
+
+_RUST_SRC = {
+    "crates/api/Cargo.toml": (
+        '[package]\nname = "api"\n\n[lib]\npath = "src/api.rs"\n'
+    ),
+    "crates/api/src/api.rs": (
+        "pub struct Builder;\n"
+        "impl Builder {\n"
+        "    pub fn header(self, k: &str) -> Self {\n"
+        "        self\n"
+        "    }\n"
+        "}\n"
+    ),
+    "crates/app/Cargo.toml": (
+        '[package]\nname = "app"\n\n[lib]\npath = "src/app.rs"\n'
+    ),
+    "crates/app/src/app.rs": (
+        'pub fn run() {\n    let r = make();\n    r.header("k");\n}\n'
+    ),
+}
+
+
+def test_a_new_cargo_dependency_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_RUST_SRC)
+    assert "crates/api/src/api.rs::Builder.header" not in _callee_ids(root)
+
+    manifest = root / "crates/app/Cargo.toml"
+    manifest.write_text(
+        manifest.read_text() + '\n[dependencies]\napi = { path = "../api" }\n'
+    )
+    # A manifest-only edit takes the unchanged-tree fast path, so touch
+    # a source file the call doesn't involve to get a real run.
+    other = root / "crates/api/src/api.rs"
+    other.write_text(other.read_text() + "// touched\n")
+    assert _build(root) is None
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert "crates/api/src/api.rs::Builder.header" in _callee_ids(root)
+
+    _map(root, "--full")
+    assert _graph_json(root) == incremental

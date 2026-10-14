@@ -9,6 +9,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.28] — 2026-10-14
+
+### Fixed
+- **A Rust method call can't land in a crate its own crate doesn't
+  depend on.** A value of a type only exists in a crate whose
+  dependency graph contains the type's crate, but a dot-call was
+  matched by name repo-wide, so the `http` crate's
+  `Request::builder().header(..)` chains landed on `extension_api`'s
+  `HttpRequestBuilder.header/body/method` (222 sites) from crates that
+  never depend on it, and `ExitStatus::code()` on `anthropic`'s
+  `ApiError.code`. A dot-call's pick, and each candidate an ambiguous
+  row keeps, now has to live in the caller's crate or one it reaches
+  through its `Cargo.toml` dependencies, dev and build ones included;
+  a pick ruled out is retried like a call that can't take the
+  argument count. A file's crate is its nearest manifest, two
+  manifests declaring one name are both reached, and a file under no
+  crate isn't judged. Adding a dependency now changes the resolve
+  cache's Cargo digest, so the next map re-resolves. zed: -452 caller
+  -> callee pairs (-549 sites), +3, ambiguous rows 73,448 -> 73,587
+  (picks ruled out that now tie among reachable candidates); `unused`
+  gains only the agent eval fixture's copy of
+  `Entity.resolve_inlay_hint`, whose caller now reaches the real
+  `LspStore`. Two `stdio_transport.rs` channel sends still land on the
+  same file's `StdioTransport.send`.
+
 ## [1.9.27] — 2026-10-14
 
 ### Fixed

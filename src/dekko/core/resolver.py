@@ -1344,6 +1344,9 @@ def resolve(
     import_ctx = _import_resolve_context(files, root, manifests)
     crates = load_cargo_crates(root) if root is not None else {}
     _index_rust_crates(crates, index)
+    _index_rust_reach(
+        load_cargo_reach(root) if root is not None else {}, index
+    )
     imports_by_file = _imports_by_file(
         files,
         workspace_pkgs,
@@ -3278,7 +3281,7 @@ def _rust_row_narrowed(
             c
             for c in candidates
             if c.kind in ("function", "method")
-            and not _rust_call_excludes(call, c)
+            and not _rust_call_excludes(call, c, index)
         ]
     else:
         return narrowed
@@ -4443,7 +4446,7 @@ def _pick_candidate_retried(
         if picked is None and _java_unanswerable(call, candidates):
             return _NOISE if repo_stems is not None else None
         if not isinstance(picked, Symbol) or not (
-            _rust_call_excludes(call, picked)
+            _rust_call_excludes(call, picked, index)
             or _python_call_excludes(call, picked, file_imports)
             or jvm_unreachable(call.path, picked)
             or _java_call_excludes(call, picked)
@@ -4465,7 +4468,38 @@ def _pick_candidate_retried(
             return _NOISE if repo_stems is not None else None
 
 
-def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
+def _rust_call_excludes(
+    call: _Referable, candidate: Symbol, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether a Rust call can't mean ``candidate``: its shape or
+    argument count rules it out (``_rust_call_shape_excludes``), or it
+    is a dot-call into a crate the caller's crate doesn't depend on
+    (``_rust_crate_unreachable``).
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidate: The symbol the ladder picked, or one an ambiguous
+            row keeps.
+        index: Bare symbol name to every symbol sharing it, with the
+            crate tables under ``_RUST_REACH_KEY``.
+
+    Returns:
+        True for a ``RawCall`` in a ``.rs`` file and a Rust symbol it
+        can't mean.
+    """
+    if (
+        not isinstance(call, RawCall)
+        or not call.path.endswith(".rs")
+        or candidate.language != "rust"
+    ):
+        return False
+
+    return _rust_call_shape_excludes(
+        call, candidate
+    ) or _rust_crate_unreachable(call, candidate, index)
+
+
+def _rust_call_shape_excludes(call: RawCall, candidate: Symbol) -> bool:
     """Whether a Rust call's shape or argument count rules out
     ``candidate``.
 
@@ -4493,20 +4527,15 @@ def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
     ``Foo::new(a, b)``. The path count is read here only.
 
     Args:
-        call: The raw call or reference being resolved.
-        candidate: The symbol the ladder picked.
+        call: The Rust call being resolved.
+        candidate: A Rust symbol it might mean.
 
     Returns:
-        True for a ``RawCall`` in a ``.rs`` file and a Rust function or
-        method it can't mean. A call whose arguments the extractor
-        couldn't count (``arg_count is None``) is judged by shape only.
+        True for a function or method the call can't mean. A call
+        whose arguments the extractor couldn't count (``arg_count is
+        None``) is judged by shape only.
     """
-    if (
-        not isinstance(call, RawCall)
-        or not call.path.endswith(".rs")
-        or candidate.language != "rust"
-        or candidate.kind not in ("function", "method")
-    ):
+    if candidate.kind not in ("function", "method"):
         return False
     params = candidate.params
     has_self = _rust_has_self(candidate)
@@ -4527,6 +4556,104 @@ def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
         return True
 
     return max_count is not None and call.arg_count > max_count
+
+
+class _RustReachMemo:
+    """Per-index lookups for ``_rust_crate_unreachable``: each path's
+    crate directory and each crate's reach as a set. Tied to the
+    ``_RUST_MANIFEST_KEY`` list it was filled from, so an index built
+    later starts it over.
+
+    Attributes:
+        manifests: The stand-in list the lookups were read against.
+        crate_of: File path to its crate directory, ``None`` for a path
+            under no crate.
+        reach: Crate directory to the crate directories it reaches.
+    """
+
+    def __init__(self) -> None:
+        self.manifests: list[Symbol] | None = None
+        self.crate_of: dict[str, str | None] = {}
+        self.reach: dict[str, frozenset[str] | None] = {}
+
+    def bind(self, manifests: list[Symbol]) -> None:
+        """Start over unless the lookups were read against
+        ``manifests``."""
+        if self.manifests is not manifests:
+            self.manifests = manifests
+            self.crate_of = {}
+            self.reach = {}
+
+
+_RUST_REACH_MEMO = _RustReachMemo()
+
+
+def _rust_crate_of(path: str, manifests: list[Symbol]) -> str | None:
+    """The directory of the nearest crate manifest above ``path``
+    (``manifests`` is deepest first), ``None`` under no crate."""
+    memo = _RUST_REACH_MEMO.crate_of
+    if path not in memo:
+        memo[path] = next(
+            (m.path for m in manifests if path.startswith(m.path + "/")),
+            None,
+        )
+
+    return memo[path]
+
+
+def _rust_crate_reach(
+    where: str, index: dict[str, list[Symbol]]
+) -> frozenset[str] | None:
+    """The crate directories the crate at ``where`` reaches, ``None``
+    when the index has no entry for it."""
+    memo = _RUST_REACH_MEMO.reach
+    if where not in memo:
+        stand_ins = index.get(_RUST_REACH_KEY + where)
+        memo[where] = (
+            frozenset(s.path for s in stand_ins) if stand_ins else None
+        )
+
+    return memo[where]
+
+
+def _rust_crate_unreachable(
+    call: RawCall, candidate: Symbol, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether a Rust dot-call's candidate lives in a crate the
+    caller's crate doesn't depend on, directly or not.
+
+    A value of a type can only exist in a crate whose dependency graph
+    contains the type's crate, so such a pick is never right. On zed,
+    the ``http`` crate's ``Request::builder().header(..)`` chains landed
+    on ``extension_api``'s ``HttpRequestBuilder.header`` from crates
+    that don't depend on it, and ``ExitStatus::code()`` on
+    ``anthropic``'s ``ApiError.code``. A file's crate is its nearest
+    manifest (a crate's ``tests/`` and ``benches/`` belong to it). A
+    path or bare call isn't judged (``use`` and crate paths already
+    narrow those), nor is a file under no crate.
+
+    Args:
+        call: The Rust call being resolved.
+        candidate: A Rust symbol it might mean.
+        index: The symbol index, with the crate tables.
+
+    Returns:
+        True when both files belong to crates and the caller's can't
+        reach the candidate's.
+    """
+    if not _rust_is_dot_call(call):
+        return False
+    manifests = index.get(_RUST_MANIFEST_KEY)
+    if not manifests:
+        return False
+    _RUST_REACH_MEMO.bind(manifests)
+    here = _rust_crate_of(call.path, manifests)
+    there = _rust_crate_of(candidate.path, manifests)
+    if here is None or there is None or here == there:
+        return False
+    reach = _rust_crate_reach(here, index)
+
+    return reach is not None and there not in reach
 
 
 def _rust_own_member_ruled_out(
@@ -6641,6 +6768,7 @@ def _reset_walk_memo() -> None:
         _PY_SUPERS_UNREAD,
     ):
         memo.clear()
+    _RUST_REACH_MEMO.bind([])
 
 
 class _WalkCtx(NamedTuple):
@@ -11655,6 +11783,12 @@ _RUST_DOT_KEY = "::rust-dot::"
 # HiLoWord for LPARAM``): the ones that can bring ``name`` to a value of
 # an outside type (``_walk_rust_param``).
 _RUST_TRAIT_REACH_KEY = "::rust-trait-reach::"
+# Reserved ``index`` namespaces holding stand-ins: ``_RUST_REACH_KEY +
+# dir`` has one per crate directory the crate at ``dir`` reaches
+# (``load_cargo_reach``), and ``_RUST_MANIFEST_KEY`` one per crate
+# directory, for the nearest-manifest lookup (``_rust_crate_reaches``).
+_RUST_REACH_KEY = "::rust-reach::"
+_RUST_MANIFEST_KEY = "::rust-manifests::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -11819,6 +11953,22 @@ def _index_rust_crates(
         stand_ins = [_stand_in(name, d) for d in sorted(dirs) if d]
         if stand_ins:
             index[_RUST_CRATE_KEY + name] = stand_ins
+
+
+def _index_rust_reach(
+    reach: dict[str, frozenset[str]], index: dict[str, list[Symbol]]
+) -> None:
+    """Record which crate directories each crate reaches
+    (``_RUST_REACH_KEY``) and every crate directory, deepest first
+    (``_RUST_MANIFEST_KEY``)."""
+    for where, dirs in reach.items():
+        index[_RUST_REACH_KEY + where] = [
+            _stand_in(d, d) for d in sorted(dirs)
+        ]
+    if reach:
+        index[_RUST_MANIFEST_KEY] = [
+            _stand_in(d, d) for d in sorted(reach, key=len, reverse=True)
+        ]
 
 
 def rust_renames(files: list[FileMap]) -> set[tuple[str, str]]:
@@ -12360,15 +12510,104 @@ def load_cargo_lib_roots(root: Path) -> dict[str, frozenset[str]]:
     return {name: frozenset(files) for name, files in roots.items()}
 
 
+_CARGO_DEP_KEY = re.compile(
+    r"\s*([A-Za-z0-9_\-]+)\s*(?:\.workspace)?\s*=\s*(.*)"
+)
+_CARGO_DEP_TABLE = re.compile(r".*dependencies\.([A-Za-z0-9_\-]+)$")
+_CARGO_DEP_RENAME = re.compile(r'package\s*=\s*"([^"]+)"')
+
+
+def _cargo_section_lines(body: str) -> list[str]:
+    """A section's lines after its header, up to an array-of-tables
+    header (``[[bin]]``), which ``_CARGO_SECTION`` doesn't split on."""
+    lines = []
+    for line in body.split("\n")[1:]:
+        if line.lstrip().startswith("["):
+            break
+        lines.append(line)
+    return lines
+
+
+def _cargo_dependencies(section: str, body: str) -> set[str]:
+    """The crate names one manifest section depends on, ``-`` read as
+    ``_``: every key of a ``*dependencies`` section (``name = ..``,
+    ``name.workspace = true``) and a ``[dependencies.name]`` table, each
+    under its ``package = ".."`` rename when it has one."""
+    deps = set()
+    lines = _cargo_section_lines(body)
+    table = _CARGO_DEP_TABLE.match(section)
+    if table:
+        renamed = _CARGO_DEP_RENAME.search("\n".join(lines))
+        deps.add(renamed.group(1) if renamed else table.group(1))
+    if section.endswith("dependencies"):
+        for line in lines:
+            key = _CARGO_DEP_KEY.match(line)
+            if key:
+                renamed = _CARGO_DEP_RENAME.search(key.group(2))
+                deps.add(renamed.group(1) if renamed else key.group(1))
+
+    return {dep.replace("-", "_") for dep in deps}
+
+
+def load_cargo_reach(root: Path) -> dict[str, frozenset[str]]:
+    """Every crate's directory with the crate directories it can reach:
+    itself and everything it depends on, directly or not.
+
+    A crate is a manifest with a ``[package]`` name; its dependencies
+    come from every ``*dependencies`` section, dev and build ones and
+    ``[target.'cfg(..)'.dependencies]`` included, kept when they name
+    a crate in the repo. Two manifests can declare one name (zed's lint
+    fixture is also ``gpui``): a dependency on it reaches both. A crate
+    at the repo root is left out, since its directory contains every
+    path.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Crate directory (repo-relative) to every crate directory it
+        reaches, itself included; empty for a repo with no crate.
+    """
+    names: dict[str, str] = {}
+    deps: dict[str, set[str]] = {}
+    for where, sections in _cargo_manifests(root):
+        named = dict(sections)
+        found = _CARGO_NAME.search(named.get("package", ""))
+        if found is None:
+            continue
+        names[where] = found.group(1).replace("-", "_")
+        deps[where] = set().union(
+            *(_cargo_dependencies(s, body) for s, body in sections)
+        )
+    dirs_by_name: dict[str, list[str]] = {}
+    for where, name in names.items():
+        dirs_by_name.setdefault(name, []).append(where)
+    reach: dict[str, frozenset[str]] = {}
+    for where in names:
+        if not where:
+            continue
+        seen, stack = {where}, [where]
+        while stack:
+            for dep in deps[stack.pop()]:
+                for there in dirs_by_name.get(dep, ()):
+                    if there not in seen:
+                        seen.add(there)
+                        stack.append(there)
+        reach[where] = frozenset(seen)
+
+    return reach
+
+
 def cargo_fingerprint(root: Path) -> str:
     """Digest of the repo's Rust crates, for cache invalidation.
 
     The cached call pass reads them to tell a ``use`` of a workspace
     crate from one of an outside crate, to narrow a
-    ``some_crate::name(..)`` path to that crate's directories, and to
-    walk a crate path from its lib root. Adding a crate or a path
-    dependency, renaming one, or moving a lib root moves no source
-    file and no symbol.
+    ``some_crate::name(..)`` path to that crate's directories, to walk
+    a crate path from its lib root, and to keep a dot-call inside the
+    crates its own crate depends on. Adding a crate or a dependency,
+    renaming one, or moving a lib root moves no source file and no
+    symbol.
 
     Args:
         root: Repository root.
@@ -12384,7 +12623,13 @@ def cargo_fingerprint(root: Path) -> str:
         [name, sorted(files)]
         for name, files in sorted(load_cargo_lib_roots(root).items())
     ]
-    return hashlib.sha256(json.dumps([table, libs]).encode()).hexdigest()
+    reach = [
+        [where, sorted(dirs)]
+        for where, dirs in sorted(load_cargo_reach(root).items())
+    ]
+    return hashlib.sha256(
+        json.dumps([table, libs, reach]).encode()
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
