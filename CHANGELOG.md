@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.35] — 2026-10-14
+
+### Fixed
+- **JS/TS `#private` fields type the calls made through them.** A
+  `#x` field was never recorded as a field, and the receiver walk
+  couldn't split `this.#disk` into segments, so `this.#disk.append(..)`
+  fell back to the name ladder: a tie with every other `append` in
+  the repo, or a call nobody owned. A `#x` field (`#disk:
+  DiskTaskOutput | null`, `#bus = new Bus()`) is now a field named
+  `#x`, and `this.#x.m(..)` / `this.#x?.m(..)` walk through its type
+  like any other field. claude-code: +7 edges at 11 sites, none lost,
+  ambiguous rows 2,125 -> 2,112 (`Map`/`Set` fields now go external);
+  `StreamWrapper.cleanup` gets its two callers and leaves `unused`
+  (1,287 -> 1,286, none new). cline: no change.
+
 ## [1.9.34] — 2026-10-14
 
 ### Fixed

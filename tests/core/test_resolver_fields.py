@@ -1024,3 +1024,46 @@ def test_rwlock_and_refcell_are_transparent(tmp_path: Path) -> None:
         "src/lib.rs::Caps.supports",
         "src/lib.rs::Keymap.add",
     }
+
+
+def test_private_name_field_types_its_receiver(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "client.ts": "export class Client { send() {} }\n",
+            "bus.ts": "export class Bus { send() {} }\n",
+            "user.ts": (
+                "import { Client } from './client';\n"
+                "import { Bus } from './bus';\n"
+                "export class User {\n"
+                "  #client: Client;\n"
+                "  readonly #bus = new Bus();\n"
+                "  a() { this.#client.send(); }\n"
+                "  b() { this.#bus.send(); }\n"
+                "  c() { this.#client?.send(); }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert _callees(g, "user.ts::User.a") == {"client.ts::Client.send"}
+    assert _callees(g, "user.ts::User.b") == {"bus.ts::Bus.send"}
+    assert _callees(g, "user.ts::User.c") == {"client.ts::Client.send"}
+    assert not _ambiguous(g, "user.ts::User.a")
+
+
+def test_js_private_name_field_types_its_receiver(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "client.js": "export class Client { send() {} }\n",
+            "bus.js": "export class Bus { send() {} }\n",
+            "user.js": (
+                "import { Client } from './client.js';\n"
+                "export class User {\n"
+                "  #client = new Client();\n"
+                "  a() { this.#client.send(); }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert _callees(g, "user.js::User.a") == {"client.js::Client.send"}

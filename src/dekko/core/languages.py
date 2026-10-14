@@ -936,7 +936,7 @@ _JS_THIS_ASSIGN_FIELD = """
 _JS_FIELD_QUERY = (
     """
 (field_definition
-  property: (property_identifier) @name
+  property: [(property_identifier) (private_property_identifier)] @name
   value: (_)? @init) @field
 """
     + _JS_THIS_ASSIGN_FIELD
@@ -948,7 +948,7 @@ _JS_FIELD_QUERY = (
 _TS_FIELD_QUERY = (
     """
 (public_field_definition
-  name: (property_identifier) @name
+  name: [(property_identifier) (private_property_identifier)] @name
   type: (type_annotation)? @type
   value: (_)? @init) @field
 

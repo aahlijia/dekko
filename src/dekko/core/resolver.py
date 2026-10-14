@@ -6726,7 +6726,8 @@ _WALK_SEGMENT_SPLIT = re.compile(r"->|::|\.")
 # methods.
 _BARE_FIELD_LANGUAGES = frozenset({"java", "kotlin", "cpp"})
 _WALK_PLAIN_NAME = re.compile(r"[A-Za-z_$][\w$]*\Z")
-_WALK_SEGMENT = re.compile(r"[A-Za-z_$][\w$]*(?:\(\))?\Z|\d+\Z")
+# A JS/TS private name (`this.#disk`) keeps its `#`, as its field does.
+_WALK_SEGMENT = re.compile(r"#?[A-Za-z_$][\w$]*(?:\(\))?\Z|\d+\Z")
 # Calls that hand back what they're called on (a lock guard, a cell
 # borrow, an unwrap, an awaited future), so the type walks through.
 _WALK_TRANSPARENT_CALLS = frozenset(

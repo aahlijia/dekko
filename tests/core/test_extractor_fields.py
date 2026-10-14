@@ -182,3 +182,47 @@ def test_go_receiver_stays_out_of_signatures_and_arity() -> None:
     assert signature(run) == "S.Run(x: int)"
     assert _outline_sig(run) == "Run(x: int)"
     assert _param_arity(run.params) == (1, 1)
+
+
+def _tmp_fields(
+    root: Path,
+    rel: str,
+    text: str,
+) -> dict[str, dict[str, Field]]:
+    (root / rel).write_text(text)
+    spec = spec_for_path(rel)
+    assert spec is not None
+    fm = extract_file(root, rel, spec)
+    return {
+        s.qualname: {f.name: f for f in s.fields}
+        for s in fm.symbols
+        if s.kind in TYPE_KINDS
+    }
+
+
+def test_ts_private_name_fields_keep_their_hash(tmp_path: Path) -> None:
+    f = _tmp_fields(
+        tmp_path,
+        "c.ts",
+        "class Client {}\n"
+        "class C {\n"
+        "  #client: Client;\n"
+        "  readonly #bus = new Client();\n"
+        "  plain: Client;\n"
+        "}\n",
+    )["C"]
+    assert f["#client"] == Field("#client", "Client", 3)
+    assert f["#bus"].type == "Client"
+    assert f["#bus"].inferred is True
+    assert "client" not in f
+    assert "plain" in f
+
+
+def test_js_private_name_field_is_a_field(tmp_path: Path) -> None:
+    f = _tmp_fields(
+        tmp_path,
+        "c.js",
+        "class Client {}\nclass C {\n  #client = new Client();\n}\n",
+    )["C"]
+    assert f["#client"].type == "Client"
+    assert f["#client"].inferred is True
