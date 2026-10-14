@@ -9,6 +9,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.33] — 2026-10-14
+
+### Fixed
+- **A JS/TS call on a parameter typed outside the repo no longer lands
+  on the repo's one method of that name.** Nothing read a plain
+  parameter's declared type, so `signal.throwIfAborted()` on `signal:
+  AbortSignal` reached cline's `AgentRuntime.throwIfAborted`, and a
+  pino `logger.debug(..)` reached the extension's `Logger.debug`. A
+  parameter whose type is outside the repo now sends its calls
+  external; one typed in the repo, untyped or generic is read as
+  before. The walk can't tell a script file's global repo type from
+  an outside one, so a type that names a repo type the file doesn't
+  import, or a path off an in-repo import, keeps today's reading.
+  A call chained off a bare call the file imports (`getSeg().segment(
+  x)`) is read by the imported function's declared return type, in
+  that function's own file, so `getGraphemeSegmenter().segment(..)`
+  (an `Intl.Segmenter`) no longer reaches claude-code's
+  `HighlightSegmenter.segment`, and `getProviderSettingsManager()
+  .getProviderSettings(..)` reaches its method. Two test doubles the
+  old edges reached by name now go external too (a vscode `Uri` stub
+  and a mocked `getStyle`). claude-code: -22 caller -> callee pairs
+  (-23 sites; `HighlightSegmenter.segment` 15 -> 0), ambiguous rows
+  2,152 -> 2,124; cline: -13 / +11 pairs (-25 / +13 sites), ambiguous
+  rows 3,132 -> 3,079; `unused` unchanged on both.
+
 ## [1.9.32] — 2026-10-14
 
 ### Fixed

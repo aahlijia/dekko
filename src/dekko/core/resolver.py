@@ -7114,8 +7114,9 @@ def _walk_declared_receiver(
     Java and Kotlin: a parameter or local declared with a type the walk
     can read, outside or in-repo (``_walk_jvm_declared``).
 
-    Rust: a typed parameter, kept only when its type is outside the repo
-    (``_walk_rust_param``).
+    Rust and JS/TS: a typed parameter, kept only when its type is outside
+    the repo (``_walk_outside_param``; Rust first checks the reading can
+    be trusted, ``_walk_rust_param``).
     """
     local = _walk_local_type(call, ctx)
     if local is not None:
@@ -7129,6 +7130,11 @@ def _walk_declared_receiver(
         return _walk_python_self(name, call, caller, ctx)
     if language == "rust":
         return _walk_rust_param(name, call, caller, ctx)
+    if language in _JS_FAMILY:
+        param = _walk_param(caller, name)
+        if param is None or _js_param_names_repo(param.type, call.path, ctx):
+            return None
+        return _walk_outside_param(name, caller, ctx)
     if language in _CPP_FAMILY:
         param = _walk_param(caller, name)
         if param is None or not param.type:
@@ -7162,6 +7168,75 @@ def _walk_rust_param(
     if param is None or not param.type:
         return None
     if _rust_param_abstains(param.type, call, ctx):
+        return None
+
+    return _walk_outside_param(name, caller, ctx)
+
+
+_JS_TYPE_HEAD = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*")
+_JS_TYPE_ARGS = re.compile(r"<[^<>]*>")
+
+
+def _js_param_names_repo(text: str | None, path: str, ctx: _WalkCtx) -> bool:
+    """Whether a JS/TS parameter type may name a repo type the walk
+    can't read.
+
+    The walk reads a name the file neither imports nor defines as a
+    global, which a module file can only mean. A script file (no
+    ``import``/``export``) also sees every other script's top-level
+    types, so a repo type of that name may be what it means. And a
+    dotted path off an in-repo import (``p: NS.Thing`` with ``NS`` from
+    the repo's own namespace) is the repo's whatever the walk made of it.
+    Type arguments don't count: ``Map<string, Rule>`` is still ``Map``.
+    """
+    if not text:
+        return False
+    while True:
+        stripped = _JS_TYPE_ARGS.sub("", text)
+        if stripped == text:
+            break
+        text = stripped
+    imports = ctx.imports_by_file.get(path, {})
+    for token in _JS_TYPE_HEAD.findall(text):
+        imp = imports.get(token)
+        if imp is not None:
+            if _js_import_in_repo(imp):
+                return True
+            continue
+        if any(
+            s.kind in TYPE_KINDS and s.language in _JS_FAMILY
+            for s in ctx.index.get(token, ())
+        ):
+            return True
+
+    return False
+
+
+def _js_import_in_repo(imp: Import) -> bool:
+    """Whether a JS/TS import binding comes from the repo: its specifier
+    was followed to a repo file, is relative, or names a workspace
+    package. (A scoped package such as ``@playwright/test`` is outside
+    however its last segment reads.)"""
+    return (
+        bool(getattr(imp, "origins", ()))
+        or imp.source.startswith(".")
+        or isinstance(imp, _WorkspaceImport)
+    )
+
+
+def _walk_outside_param(
+    name: str, caller: Symbol, ctx: _WalkCtx
+) -> WalkResult | None:
+    """The caller's parameter ``name``, walked only to call it outside.
+
+    ``signal.throwIfAborted()`` on ``signal: AbortSignal`` or
+    ``logger.debug(..)`` on a pino ``logger: PinoLogger`` can only reach
+    the outside type's method. A ``foreign`` reading is the verdict; any
+    other leaves the receiver to the rungs that already read a parameter
+    typed in the repo.
+    """
+    param = _walk_param(caller, name)
+    if param is None or not param.type:
         return None
     result, _ = _walk_param_type(param, None, caller, ctx)
     if result.kind != "foreign":
@@ -7744,21 +7819,48 @@ def _walk_bare_call(
     ctx: _WalkCtx,
 ) -> WalkResult:
     """A bare call at hop zero: a method of the caller's container, else
-    a same-file function, typed by its declared return type."""
+    a same-file function, typed by its declared return type.
+
+    In JS/TS, a name the file doesn't define is followed through its
+    import (``_walk_imported_function``), and the function's return type
+    is read in the function's own file: ``getFocusManager(node)`` names
+    ``FocusManager``, which only the defining file imports.
+    """
     container = _walk_container(caller, ctx)
     if container.kind == "typed":
         result = _walk_call(container, name, ctx)
         if result.kind != "unknown":
             return result
-    local = [
-        s
-        for s in ctx.by_name_path.get((name, path), ())
-        if s.kind == "function" and s.returns
-    ]
+    defined = ctx.by_name_path.get((name, path), ())
+    local = [s for s in defined if s.kind == "function" and s.returns]
+    if not defined and _site_language(path) in _JS_FAMILY:
+        imported = _walk_imported_function(name, path, ctx)
+        if imported is not None:
+            return _walk_type_text(imported.returns or "", imported.path, ctx)
     if len(local) != 1:
         return _WALK_UNKNOWN
 
     return _walk_type_text(local[0].returns or "", path, ctx)
+
+
+def _walk_imported_function(
+    name: str, path: str, ctx: _WalkCtx
+) -> Symbol | None:
+    """The one top-level function with a declared return type that
+    ``path``'s in-repo import of ``name`` brings in."""
+    imp = ctx.imports_by_file.get(path, {}).get(name)
+    if imp is None or not _import_is_in_repo(imp, ctx.repo_stems):
+        return None
+    found = [
+        s
+        for s in ctx.index.get(imp.name or name, ())
+        if s.kind == "function"
+        and s.returns
+        and "." not in s.qualname
+        and _module_matches(imp.source, s.path)
+    ]
+
+    return found[0] if len(found) == 1 else None
 
 
 def _walk_is_self(name: str, path: str) -> bool:
