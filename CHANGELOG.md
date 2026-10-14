@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.30] — 2026-10-14
+
+### Fixed
+- **A bare JS/TS call no longer lands on a class method.** In
+  JavaScript and TypeScript a method (a class member, an object-literal
+  method, an interface member) is only reachable through a receiver; a
+  bare `f()` names a local, a parameter, an import or a module-level
+  function. The ladder didn't know that, so a `useState` setter called
+  `setError` took claude-code's one `AwsAuthStatusManager.setError`
+  (60 sites in 21 files), a `useContext` binding `writeRaw` took
+  `Ink.writeRaw`, and `getSessionId()` inside `QueryEngine` took the
+  class's own `getSessionId` method instead of the function the file
+  imports. A bare JS/TS call's candidates now leave methods out; a
+  renamed import still resolves through its alias, and Java/Kotlin
+  bare calls, which do name the enclosing class's members, are
+  unchanged. claude-code: -43 / +2 caller -> callee pairs (-106 / +17
+  sites), the 15 `getSessionId()` calls now on `bootstrap/state.ts`;
+  cline: -18 pairs (-22 sites), ambiguous rows 3,484 -> 3,464 (local
+  `unsubscribe()` calls no longer tie two adapters' methods).
+
 ## [1.9.29] — 2026-10-14
 
 ### Fixed

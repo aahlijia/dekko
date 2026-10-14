@@ -3107,7 +3107,9 @@ def _resolve_call(
     ):
         return
 
-    candidates = _language_filtered(call, index.get(call.name, []))
+    candidates = _bare_js_reachable(
+        call, _language_filtered(call, index.get(call.name, []))
+    )
     if not candidates:
         alias = _language_filtered(
             call, _alias_candidates(call, file_imports, index)
@@ -3129,7 +3131,9 @@ def _resolve_call(
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
-    same_file = by_name_path.get((call.name, call.path), [])
+    same_file = _bare_js_reachable(
+        call, by_name_path.get((call.name, call.path), [])
+    )
     scoped = _written_scope_match(call, candidates, index, same_file)
     if scoped is not None:
         if scoped.trusted and len(scoped.candidates) == 1:
@@ -3193,6 +3197,30 @@ def _resolve_call(
         call, candidates, index, file_imports, repo_stems
     )
     _record_ambiguous(caller_id, call.name, disclosed, ambiguous)
+
+
+def _bare_js_call(call: RawCall) -> bool:
+    """Whether ``call`` is a JS/TS call written with no receiver.
+
+    A JS or TS method (a class member, an object-literal method, an
+    interface member) is only reachable through a receiver. A bare
+    ``f()`` names a binding in lexical scope (a local, a parameter, an
+    import or a module-level function), never a member, so its
+    candidates are read without methods: a ``useState`` setter called
+    ``setError`` isn't the repo's one ``Mgr.setError``, and
+    ``getSessionId()`` inside a class with its own ``getSessionId``
+    method is the imported function. Java and Kotlin bare calls do name
+    the enclosing class's members, so they are left alone.
+    """
+    return _written_bare(call) and _site_language(call.path) in _JS_FAMILY
+
+
+def _bare_js_reachable(call: RawCall, symbols: list[Symbol]) -> list[Symbol]:
+    """``symbols`` without methods when ``call`` is a bare JS/TS call."""
+    if not _bare_js_call(call):
+        return symbols
+
+    return [s for s in symbols if s.kind != "method"]
 
 
 def _ambiguous_candidates(
