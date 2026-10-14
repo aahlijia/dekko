@@ -6130,6 +6130,35 @@ _RUST_STD_METHOD_NAMES = frozenset(
     }
 )  # fmt: skip
 
+# Rust std method names that are ordinary method names elsewhere, so
+# consulted only for a call in a ``.rs`` file. zed defines each exactly
+# once, and with no type for the receiver the lone in-repo method took
+# every call by that name; a sample of each name's remaining calls was
+# wrong every time:
+#
+# - ``get_mut`` (``WatchPaths``) and ``contains_key`` (sum_tree's
+#   ``TreeMap``): ``HashMap``/``BTreeMap``/``HashSet`` and
+#   ``serde_json`` map values built by untyped ``let``s.
+# - ``to_path_buf`` (``SanitizedPath``): ``Path``/``PathBuf`` values
+#   from call results (``dir.path().to_path_buf()``).
+# - ``len_utf8`` (gpui's ``WrapBoundaryCandidate``): ``char`` values.
+# - ``random_range``/``random_bool`` (the scheduler's ``SharedRng``):
+#   ``rand`` RNGs; the right calls sit in the defining file and resolve
+#   on the same-file rung before this guard.
+# - ``saturating_add`` (settings_ui's ``NumberFieldType``, a trait the
+#   integer types implement): integer arithmetic; its one right call is
+#   in the same file.
+#
+# ``abs``, ``len_utf16``, ``signum`` and ``pow`` stay out: their lone
+# owners (gpui's ``Pixels``, ``ChunkSlice``) have real callers through
+# untyped values too, and the guard would drop those with the rest.
+_RUST_STD_ONLY_METHOD_NAMES = frozenset(
+    {
+        "get_mut", "contains_key", "to_path_buf", "len_utf8",
+        "random_range", "random_bool", "saturating_add",
+    }
+)  # fmt: skip
+
 # C++ standard-container, ``std::optional``/``std::pair`` and
 # ``absl::Status`` members. Consulted only for a call in a C/C++ file
 # (``size``/``status``/``message`` are everyday method names in every
@@ -6303,7 +6332,9 @@ def is_guarded_method_name(name: str, path: str = "") -> bool:
     receiver call (``x.name(...)``, receiver not exactly ``self``/
     ``this``) in any language: built-in methods, chain-builder methods,
     Rust std methods, Java assertions and ``build``; plus, when
-    ``path`` is a C/C++ file, the C++ standard-library members. Such a
+    ``path`` is a C/C++ file, the C++ standard-library members, and
+    when it is a Rust file, the Rust std names that are everyday
+    method names elsewhere. Such a
     call goes external however many same-named repo symbols exist, so
     it never shows up as ambiguous either. ``unused``'s dispatch check
     reads this, the one copy of the lists, to see those calls as
@@ -6312,7 +6343,8 @@ def is_guarded_method_name(name: str, path: str = "") -> bool:
     Args:
         name: A call's bare method name.
         path: The call's (or the candidate symbol's) file; only a
-            C/C++ path adds the C++ list.
+            C/C++ path adds the C++ list, and only a ``.rs`` path the
+            Rust-only list.
 
     Returns:
         True when the noise guard sends a receiver call with this name
@@ -6325,6 +6357,7 @@ def is_guarded_method_name(name: str, path: str = "") -> bool:
         or name in _JAVA_ASSERTION_METHOD_NAMES
         or name in _BUILDER_METHOD_NAMES
         or (name in _CPP_STD_METHOD_NAMES and path.endswith(_CPP_EXTENSIONS))
+        or (name in _RUST_STD_ONLY_METHOD_NAMES and path.endswith(".rs"))
     )
 
 

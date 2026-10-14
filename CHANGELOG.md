@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.29] — 2026-10-14
+
+### Fixed
+- **A Rust std method call on an untyped value no longer lands on the
+  repo's one method of that name.** `get_mut`, `contains_key`,
+  `to_path_buf`, `len_utf8`, `random_range`, `random_bool` and
+  `saturating_add` each have exactly one in-repo owner in zed, so a
+  call on an untyped `let`, a closure parameter or a call result took
+  it by name: `HashMap`/`serde_json` maps on `WatchPaths.get_mut` and
+  sum_tree's `TreeMap.contains_key`, `Path` values on
+  `SanitizedPath.to_path_buf`, `char`s on `WrapBoundaryCandidate.
+  len_utf8`, rand RNGs on the scheduler's `SharedRng`. These names now
+  join the Rust std list the noise guard reads, for `.rs` calls only
+  (they are ordinary method names elsewhere); a typed receiver, an
+  exact `self` and a same-file pick still resolve. zed: -608 caller ->
+  callee pairs (-866 sites), none gained; `WatchPaths.get_mut` 206 ->
+  5 sites, `TreeMap.contains_key` 214 -> 2, `SanitizedPath.
+  to_path_buf` 243 -> 3; `unused` unchanged. `abs` stays off the list:
+  gpui's `Pixels.abs` has real callers through untyped values, so its
+  86 sites, mostly float arithmetic, remain.
+
 ## [1.9.28] — 2026-10-14
 
 ### Fixed
