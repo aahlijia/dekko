@@ -761,6 +761,10 @@ def name_delta(
     )
 
 
+# A same-qualname collision suffix on an id (``C.of#2``).
+_OVERLOAD_SUFFIX = re.compile(r"#\d+$")
+
+
 def resolved_id_name(symbol_id: str) -> str:
     """Bare ``Symbol.name`` a resolved symbol id's qualname ends in.
 
@@ -783,11 +787,13 @@ def resolved_id_name(symbol_id: str) -> str:
             *callees*/*candidates* are ever looked up this way.
 
     Returns:
-        The bare name, with any ``#N`` suffix stripped.
+        The bare name, with any ``#N`` suffix stripped. Only a numeric
+        suffix goes: an ES private method's name keeps its own ``#``
+        (``C.#m`` is ``#m``).
     """
     _, _, qualname = symbol_id.partition("::")
     tail = qualname.rsplit(".", 1)[-1]
-    return tail.partition("#")[0]
+    return _OVERLOAD_SUFFIX.sub("", tail)
 
 
 def alias_original_name(source: str) -> str:

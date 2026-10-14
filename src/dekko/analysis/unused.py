@@ -331,6 +331,29 @@ def _used_keys_types(index: MapIndex) -> set[tuple[str, str]]:
     return used
 
 
+_JS_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
+
+
+def _used_keys_private_reads(index: MapIndex) -> set[tuple[str, str]]:
+    """``(path, qualname)`` keys of ES private members read in their file.
+
+    A ``#x`` name is reachable only inside its class body, so a read
+    of it in the same file is the class's own use, typically a handler
+    passed by reference (``this.#onExit.bind(this)``). Unlike a public
+    property read, which is only evidence (the name may belong to any
+    of several definitions), this one has a single possible target.
+    """
+    used: set[tuple[str, str]] = set()
+    for name, reads in index.reads_by_name.items():
+        if not name.startswith("#"):
+            continue
+        read_paths = {read.reader.split("::", 1)[0] for read in reads}
+        for sym in index.symbols_by_name.get(name, ()):
+            if sym.language in _JS_LANGUAGES and sym.path in read_paths:
+                _mark_used(used, sym)
+    return used
+
+
 def _used_keys(index: MapIndex) -> set[tuple[str, str]]:
     """``(path, qualname)`` keys kept alive by any evidence source.
 
@@ -354,7 +377,11 @@ def _used_keys(index: MapIndex) -> set[tuple[str, str]]:
     Returns:
         The union of every used key implied by any evidence source.
     """
-    return _used_keys_callables(index) | _used_keys_types(index)
+    return (
+        _used_keys_callables(index)
+        | _used_keys_types(index)
+        | _used_keys_private_reads(index)
+    )
 
 
 STATUS_FLAGGED = "flagged"
@@ -626,8 +653,12 @@ def _has_property_read(sym: Symbol, index: MapIndex) -> bool:
     guarded-name rule sets) or when ``sym`` itself is an object-literal
     member, the shape reads reach. A lone free function whose name
     happens to be read off some unrelated object is ordinary unused
-    code.
+    code. An ES private name (``#x``) is never evidence here: a read in
+    its own file already counts as a use (``_used_keys_private_reads``),
+    and one anywhere else can't reach it.
     """
+    if sym.name.startswith("#"):
+        return False
     if not index.reads_by_name.get(sym.name):
         return False
     if sym.in_literal:

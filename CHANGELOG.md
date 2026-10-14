@@ -9,6 +9,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.34] — 2026-10-14
+
+### Fixed
+- **JS/TS `#private` methods are symbols now.** tree-sitter names a
+  `#x` member with its own node type, which no definition query
+  asked for, so `static #output(..)` in cline's `Logger` was never a
+  symbol: `Logger.error` and the other five log methods showed no
+  callees, the calls inside `#output` were credited to the class, and
+  `query symbol` found nothing. A `#x` method is now a symbol named
+  `#x` (the `#` kept, since `#x` and `x` are different members), is
+  never part of an exported class's public surface, and `this.#x(..)`
+  / `C.#x(..)` resolve to it. A `#x` read in its own file
+  (`this.#onExit.bind(this)`) counts as a use in `unused`, since a
+  private name is reachable only inside its class. The resolve cache
+  reads `#x` as the name of an id like `C.#x` (it used to read an
+  empty name, so a cached edge into one never went stale), and
+  `sanity` quotes the grep command it prints, so a pasted `#x`
+  pattern isn't read as a shell comment. claude-code: 26 new symbols,
+  +50 / -18 edges (the 24 lost sites moved into the `#method` that
+  makes them), `unused` 1,288 -> 1,287 with none new; cline:
+  `Logger.#output` has its 6 callers.
+
 ## [1.9.33] — 2026-10-14
 
 ### Fixed

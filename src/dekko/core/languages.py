@@ -804,7 +804,8 @@ _JS_REFERENCE_BASE = """
 # no separate pattern. A subscript (``cmd["dyn"]``) stays out: the
 # key is a string, not a name.
 _JS_READ_QUERY = """
-(member_expression property: (property_identifier) @read) @site
+(member_expression
+  property: [(property_identifier) (private_property_identifier)] @read) @site
 (object_pattern (shorthand_property_identifier_pattern) @read)
 (pair_pattern key: (property_identifier) @read)
 """
@@ -983,7 +984,7 @@ JAVASCRIPT = LanguageSpec(
   parameters: (formal_parameters) @params) @def
 
 (method_definition
-  name: (property_identifier) @name
+  name: [(property_identifier) (private_property_identifier)] @name
   parameters: (formal_parameters) @params) @def
 
 (variable_declarator
@@ -1104,7 +1105,7 @@ _TS_DEFINITIONS = """
   return_type: (type_annotation)? @ret) @def
 
 (method_definition
-  name: (property_identifier) @name
+  name: [(property_identifier) (private_property_identifier)] @name
   parameters: (formal_parameters) @params
   return_type: (type_annotation)? @ret) @def
 

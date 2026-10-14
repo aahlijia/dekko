@@ -1006,6 +1006,10 @@ def _is_exported(language: str, def_node: Node) -> bool:
     if language == "kotlin":
         return not _kotlin_restricted(def_node)
     if language in ("javascript", "typescript", "tsx"):
+        name = def_node.child_by_field_name("name")
+        if name is not None and name.type == "private_property_identifier":
+            return False
+
         return _ancestor_is(def_node, "export_statement", depth=4)
     return False
 
