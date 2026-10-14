@@ -9,6 +9,33 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.16] — 2026-10-14
+
+### Fixed
+- **A C++ `using`/`typedef` alias is read through to the type it
+  names.** dekko made no symbol for `using SumOpConstModel =
+  BaseConstOpModel<..>;` or `typedef Impl Handle;`, so a local or
+  parameter declared with an alias read as a type from outside the
+  repo, and its calls went external: tflite's op-model tests lost
+  `m.Invoke()`, `m.GetOutputShape()` and the rest. Aliases are symbols
+  now (kind `type_alias`, shown by `outline`, `search` and `query
+  symbol`), and the type walk reads one through to its target in the
+  alias's own file. An alias template's arguments replace its
+  parameters, so `AutoReleasePtr<TensorHandle>` (`std::unique_ptr<T,
+  AutoReleaser<T>>`) is a `TensorHandle`, and an alias of an outside
+  template (`using EdgeShapes = absl::flat_hash_map<..>`) is read as
+  that template. Only the type walk sees an alias: no call, reference,
+  heritage clause or member lookup lands on one, so a class's `typedef
+  X Ref;` doesn't catch `h->Ref()`. An alias in a source file is
+  visible only from that file, and one read by bare name only from a
+  file inside its scope, so a kernel's `typedef GPUDevice Device;`
+  doesn't retype `Device*` everywhere. `unused` never lists a C/C++
+  alias (the map records no C/C++ type use by name). Every C++ file
+  re-extracts once after the upgrade. tensorflow: 3,426 aliases, +981 /
+  -156 call sites (every lost site read was wrong before), ambiguous
+  rows 136,144 -> 136,021, `SingleOpModel.Invoke` 1,872 -> 1,999
+  callers, `unused` 36,581 -> 36,471.
+
 ## [1.9.15] — 2026-10-14
 
 ### Fixed

@@ -7537,10 +7537,10 @@ def _walk_type_text_uncached(
     (``list[X]``, ``std::vector<X>``, ``map[K]V``), a type under a
     module or crate outside the repo, or a text with no in-repo token
     is ``foreign``. A text that says nothing (``any``) is ``unknown``.
-    Otherwise each token of the wrapper chain
-    (``_typed_param_token_candidates``) that names an in-repo type
-    becomes a layer. A C/C++ text written with a scope is read by that
-    whole path first (``_walk_cpp_written_type``).
+    Otherwise each token of the wrapper chain that names an in-repo
+    type becomes a layer (``_walk_type_tokens``). A C/C++ text written
+    with a scope is read by that whole path first
+    (``_walk_cpp_written_type``).
     """
     written = _walk_cpp_written_type(text, path, ctx)
     if written is not None:
@@ -7554,10 +7554,37 @@ def _walk_type_text_uncached(
         return _walk_nested_type(stripped, path, ctx)
     if _walk_head_is_foreign(stripped, path, ctx):
         return _WALK_FOREIGN
+
+    return _walk_type_tokens(stripped, path, ctx)
+
+
+def _walk_type_tokens(stripped: str, path: str, ctx: _WalkCtx) -> WalkResult:
+    """The layers the tokens of an unwrapped type text name.
+
+    Each token of the wrapper chain (``_typed_param_token_candidates``)
+    that names an in-repo type becomes a layer, a C/C++ alias read
+    through to its target (``_walk_cpp_aliases``). No layer is
+    ``unknown`` when a token was a type parameter or an alias the walk
+    can't read, else ``foreign``.
+    """
     layers: list[tuple[Symbol, ...]] = []
     is_open = False
+    # An alias of an outside template stays a template
+    # (``WalkResult.type_args``), though the text naming it has no ``<``.
+    foreign = _WALK_FOREIGN
     for token, _ in _typed_param_token_candidates(stripped):
         found = _walk_type_token(token, path, ctx)
+        if found and any(_is_cpp_alias(s) for s in found):
+            args = _cpp_template_args(stripped, token)
+            through = _walk_cpp_aliases(found, args, ctx)
+            if through.kind == "typed":
+                layers.extend(through.layers)
+                is_open = is_open or through.open
+            elif through.kind == "unknown":
+                is_open = True
+            elif through.type_args:
+                foreign = through
+            continue
         if found:
             layers.append(found)
         elif found is not None or _walk_is_type_parameter(token):
@@ -7565,7 +7592,7 @@ def _walk_type_text_uncached(
     if layers:
         return WalkResult("typed", tuple(layers), is_open)
 
-    return _WALK_UNKNOWN if is_open else _WALK_FOREIGN
+    return _WALK_UNKNOWN if is_open else foreign
 
 
 # A C/C++ type written as a path: an optional leading ``::``, the
@@ -7589,12 +7616,17 @@ def _walk_cpp_written_type(
        several, the innermost a scope of ``path``'s own definitions
        reaches (``internal::View`` written in ``a::utils`` is
        ``a::utils::internal``'s, as C++ lookup reads it);
-    2. none, and a scope of the path is an in-repo type: a member
-       alias (``Analysis::Info``) the map can't see, so ``unknown``;
+    2. none, and a scope of the path is an in-repo type: a member the
+       map has no symbol for (``Analysis::Info``), so ``unknown``;
     3. none, and an in-repo type of that name sits under the head
        namespace (``tflite::Interp`` for ``tflite::impl::Interp``, a
        namespace-level alias): those types;
     4. otherwise ``foreign``. ``std::`` is always foreign.
+
+    An alias the path reaches (``Outer::Info`` for a class's ``using
+    Info = Real;``, visible from any file that can see the class) is
+    read through to what it names, with the written template
+    arguments.
 
     A template is judged by its outer path (``absl::Span<int>``),
     unless its outer name is a wrapper whose argument is the type
@@ -7625,7 +7657,15 @@ def _walk_cpp_written_type(
     name = match.group(3)
     if scopes[0] == "std":
         return _WALK_FOREIGN
-    types = [s for s in ctx.index.get(name, ()) if _is_cpp_type(s)]
+    types = [
+        s
+        for s in (
+            *ctx.index.get(name, ()),
+            *ctx.index.get(_CPP_ALIAS_KEY + name, ()),
+        )
+        if _is_cpp_type(s)
+        and (not _is_cpp_alias(s) or _cpp_alias_visible(s, path, ctx, False))
+    ]
     if not types:
         return None
     anchored = bool(match.group(1))
@@ -7645,7 +7685,152 @@ def _walk_cpp_written_type(
     if not found:
         return _WALK_FOREIGN
 
-    return WalkResult("typed", (tuple(_walk_nearest(found, path)),))
+    return _walk_cpp_found(found, text, name, path, ctx)
+
+
+def _walk_cpp_found(
+    found: list[Symbol], text: str, name: str, path: str, ctx: _WalkCtx
+) -> WalkResult:
+    """The verdict for the C/C++ types a written path reached: those
+    nearest ``path``, each alias among them read through to its target
+    with the template arguments ``text`` gives ``name``."""
+    found = _walk_nearest(found, path)
+    if any(_is_cpp_alias(s) for s in found):
+        args = _cpp_template_args(text, name)
+        return _walk_cpp_aliases(tuple(found), args, ctx)
+
+    return WalkResult("typed", (tuple(found),))
+
+
+# How many C/C++ aliases deep the walk reads before it gives up
+# (``unknown``), and the aliases being read right now, so a loop
+# (``using A = B; using B = A;``) ends instead of recursing.
+_CPP_ALIAS_DEPTH = 6
+_CPP_ALIAS_ACTIVE: set[str] = set()
+
+# Files whose aliases other files can see: an alias in a source file
+# is visible only from that file.
+_CPP_HEADER_SUFFIXES = (".h", ".hh", ".hpp", ".hxx", ".inc", ".inl")
+
+
+def _is_cpp_alias(sym: Symbol) -> bool:
+    """Whether ``sym`` is a C/C++ ``using``/``typedef`` alias."""
+    return sym.kind == "type_alias" and sym.language in _CPP_FAMILY
+
+
+def _cpp_alias_visible(
+    alias: Symbol, path: str, ctx: _WalkCtx, bare: bool
+) -> bool:
+    """Whether C++ lookup from ``path`` can see ``alias``.
+
+    An alias in a source file is visible only from that file. Read by
+    bare name (``bare``), an alias is visible only when its scope is
+    global or one ``path``'s own definitions sit in, so a class's
+    ``typedef GPUDevice Device;`` types ``Device`` inside the class and
+    nowhere else. A written path (``Outer::Info``) names its scope, so
+    only the first rule applies to it.
+    """
+    if alias.path != path and not alias.path.endswith(_CPP_HEADER_SUFFIXES):
+        return False
+    if not bare:
+        return True
+    segs = [s for s in _PATH_SPLIT.split(alias.qualname) if s]
+    if len(segs) == 1:
+        return True
+    scopes = {s.name for s in ctx.index.get(_CPP_FILE_SCOPES_KEY + path, ())}
+
+    return ".".join(segs[:-1]) in scopes
+
+
+def _cpp_template_args(text: str, name: str) -> tuple[str, ...]:
+    """The template arguments written after ``name`` in ``text``.
+
+    ``("Engine",)`` for ``TrtUniquePtrType<Engine>``; ``()`` when
+    ``name`` takes none there. Commas inside nested ``<>`` or ``()``
+    don't split an argument.
+    """
+    match = re.search(r"\b" + re.escape(name) + r"\s*<", text)
+    if match is None:
+        return ()
+    args: list[str] = []
+    depth = 0
+    start = match.end()
+    for i in range(match.end(), len(text)):
+        char = text[i]
+        if char in "<(":
+            depth += 1
+        elif char in ">)" and depth:
+            depth -= 1
+        elif char in ">)":
+            args.append(text[start:i].strip())
+            return tuple(a for a in args if a)
+        elif char == "," and not depth:
+            args.append(text[start:i].strip())
+            start = i + 1
+
+    return ()
+
+
+def _cpp_alias_target_text(alias: Symbol, args: tuple[str, ...]) -> str:
+    """What ``alias`` names with its template parameters replaced by
+    ``args``, in order (all at once, so an argument that happens to
+    share a parameter's name isn't replaced again)."""
+    target = alias.returns or ""
+    pairs = dict(zip((p.name for p in alias.params), args))
+    if not pairs:
+        return target
+    pattern = r"\b(" + "|".join(map(re.escape, pairs)) + r")\b"
+
+    return re.sub(pattern, lambda m: pairs[m.group(1)], target)
+
+
+def _walk_cpp_aliases(
+    found: tuple[Symbol, ...], args: tuple[str, ...], ctx: _WalkCtx
+) -> WalkResult:
+    """``found`` with each C/C++ alias read through to what it names.
+
+    An alias has no members, so a call on one is a call on its target,
+    read in the alias's own file, with ``args`` (the use's template
+    arguments) standing in for an alias template's parameters. The
+    types found join ``found``'s other types in one layer; an alias
+    whose target reads ``unknown`` makes the result open; when every
+    target is outside the repo, the result is ``foreign`` (with type
+    arguments when a target had them, so a chain off ``using Shapes =
+    std::vector<Shape>`` isn't held outside the repo). A loop or a
+    chain deeper than ``_CPP_ALIAS_DEPTH`` reads ``unknown``.
+    """
+    layer = [s for s in found if not _is_cpp_alias(s)]
+    unknown = False
+    type_args = False
+    for alias in found:
+        if not _is_cpp_alias(alias):
+            continue
+        if (
+            not alias.returns
+            or alias.id in _CPP_ALIAS_ACTIVE
+            or len(_CPP_ALIAS_ACTIVE) >= _CPP_ALIAS_DEPTH
+        ):
+            unknown = True
+            continue
+        target = _cpp_alias_target_text(alias, args)
+        _CPP_ALIAS_ACTIVE.add(alias.id)
+        try:
+            res = _walk_type_text_uncached(target, alias.path, ctx)
+        finally:
+            _CPP_ALIAS_ACTIVE.discard(alias.id)
+        if res.kind == "typed":
+            layer.extend(t for t in res.layers[0] if t not in layer)
+            unknown = unknown or res.open or len(res.layers) > 1
+        elif res.kind == "unknown":
+            unknown = True
+        elif "<" in target:
+            type_args = True
+    if layer:
+        return WalkResult("typed", (tuple(layer),), unknown)
+    if unknown:
+        return _WALK_UNKNOWN
+
+    return _WALK_FOREIGN_WITH_ARGS if type_args else _WALK_FOREIGN
 
 
 def _is_cpp_type(sym: Symbol) -> bool:
@@ -7790,7 +7975,17 @@ def _walk_type_token_uncached(
     name = _imported_original_name(token, imp)
     types = _language_filtered_at(
         path,
-        [s for s in ctx.index.get(name, ()) if s.kind in TYPE_KINDS],
+        [
+            s
+            for s in (
+                *ctx.index.get(name, ()),
+                *ctx.index.get(_CPP_ALIAS_KEY + name, ()),
+            )
+            if s.kind in TYPE_KINDS
+            and (
+                not _is_cpp_alias(s) or _cpp_alias_visible(s, path, ctx, True)
+            )
+        ],
         bare=False,
     )
     real = [
@@ -10883,6 +11078,14 @@ _RUST_VARIANT_KEY = "::variant::"
 # re-exports as ``H::Name``.
 _CPP_SCOPE_KEY = "::cpp-scope::"
 _CPP_USING_KEY = "::cpp-using::"
+# Reserved ``index`` namespace for C/C++ ``using``/``typedef`` aliases:
+# ``_CPP_ALIAS_KEY + name`` is the only place one is filed. Only the
+# type walk reads it (``_walk_type_token_uncached``,
+# ``_walk_cpp_written_type``), so no call, reference, heritage clause
+# or member lookup can land on an alias, which has no members: filed
+# under its plain name, a class's ``typedef X Ref;`` caught every
+# ``h->Ref()`` in the repo.
+_CPP_ALIAS_KEY = "::cpp-alias::"
 # Reserved ``index`` namespace holding stand-ins: ``_CPP_FILE_SCOPES_KEY
 # + path`` has one per scope a C/C++ file's own definitions sit in (each
 # dotted qualname prefix, the stand-in's ``name``), for
@@ -10974,7 +11177,11 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
 
 def _index_symbol(sym: Symbol, index: dict[str, list[Symbol]]) -> None:
     """File one symbol under its name, and under ``_RUST_DOT_KEY`` and
-    ``_CPP_SCOPE_KEY`` where those apply."""
+    ``_CPP_SCOPE_KEY`` where those apply; a C/C++ alias only under
+    ``_CPP_ALIAS_KEY``."""
+    if _is_cpp_alias(sym):
+        index.setdefault(_CPP_ALIAS_KEY + sym.name, []).append(sym)
+        return
     index.setdefault(sym.name, []).append(sym)
     if _rust_has_self(sym):
         index.setdefault(_RUST_DOT_KEY + sym.name, []).append(sym)
@@ -11214,7 +11421,8 @@ def _build_name_path_index(
     index: dict[tuple[str, str], list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
-            index.setdefault((sym.name, sym.path), []).append(sym)
+            if not _is_cpp_alias(sym):
+                index.setdefault((sym.name, sym.path), []).append(sym)
     return index
 
 

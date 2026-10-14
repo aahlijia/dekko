@@ -49,6 +49,8 @@ _CLASSDEF_KIND: dict[str, str] = {
     "trait_item": "trait",
     "type_alias_declaration": "type_alias",
     "type_item": "type_alias",
+    "alias_declaration": "type_alias",
+    "type_definition": "type_alias",
 }
 
 
@@ -295,31 +297,9 @@ def _collect_definitions(
         class_name = _one(caps, "classname")
 
         if class_name is not None:
-            def_node = _one(caps, "classdef")
-
-            if def_node is None:
-                continue
-
-            kind_node = _one(caps, "classkind")
-            kind_type = (
-                kind_node.type if kind_node is not None else def_node.type
-            )
-            kind = (
-                _kotlin_class_kind(def_node)
-                if spec.name == "kotlin"
-                else _CLASSDEF_KIND.get(kind_type, "class")
-            )
-            sym = _make_symbol(
-                spec,
-                rel,
-                def_node,
-                _text(class_name),
-                kind,
-                params=_tuple_struct_fields(def_node),
-                returns=_rust_alias_target(def_node),
-                seen=seen,
-            )
-            defs.append((def_node, sym))
+            found_type = _type_definition(spec, rel, caps, class_name, seen)
+            if found_type is not None:
+                defs.append(found_type)
             continue
 
         var_def = _one(caps, "vardef")
@@ -5454,6 +5434,125 @@ def _tuple_struct_fields(def_node: Node) -> list[Param]:
         Param(name=str(i), type=_text(field_type))
         for i, field_type in enumerate(body.children_by_field_name("type"))
     ]
+
+
+_CPP_TAG_SPECIFIERS = (
+    "struct_specifier",
+    "class_specifier",
+    "union_specifier",
+    "enum_specifier",
+)
+
+
+def _cpp_alias_target(def_node: Node, name: str) -> str | None:
+    """What a C++ ``using X = Y;`` or ``typedef Y X;`` names, or
+    ``None`` for one the walk can't use.
+
+    An alias has no members of its own, so the walk reads a call on
+    one through to its target, kept in ``returns`` like a Rust alias's.
+    Three shapes give it nothing to read: an alias inside a function
+    body (no scope a qualname can name), an anonymous ``typedef struct
+    {..} X;``, and ``typedef struct X {..} X;``, the C idiom, which
+    names the struct itself (recorded, the alias would come first and
+    push the struct's id to ``X#2``). The whole target is compared, not
+    its last segment, so ``using Status = ::absl::Status;`` is kept.
+    """
+    node = def_node.parent
+    while node is not None:
+        if node.type in ("function_definition", "lambda_expression"):
+            return None
+        node = node.parent
+    target = def_node.child_by_field_name("type")
+    if target is None:
+        return None
+    if target.type in _CPP_TAG_SPECIFIERS:
+        tag = target.child_by_field_name("name")
+        if tag is None:
+            return None
+        target = tag
+    text = _text(target)
+    if text.strip() == name:
+        return None
+    return text
+
+
+def _type_definition(
+    spec: LanguageSpec,
+    rel: str,
+    caps: dict[str, list[Node]],
+    class_name: Node,
+    seen: dict[str, int],
+) -> tuple[Node, Symbol] | None:
+    """The type symbol one definition-query match declares, or ``None``
+    for a match with no definition node or a C/C++ alias the walk
+    can't read (``_cpp_alias_target``)."""
+    def_node = _one(caps, "classdef")
+    if def_node is None:
+        return None
+    params = _tuple_struct_fields(def_node)
+    returns = _rust_alias_target(def_node)
+    if def_node.type in ("alias_declaration", "type_definition"):
+        returns = _cpp_alias_target(def_node, _text(class_name))
+        if returns is None:
+            return None
+        params = _cpp_alias_template_params(def_node)
+    kind_node = _one(caps, "classkind")
+    kind_type = kind_node.type if kind_node is not None else def_node.type
+    kind = (
+        _kotlin_class_kind(def_node)
+        if spec.name == "kotlin"
+        else _CLASSDEF_KIND.get(kind_type, "class")
+    )
+    sym = _make_symbol(
+        spec,
+        rel,
+        def_node,
+        _text(class_name),
+        kind,
+        params=params,
+        returns=returns,
+        seen=seen,
+    )
+
+    return def_node, sym
+
+
+def _cpp_alias_template_params(def_node: Node) -> list[Param]:
+    """An alias template's parameters, by name, in order.
+
+    ``template <typename T> using Ptr = std::unique_ptr<T, Del<T>>;``
+    gives ``T``, so the walk can read ``Ptr<Engine>`` as
+    ``std::unique_ptr<Engine, Del<Engine>>``. The list stops at a
+    parameter pack, whose arguments can't be matched one to one. Empty
+    for a plain alias.
+    """
+    parent = def_node.parent
+    if parent is None or parent.type != "template_declaration":
+        return []
+    plist = parent.child_by_field_name("parameters")
+    if plist is None:
+        return []
+    params: list[Param] = []
+    for decl in plist.named_children:
+        if decl.type.startswith("variadic_"):
+            break
+        name = decl.child_by_field_name("name") or decl.child_by_field_name(
+            "declarator"
+        )
+        if name is None:
+            name = next(
+                (
+                    c
+                    for c in decl.named_children
+                    if c.type == "type_identifier"
+                ),
+                None,
+            )
+        if name is None or name.type not in ("type_identifier", "identifier"):
+            break
+        params.append(Param(name=_text(name), type=None))
+
+    return params
 
 
 def _rust_alias_target(def_node: Node) -> str | None:

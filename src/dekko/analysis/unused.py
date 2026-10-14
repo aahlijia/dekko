@@ -106,6 +106,10 @@ _RUST_STD_TRAIT_NAMES = frozenset(
 )
 
 
+# Languages whose ``type_alias`` symbols ``_is_root`` spares.
+_C_FAMILY = frozenset({"c", "cpp"})
+
+
 def _matches_globs(path: str, globs: tuple[str, ...]) -> bool:
     """Whether a path (or its basename) matches any user root glob."""
     base = path.rsplit("/", 1)[-1]
@@ -201,7 +205,7 @@ def _is_root(
     container_index: dict[tuple[str, str], Symbol],
 ) -> bool:
     """Whether a symbol is a plausible entry point (not dead code)."""
-    if sym.name == "main":
+    if _is_root_by_shape(sym):
         return True
     if sym.decorated or sym.exported:
         return True
@@ -211,15 +215,27 @@ def _is_root(
         return True
     if sym.test or is_test_path(sym.path):
         return True
-    if sym.language == "go" and sym.name[:1].isupper():
-        return True
-    if _is_dunder(sym.name):
-        return True
     if sym.name in reexports:
         return True
     if sym.language == "rust" and sym.kind == "method":
         return _implements_std_trait(sym, index, container_index)
     return False
+
+
+def _is_root_by_shape(sym: Symbol) -> bool:
+    """Whether a symbol's name, kind and language alone make it a root.
+
+    ``main``, a Go exported (capitalized) name, a dunder, and a C/C++
+    ``using``/``typedef`` alias: another name for a type, not code to
+    delete, and the map records no C/C++ type use by name, so an alias
+    used everywhere would read as unused.
+    """
+    if sym.name == "main" or _is_dunder(sym.name):
+        return True
+    if sym.language == "go" and sym.name[:1].isupper():
+        return True
+
+    return sym.kind == "type_alias" and sym.language in _C_FAMILY
 
 
 def _consumer_is_external(sym: Symbol, index: MapIndex) -> bool:

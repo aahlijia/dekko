@@ -643,6 +643,10 @@ CPP = LanguageSpec(
 (class_specifier
   name: (type_identifier) @classname
   body: (field_declaration_list)) @classdef
+
+(alias_declaration name: (type_identifier) @classname) @classdef
+
+(type_definition declarator: (type_identifier) @classname) @classdef
 """,
     # ``new_expression``'s type alternation leaves out primitive and
     # sized types (``new int[5]``): they construct no class.

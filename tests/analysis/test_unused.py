@@ -1823,3 +1823,25 @@ def test_unused_dispatch_section_cap_follows_explicit_limit(
     # 30 methods + 31 classes flagged: the main list keeps its own
     # default of 50 rows with no --limit, and takes an explicit one.
     assert len(doc["results"]) == (returned if extra else 50)
+
+
+def test_unused_never_lists_a_cpp_alias(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "lib.cc": (
+                "class Kept {\n"
+                " public:\n"
+                "  void Go() {}\n"
+                "};\n"
+                "using Nobody = Kept;\n"
+                "static void Dead() {}\n"
+            ),
+        }
+    )
+    idx = mapfile.load_map(root)
+    assert idx is not None
+    names = {s.qualname for s in unused.find_unused(idx, (), "all")}
+    assert "Dead" in names
+    assert "Nobody" not in names
