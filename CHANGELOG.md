@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.31] — 2026-10-14
+
+### Fixed
+- **A JS/TS call on a literal or a standard global no longer lands on
+  a repo method.** `Math.max(..)`, `Promise.all(..)`, `Date.now()`,
+  `console.log(..)`, `process.stdout.write(..)`, `'a'.split(..)` and
+  `/re/.exec(..)` call the language's or the host's own objects, but
+  the noise guard that knew some of them ran after the same-file rung
+  and missed the rest, so the repo's one method of the name took them:
+  claude-code's `FileStateCache.max` had 22 callers, all `Math.max`,
+  and `Date.now()` in `ClockContext.tsx` landed on that file's own
+  `now`. Such a call is now external before any lookup, unless the
+  file binds the name itself (a parameter, a local, an import, a
+  same-file symbol) or the repo declares a JS/TS type of that name.
+  claude-code: -31 caller -> callee pairs (-31 sites), every lost one
+  wrong; cline: -30 pairs (-41 sites), ambiguous rows 3,464 -> 3,132
+  (`Object.keys(..)` and `/re/.test(..)` no longer tie repo methods).
+
 ## [1.9.30] — 2026-10-14
 
 ### Fixed

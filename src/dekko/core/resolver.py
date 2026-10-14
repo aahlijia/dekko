@@ -3103,7 +3103,7 @@ def _resolve_call(
     ctx = _WalkCtx(index, by_name_path, imports_by_file or {}, repo_stems)
     walk = _call_walk(call, caller, ctx)
     if _settled_before_lookup(
-        call, caller_id, walk, index, file_imports, repo_stems, edges, external
+        call, caller_id, walk, ctx, file_imports, edges, external
     ):
         return
 
@@ -6352,6 +6352,28 @@ _AMBIENT_GLOBAL_RECEIVERS = frozenset(
     }
 )  # fmt: skip
 
+# The JS/TS objects a receiver can name without the file binding them:
+# the ECMAScript built-ins, the common host statics, and the ambient
+# receivers above. A call on one is the language's or the host's, never
+# a repo method, unless the file binds the name or the repo declares a
+# type called that (``_js_global_receiver``).
+_JS_GLOBAL_RECEIVERS = _AMBIENT_GLOBAL_RECEIVERS | frozenset(
+    {
+        "Math", "JSON", "Object", "Array", "Promise", "Date", "Number",
+        "String", "Boolean", "Symbol", "BigInt", "Reflect", "Proxy",
+        "Intl", "Atomics", "RegExp", "Error", "Map", "Set", "WeakMap",
+        "WeakSet", "ArrayBuffer", "DataView", "Uint8Array", "Buffer",
+        "URL", "URLSearchParams", "AbortSignal", "Response", "Headers",
+        "performance", "WebAssembly", "location", "history",
+    }
+)  # fmt: skip
+
+# The built-in type a literal receiver head stands for, as the extractor
+# writes the head: a string or template literal is ``""``, an array
+# ``[]``, a regex ``/…/``.
+_JS_LITERAL_HEADS = {'""': "String", "[]": "Array"}
+_JS_NUMBER_HEAD = re.compile(r"^\(?-?\d[\d_.eExXn]*\)?$")
+
 
 def is_guarded_method_name(name: str, path: str = "") -> bool:
     """Whether a receiver call with this method name is never resolved.
@@ -6967,27 +6989,69 @@ def _java_chain_stays_outside(
     )
 
 
+def _js_global_receiver(
+    call: RawCall, ctx: _WalkCtx, file_imports: dict[str, Import]
+) -> bool:
+    """Whether a JS/TS call's receiver is a literal or a standard global.
+
+    ``Math.max(..)``, ``Date.now()``, ``console.log(..)``,
+    ``'a'.split('b')`` and ``/re/.exec(s)`` call the language's or the
+    host's own objects. The noise guard catches some of them, but only
+    after the same-file rung, so ``Date.now()`` in a file that defines
+    ``now`` landed on it. A head the file binds (a parameter, a local,
+    an import, a same-file symbol) is the file's own, and a repo JS/TS
+    type of the head's name (a ``declare global`` augmentation of
+    ``String``) may be what the call means, so neither is read as the
+    global.
+    """
+    if not call.receiver or _site_language(call.path) not in _JS_FAMILY:
+        return False
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    if first in _JS_LITERAL_HEADS:
+        head = _JS_LITERAL_HEADS[first]
+    elif _JS_NUMBER_HEAD.match(first):
+        head = "Number"
+    elif call.receiver.startswith("/") and call.receiver.count("/") >= 2:
+        head = "RegExp"
+    elif (
+        first in _JS_GLOBAL_RECEIVERS
+        and call.bound is None
+        and first not in file_imports
+        and not ctx.by_name_path.get((first, call.path))
+    ):
+        head = first
+    else:
+        return False
+
+    return not any(
+        s.kind in TYPE_KINDS and s.language in _JS_FAMILY
+        for s in ctx.index.get(head, ())
+    )
+
+
 def _settled_before_lookup(
     call: RawCall,
     caller_id: str,
     walk: WalkResult,
-    index: dict[str, list[Symbol]],
+    ctx: _WalkCtx,
     file_imports: dict[str, Import],
-    repo_stems: set[str],
     edges: dict[tuple[str, str], set[int]],
     external: dict[tuple[str, str], set[int]],
 ) -> bool:
     """Record a call the candidate ladder never sees, if this is one.
 
-    A bare call to a parameter (see ``_bare_call_is_param``), and a
-    call whose receiver is typed outside the repo or names an outside
-    import. Returns whether the call was recorded.
+    A bare call to a parameter (see ``_bare_call_is_param``), a JS/TS
+    call on a literal or a standard global (``_js_global_receiver``),
+    and a call whose receiver is typed outside the repo or names an
+    outside import. Returns whether the call was recorded.
     """
     if _bare_call_is_param(call):
-        _resolve_param_call(call, caller_id, index, edges, external)
+        _resolve_param_call(call, caller_id, ctx.index, edges, external)
         return True
-    if walk.kind == "foreign" or _receiver_is_external(
-        call, file_imports, repo_stems
+    if (
+        walk.kind == "foreign"
+        or _js_global_receiver(call, ctx, file_imports)
+        or _receiver_is_external(call, file_imports, ctx.repo_stems)
     ):
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return True
