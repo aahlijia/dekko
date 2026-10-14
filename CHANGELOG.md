@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.8] — 2026-10-14
+
+### Fixed
+- **A C++ `Type::name(..)` call reaches the type's own member when the
+  type lives in a namespace.** The explicit-type step matched the
+  candidate whose qualname is exactly `Type.name`, but C++ qualnames
+  carry their namespaces (`tensorflow.OpRegistry.Global`), so the
+  step only worked for types in the global namespace. Everything else
+  fell to the name-only rungs: `OpRegistry::Global()` stayed ambiguous
+  with every other `Global` in the repo, and `Padding::Serialize(..)`
+  landed on an unrelated `TensorFlowUnsupported.Serialize`. A call
+  written through exactly one in-repo type now keeps the C/C++
+  candidates whose qualname ends with `Type.name`; one is the target,
+  two or more stay a tie. A chain that only starts with a type
+  (`F::Make()->Run()`) is unchanged. tensorflow: +1,757 / -88 edges
+  (+2,399 / -106 sites, the lost ones wrong before), ambiguous rows
+  187,113 -> 185,773; `OpRegistry::Global()` resolves at 652 sites.
+  Map time unchanged.
+
 ## [1.9.7] — 2026-10-12
 
 ### Fixed

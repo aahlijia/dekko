@@ -7712,6 +7712,12 @@ def _receiver_type_match(
     ``BufferDiff.new``, called from inside ``BufferDiff``'s own file,
     read zero callers despite 13 real call sites).
 
+    C/C++ qualnames carry their namespaces
+    (``tensorflow.DeviceFactory.NewDevice``), so for a C/C++ call
+    written through exactly one scope (``DeviceFactory::NewDevice()``)
+    that finds no exact qualname, the candidates whose qualname ends
+    with ``DeviceFactory.NewDevice`` are the ones it can mean.
+
     Args:
         call: The raw call or reference being resolved.
         candidates: Every same-named symbol repo-wide (already looked
@@ -7733,6 +7739,13 @@ def _receiver_type_match(
         return None
     target_qual = f"{first}.{call.name}"
     matched = [c for c in candidates if c.qualname == target_qual]
+    if not matched and _cpp_scope_parts(call) == ([first], False):
+        matched = [
+            c
+            for c in candidates
+            if c.language in _CPP_FAMILY
+            and _on_written_path(c.qualname, [first, call.name], False)
+        ]
     if len(matched) == 1:
         return matched[0]
     return None
