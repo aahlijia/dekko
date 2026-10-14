@@ -1961,6 +1961,11 @@ _JAVA_ANONYMOUS_BODY_VERSION = 1
 # (``RawCall.receiver_type``). Code outside the query.
 _JAVA_RECEIVER_TYPE_VERSION = 1
 
+# Bump when ``extractor._java_receiver_init`` changes which Java local
+# receivers record the class they are built from
+# (``RawCall.receiver_init``). Code outside the query.
+_JAVA_RECEIVER_INIT_VERSION = 1
+
 # Bump when ``extractor._cpp_local_types`` or ``_cpp_receiver_type``
 # change which C++ local declarations give a call's receiver a type
 # (``RawCall.receiver_type``): the declarations read, ``auto`` with a
@@ -2000,7 +2005,8 @@ def spec_fingerprint() -> str:
     ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``,
     ``_JAVA_CTOR_REF_VERSION``, ``_JAVA_TYPED_ARG_VERSION``,
     ``_JAVA_ANONYMOUS_BODY_VERSION``, ``_JAVA_RECEIVER_TYPE_VERSION``,
-    ``_CPP_LOCAL_TYPE_VERSION``, ``_KOTLIN_GENERIC_CALL_VERSION`` and
+    ``_JAVA_RECEIVER_INIT_VERSION``, ``_CPP_LOCAL_TYPE_VERSION``,
+    ``_KOTLIN_GENERIC_CALL_VERSION`` and
     ``_RUST_USE_SCOPE_VERSION``, which
     each cover one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
@@ -2038,6 +2044,7 @@ def spec_fingerprint() -> str:
         f"java_typed_arg={_JAVA_TYPED_ARG_VERSION}",
         f"java_anonymous_body={_JAVA_ANONYMOUS_BODY_VERSION}",
         f"java_receiver_type={_JAVA_RECEIVER_TYPE_VERSION}",
+        f"java_receiver_init={_JAVA_RECEIVER_INIT_VERSION}",
         f"cpp_local_type={_CPP_LOCAL_TYPE_VERSION}",
         f"kotlin_generic_call={_KOTLIN_GENERIC_CALL_VERSION}",
         f"rust_use_scope={_RUST_USE_SCOPE_VERSION}",

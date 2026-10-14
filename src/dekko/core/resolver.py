@@ -6819,7 +6819,8 @@ def _walk_declared_receiver(
     Python: ``self``/``cls``, declared by the method's class
     (``_walk_python_self``).
 
-    Java and Kotlin: a parameter or local declared with an outside type
+    Java and Kotlin: a parameter or local declared with an outside type,
+    and a Java local declared with an in-repo one
     (``_walk_jvm_declared``).
     """
     local = _walk_local_type(call, ctx)
@@ -6844,17 +6845,26 @@ def _walk_declared_receiver(
 def _walk_jvm_declared(
     name: str, call: RawCall, caller: Symbol | None, ctx: _WalkCtx
 ) -> WalkResult | None:
-    """A JVM parameter or local declared with an outside type: foreign.
+    """A JVM parameter or local, walked from the type it is declared with.
 
     ``config.getMaxRequestSize()`` on ``MultipartConfigElement config``
     can only call the servlet API's method, so it goes external, as a
     field of that type already does; the ladder used to hand it the
     repo's lone ``getMaxRequestSize``. That holds for an outside
     interface an in-repo class implements: the declared type is all the
-    call site knows. Java reads the type the extractor recorded
+    call site knows, unless a Java local is built right there by an
+    in-repo class (``Resource res = new OriginTrackedResource(..)``),
+    which is then walked instead (``RawCall.receiver_init``).
+
+    A Java local declared with an in-repo type is walked like a field
+    of that type: ``health.getStatus()`` on ``Health health`` takes
+    ``Health``'s own or inherited ``getStatus``, where the ladder saw
+    every ``getStatus`` in the repo.
+
+    Java reads the type the extractor recorded
     (``RawCall.receiver_type``); Kotlin reads a parameter's (its locals
     are mostly inferred). Any other verdict is ``None``, so an in-repo
-    type stays with the rungs that read it today.
+    typed parameter stays with the rungs that read it today.
     """
     if call.bound not in ("param", "local"):
         return None
@@ -6866,8 +6876,16 @@ def _walk_jvm_declared(
     if not text or text.strip() in ("", "var"):
         return None
     result = _walk_type_text(text, call.path, ctx)
+    if result.kind == "foreign" and call.receiver_init:
+        built = _walk_type_text(call.receiver_init, call.path, ctx)
+        if built.kind == "typed":
+            return built
+    if result.kind == "foreign":
+        return result
+    if result.kind == "typed" and call.bound == "local":
+        return result
 
-    return result if result.kind == "foreign" else None
+    return None
 
 
 def _walk_local_type(call: RawCall, ctx: _WalkCtx) -> WalkResult | None:

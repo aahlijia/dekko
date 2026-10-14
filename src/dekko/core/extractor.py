@@ -1953,6 +1953,7 @@ def _tag_call_scope(
     if spec.name == "java":
         call.anonymous = _java_in_anonymous_body(node)
         call.receiver_type = _java_receiver_type(call, node, patterns)
+        call.receiver_init = _java_receiver_init(call, node)
     elif spec.name == "cpp" and call.bound == "local" and call.receiver:
         call.receiver_type = cpp_locals.receiver_type(call, node)
 
@@ -1975,6 +1976,64 @@ def _java_receiver_type(
         return None
 
     return _java_declared_type(obj, patterns)
+
+
+# A ``new X(..)`` / ``new a.B<T>(..)`` initializer: ``X`` / ``a.B``.
+_JAVA_NEW_INIT = re.compile(r"^new\s+([A-Za-z_][\w.]*)\s*(?:<[^()]*>)?\s*\(")
+
+
+def _java_receiver_init(call: RawCall, node: Node) -> str | None:
+    """The class a Java local receiver is built from where declared.
+
+    ``Resource res = new OriginTrackedResource(..); res.getURL()``
+    gives ``OriginTrackedResource``. Read from the nearest enclosing
+    block that initializes the name before the call; an initializer
+    other than ``new X(..)``, or none, is ``None``.
+    """
+    if call.bound != "local":
+        return None
+    obj = node.child_by_field_name("object")
+    if obj is None or obj.type != "identifier":
+        return None
+    name, pos = _text(obj), obj.start_byte
+    scope = obj
+    while scope.parent is not None:
+        scope = scope.parent
+        if scope.type not in ("block", "constructor_body"):
+            continue
+        value = _java_block_local_value(scope, name, pos)
+        if value is None:
+            continue
+        if value.type != "object_creation_expression":
+            # ``new Props().getPool()`` builds a ``Props``, not the
+            # local's value.
+            return None
+        found = _JAVA_NEW_INIT.match(_text(value))
+
+        return found.group(1) if found else None
+
+    return None
+
+
+def _java_block_local_value(block: Node, name: str, pos: int) -> Node | None:
+    """The value a local declaration in ``block`` before ``pos`` gives
+    ``name``, or ``None``."""
+    for statement in block.named_children:
+        if statement.start_byte >= pos:
+            break
+        if statement.type != "local_variable_declaration":
+            continue
+        for declarator in statement.children_by_field_name("declarator"):
+            bound = declarator.child_by_field_name("name")
+            value = declarator.child_by_field_name("value")
+            if (
+                bound is not None
+                and value is not None
+                and _text(bound) == name
+            ):
+                return value
+
+    return None
 
 
 # One C++ local declaration: (declaration start byte, scope start byte,

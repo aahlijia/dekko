@@ -9,6 +9,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.23] — 2026-10-14
+
+### Fixed
+- **A Java call on a local takes the method of the type the local is
+  declared with.** `Health health = lookup(); health.getStatus()`
+  can only call `Health`'s `getStatus` (or one `Health` inherits), but
+  nothing read a local's declared type: the ladder saw every
+  `getStatus` in the repo and left an ambiguous row, or picked the
+  caller's own same-named method. The type's own and inherited members
+  now decide, as they do for a field: one is the edge, same-count
+  overloads stay an ambiguous row among that type's methods only, and
+  a method only an outside supertype can declare (`environment.
+  getProperty(..)` on a class extending Spring's
+  `StandardEnvironment`) is external. A local declared with an outside
+  interface but built right there by an in-repo class (`Resource res =
+  new OriginTrackedResource(..)`) is walked as that class. spring-boot:
+  +8,083 caller -> callee pairs, -131 (every lost edge read was the
+  caller's own or a test double's same-named method, or a method from
+  an outside supertype), ambiguous rows 32,676 -> 25,207, `unused`
+  2,050 -> 1,778 with one new (its only caller now reaches the type it
+  meant), `sanity --all` unchanged, map 26.8 s -> 26.1 s.
+
 ## [1.9.22] — 2026-10-14
 
 ### Fixed

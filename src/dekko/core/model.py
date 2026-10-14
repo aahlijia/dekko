@@ -266,6 +266,14 @@ class RawCall:
             or the language doesn't record it (only C++ and Java do).
             Read by the resolver's receiver walk, like a typed
             parameter.
+        receiver_init: Java only: the class a local receiver is built
+            from where it is declared (``Resource res = new
+            OriginTrackedResource(..)`` records
+            ``OriginTrackedResource``), without type arguments.
+            ``None`` for any other initializer, a parameter, or another
+            language. The resolver reads it when ``receiver_type`` is
+            outside the repo: an in-repo class built right there is
+            what the call reaches.
     """
 
     caller_id: str | None
@@ -279,6 +287,7 @@ class RawCall:
     bound: str | None = None
     anonymous: bool = False
     receiver_type: str | None = None
+    receiver_init: str | None = None
 
 
 @dataclass
