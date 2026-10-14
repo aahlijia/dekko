@@ -1,5 +1,6 @@
 """Tree-sitter extraction: source file → symbols, raw calls, imports."""
 
+import bisect
 import re
 from functools import lru_cache, partial
 from pathlib import Path
@@ -234,6 +235,45 @@ _CLASS_MACRO = re.compile(
     rb"([A-Z][A-Z0-9]*_[A-Z0-9_]*(?:\([^()\n]*\))?)"
     rb"\s+(?=[A-Za-z_]\w*\s*(?:final\b\s*)?[:{])"
 )
+# A thread-safety annotation macro (``TF_LOCKS_EXCLUDED``,
+# ``ABSL_EXCLUSIVE_LOCKS_REQUIRED``, ``TF_NO_THREAD_SAFETY_ANALYSIS``,
+# ...). Only the lock and guard vocabulary: other trailing macros
+# (``TF_MUST_USE_RESULT``, ``TF_ATTRIBUTE_NOINLINE``) parse fine.
+_LOCK_MACRO_NAME = (
+    rb"(?:TF|ABSL)_[A-Z0-9_]*"
+    rb"(?:LOCK|GUARDED_BY|ACQUIRE|RELEASE|CAPABILITY|THREAD_SAFETY)"
+    rb"[A-Z0-9_]*"
+)
+# Words every lock or guard macro name contains: a file with none of
+# them skips the scan.
+_LOCK_WORDS = (
+    b"LOCK",
+    b"GUARDED_BY",
+    b"ACQUIRE",
+    b"RELEASE",
+    b"CAPABILITY",
+    b"THREAD_SAFETY",
+)
+# One or more lock annotations after a member's parameter list and its
+# qualifiers, before the body, ``;``, ``= 0`` or another qualifier.
+# tree-sitter reads the macro call as the declarator, so the member
+# comes out named ``TF_LOCKS_EXCLUDED``. Group 2 is the macros; the
+# qualifiers in group 1 stay.
+_LOCK_ANNOTATION = re.compile(
+    rb"\)((?:\s*(?:const|volatile|noexcept|override|final|&&|&))*)"
+    rb"((?:\s*" + _LOCK_MACRO_NAME + rb"(?:\s*\((?:[^()]|\([^()]*\))*\))?)+)"
+    rb"(?=\s*(?:[;{=:]|override\b|final\b|->|const\b))"
+)
+# A guard on a field (``size_t n_ TF_GUARDED_BY(mu_) = 0;``): it follows
+# a name, not a ``)``, so it's matched on its own.
+_GUARD_ANNOTATION = re.compile(
+    rb"\b(?:TF|ABSL)_(?:PT_)?(?:GUARDED_BY|ACQUIRED_AFTER|ACQUIRED_BEFORE)"
+    rb"\s*\((?:[^()]|\([^()]*\))*\)"
+)
+# A preprocessor directive with its continuation lines. A ``#define``
+# body is left alone: blanking an annotation there changes what the
+# parser makes of the macro and can swallow the next definition.
+_DIRECTIVE = re.compile(rb"^[ \t]*#(?:[^\n]*\\\n)*[^\n]*", re.M)
 _NOT_NEWLINE = re.compile(rb"[^\n]")
 
 
@@ -255,9 +295,10 @@ def _mask_attribute_macros(source: bytes) -> bytes:
 
     The preprocessor step dekko doesn't run, for the macro shapes whose
     expansion is only an attribute and which break the parse: the
-    deprecation family and a macro between ``class`` and its name. Each
-    masked byte becomes a space and newlines stay, so every offset and
-    line number in the parse tree is the same as in the file.
+    deprecation family, a macro between ``class`` and its name, and the
+    thread-safety annotations after a member's parameter list or on a
+    field. Each masked byte becomes a space and newlines stay, so every
+    offset and line number in the parse tree is the same as in the file.
 
     Args:
         source: Raw file bytes.
@@ -267,7 +308,41 @@ def _mask_attribute_macros(source: bytes) -> bytes:
         length.
     """
     masked = _ATTRIBUTE_MACRO.sub(lambda m: _blank(m.group(0)), source)
-    return _CLASS_MACRO.sub(_blank_group, masked)
+    return _mask_lock_annotations(_CLASS_MACRO.sub(_blank_group, masked))
+
+
+def _mask_lock_annotations(source: bytes) -> bytes:
+    """``source`` with its thread-safety annotations blanked out.
+
+    Annotations inside a preprocessor directive are kept as written.
+    """
+    if not any(word in source for word in _LOCK_WORDS):
+        return source
+
+    starts: list[int] = []
+    ends: list[int] = []
+    for m in _DIRECTIVE.finditer(source):
+        starts.append(m.start())
+        ends.append(m.end())
+
+    def in_directive(pos: int) -> bool:
+        i = bisect.bisect_right(starts, pos) - 1
+        return i >= 0 and pos < ends[i]
+
+    def annotation(m: re.Match[bytes]) -> bytes:
+        if in_directive(m.start()):
+            return m.group(0)
+        start = m.start(2) - m.start(0)
+        whole = m.group(0)
+        return whole[:start] + _blank(whole[start:])
+
+    def guard(m: re.Match[bytes]) -> bytes:
+        if in_directive(m.start()):
+            return m.group(0)
+        return _blank(m.group(0))
+
+    masked = _LOCK_ANNOTATION.sub(annotation, source)
+    return _GUARD_ANNOTATION.sub(guard, masked)
 
 
 # ---------------------------------------------------------------------

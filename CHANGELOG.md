@@ -9,6 +9,34 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.19] — 2026-10-14
+
+### Fixed
+- **A C++ member followed by a thread-safety annotation keeps its
+  name.** tree-sitter doesn't know `TF_LOCKS_EXCLUDED(mu_)` or
+  `ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_)` after a parameter list, so it
+  read the macro as the member's name: tensorflow had 644 symbols
+  called `X.TF_LOCKS_EXCLUDED`, `X.ABSL_EXCLUSIVE_LOCKS_REQUIRED#2`,
+  and the real `Lookup`, `ReportProcessingTime` or `add_input` never
+  existed, so every call to them went external or to a lone
+  same-named method elsewhere. The lock and guard annotations
+  (`*LOCK*`, `*GUARDED_BY*`, `*ACQUIRE*`, `*RELEASE*`, `*CAPABILITY*`,
+  `*THREAD_SAFETY*` under `TF_`/`ABSL_`) after a member's parameter
+  list, and the guards on a field (`size_t n_ TF_GUARDED_BY(mu_)`),
+  are blanked out before the parse, byte for byte, so lines and
+  offsets don't move. A `#define` body is left as written, and so are
+  other trailing macros (`TF_MUST_USE_RESULT`). C/C++ files
+  re-extract once. tensorflow: lock-named symbols 644 -> 0, call
+  sites +1,801 / -351 (the gains are the hidden methods' own callers,
+  `CrossTrainerCache.Get`, `AutoScaler.ReportProcessingTime`,
+  `model::Node.record_element`; the losses are moves to the right
+  method, std `.end()` calls now external, and new ties among
+  overloads the mask uncovered), ambiguous rows 131,851 -> 131,575,
+  `unused` 36,476 -> 35,973. `model::Node.add_input` now has 87 call
+  sites: 42 right, and 45 are protobuf `NodeDef` calls on an untyped
+  local or a chain (`auto n = graph.add_node(); n->add_input(..)`),
+  which no type rule can read yet.
+
 ## [1.9.18] — 2026-10-14
 
 ### Fixed
