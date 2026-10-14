@@ -9,6 +9,29 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.26] — 2026-10-14
+
+### Fixed
+- **A Rust field typed by a `type` alias is read through to what the
+  alias names.** zed's `collections` crate is `pub type HashMap<K, V> =
+  FxHashMap<K, V>;`, and almost every crate imports that `HashMap`, so
+  `self.terminals.get_mut(&id)` on a `HashMap` field asked the walk
+  about a name it couldn't see into, and the ladder handed the call to
+  the repo's one `get_mut` (`WatchPaths.get_mut`). The walk now reads
+  an alias's target in the alias's own file: an alias of an outside
+  type is outside (the call goes external), an alias of a repo type is
+  that type (`type WrapPatch = Patch<u32>` reaches `Patch.compose`),
+  and aliases of one name in different crates count only when they
+  agree. `RwLock` and `RefCell` are now transparent like `Mutex`, so
+  `self.state.read().glyph_for_char(..)` and `self.keymap.borrow_mut()
+  .add_bindings(..)` reach the type inside. zed: +95 / -181 caller ->
+  callee pairs (+104 / -249 sites), external +1,114 / -64, ambiguous
+  rows 75,053 -> 74,350; `WatchPaths.get_mut` loses 139 wrong callers
+  and `TreeMap.contains_key` 53, every lost site read a `HashMap`,
+  `HashSet` or `IndexMap` field. `unused` 9,879 -> 9,851. A
+  `.clone()` on an `Option`/`Rc` around a `RefCell<T>` now reads as
+  `T`'s `clone` (3 sites), as one on `Rc<T>` already did.
+
 ## [1.9.25] — 2026-10-14
 
 ### Fixed

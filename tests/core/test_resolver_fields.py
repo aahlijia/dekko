@@ -892,3 +892,135 @@ def test_a_foreign_hop_before_a_call_leaves_the_receiver_unknown(
     )
     assert "this.tasks.get().abort" not in _external(g, "t.ts::Runner.stop")
     assert _callees(g, "t.ts::Runner.stop") == {"t.ts::Task.abort"}
+
+
+def _rust_crate(name: str, body: str) -> dict[str, str]:
+    return {
+        f"crates/{name}/Cargo.toml": (
+            f'[package]\nname = "{name}"\n\n[lib]\npath = "src/{name}.rs"\n'
+        ),
+        f"crates/{name}/src/{name}.rs": body,
+    }
+
+
+def test_a_field_typed_by_an_alias_of_an_outside_type_is_external(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            **_rust_crate(
+                "collections",
+                "pub use rustc_hash::FxHashMap;\n"
+                "pub type HashMap<K, V> = FxHashMap<K, V>;\n",
+            ),
+            **_rust_crate(
+                "fs",
+                "pub struct WatchPaths;\n"
+                "impl WatchPaths { pub fn get_mut(&mut self, k: &u8) {} }\n",
+            ),
+            **_rust_crate(
+                "ed",
+                "use collections::HashMap;\n"
+                "pub struct S { m: HashMap<u8, u8> }\n"
+                "impl S { pub fn f(&mut self) { self.m.get_mut(&1); } }\n",
+            ),
+        },
+    )
+    caller = "crates/ed/src/ed.rs::S.f"
+    assert _callees(g, caller) == set()
+    assert "get_mut" not in _ambiguous(g, caller)
+
+
+def test_a_field_typed_by_an_alias_of_an_in_repo_type_is_walked(
+    tmp_path: Path,
+) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": """
+                pub struct Patch<T>(T);
+                impl<T> Patch<T> { pub fn compose(&self) {} }
+                pub type WrapPatch = Patch<u32>;
+                pub struct Other;
+                impl Other { pub fn compose(&self) {} }
+                pub struct W { edits: WrapPatch }
+                impl W { pub fn f(&self) { self.edits.compose() } }
+            """,
+        },
+    )
+    assert _callees(g, "src/lib.rs::W.f") == {"src/lib.rs::Patch.compose"}
+
+
+def test_aliases_that_disagree_stay_open(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": """
+                mod x {
+                    pub struct A1;
+                    impl A1 { pub fn go(&self) {} }
+                    pub type Id = A1;
+                }
+                mod y {
+                    pub struct B1;
+                    impl B1 { pub fn go(&self) {} }
+                    pub type Id = B1;
+                }
+                pub struct S { i: Id }
+                impl S { pub fn f(&self) { self.i.go() } }
+            """,
+        },
+    )
+    assert _callees(g, "src/lib.rs::S.f") == set()
+    assert _ambiguous(g, "src/lib.rs::S.f") == {
+        "go": {"src/lib.rs::x.A1.go", "src/lib.rs::y.B1.go"}
+    }
+
+
+def test_an_alias_cycle_stops(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": """
+                pub type A = B;
+                pub type B = A;
+                pub struct T;
+                impl T { pub fn run(&self) {} }
+                pub struct S { a: A }
+                impl S { pub fn f(&self) { self.a.run() } }
+            """,
+        },
+    )
+    assert _callees(g, "src/lib.rs::S.f") == {"src/lib.rs::T.run"}
+
+
+def test_rwlock_and_refcell_are_transparent(tmp_path: Path) -> None:
+    g = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": """
+                pub struct Caps;
+                impl Caps { pub fn supports(&self) {} }
+                pub struct Keymap;
+                impl Keymap { pub fn add(&self) {} }
+                pub struct Other;
+                impl Other {
+                    pub fn supports(&self) {}
+                    pub fn add(&self) {}
+                }
+                pub type SharedCaps = Arc<RwLock<Caps>>;
+                pub struct S { caps: SharedCaps, km: RefCell<Keymap> }
+                impl S {
+                    pub fn f(&self) {
+                        self.caps.read().supports();
+                        self.km.borrow_mut().add();
+                    }
+                }
+            """,
+        },
+    )
+    assert _callees(g, "src/lib.rs::S.f") == {
+        "src/lib.rs::Caps.supports",
+        "src/lib.rs::Keymap.add",
+    }

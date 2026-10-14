@@ -6351,10 +6351,13 @@ def _shadowed_by_external_import(
 # type-local-impl match (zed's own ``impl Into<SelectionEffects> for
 # Option<Autoscroll>``) from absorbing an unrelated ``Option<X>``'s
 # ``.into()`` call; that gate is unaffected by adding them here.
+# ``RwLock`` and ``RefCell`` hand out their contents the way ``Mutex``
+# does (``.read()``, ``.borrow_mut()`` are transparent calls).
 _TRANSPARENT_TYPE_WRAPPERS = frozenset(
     {
         "Box", "Rc", "Arc", "Ref", "RefMut", "Optional",
-        "Entity", "WeakEntity", "Mutex", "Option", "Result",
+        "Entity", "WeakEntity", "Mutex", "RwLock", "RefCell",
+        "Option", "Result",
     }
 )  # fmt: skip
 _TYPE_QUALIFIER_WORDS = frozenset({"mut", "const", "ref", "readonly"})
@@ -7681,10 +7684,10 @@ def _walk_type_tokens(stripped: str, path: str, ctx: _WalkCtx) -> WalkResult:
     """The layers the tokens of an unwrapped type text name.
 
     Each token of the wrapper chain (``_typed_param_token_candidates``)
-    that names an in-repo type becomes a layer, a C/C++ alias read
-    through to its target (``_walk_cpp_aliases``). No layer is
-    ``unknown`` when a token was a type parameter or an alias the walk
-    can't read, else ``foreign``.
+    that names an in-repo type becomes a layer, an alias read through
+    to its target (``_walk_alias_token``). No layer is ``unknown`` when
+    a token was a type parameter or an alias the walk can't read, else
+    ``foreign``.
     """
     layers: list[tuple[Symbol, ...]] = []
     is_open = False
@@ -7693,9 +7696,8 @@ def _walk_type_tokens(stripped: str, path: str, ctx: _WalkCtx) -> WalkResult:
     foreign = _WALK_FOREIGN
     for token, _ in _typed_param_token_candidates(stripped):
         found = _walk_text_token(token, stripped, path, ctx)
-        if found and any(_is_cpp_alias(s) for s in found):
-            args = _cpp_template_args(stripped, token)
-            through = _walk_cpp_aliases(found, args, ctx)
+        through = _walk_alias_token(token, found, stripped, path, ctx)
+        if through is not None:
             if through.kind == "typed":
                 layers.extend(through.layers)
                 is_open = is_open or through.open
@@ -7712,6 +7714,29 @@ def _walk_type_tokens(stripped: str, path: str, ctx: _WalkCtx) -> WalkResult:
         return WalkResult("typed", tuple(layers), is_open)
 
     return _WALK_UNKNOWN if is_open else foreign
+
+
+def _walk_alias_token(
+    token: str,
+    found: tuple[Symbol, ...] | None,
+    stripped: str,
+    path: str,
+    ctx: _WalkCtx,
+) -> WalkResult | None:
+    """What ``token`` stands for when it names a type alias, read
+    through; ``None`` when it doesn't.
+
+    ``found`` is what the token looked up to (``_walk_text_token``): C/C++
+    aliases come back in it (``_walk_cpp_aliases``), while a Rust name
+    that only aliases have comes back as ``()`` (``_walk_rust_aliases``).
+    """
+    if found and any(_is_cpp_alias(s) for s in found):
+        args = _cpp_template_args(stripped, token)
+        return _walk_cpp_aliases(found, args, ctx)
+    if found == () and _site_language(path) == "rust":
+        return _walk_rust_aliases(token, ctx)
+
+    return None
 
 
 def _walk_text_token(
@@ -8024,6 +8049,53 @@ def _walk_cpp_aliases(
     return _WALK_FOREIGN_WITH_ARGS if type_args else _WALK_FOREIGN
 
 
+# The Rust aliases being read through, so a loop (``type A = B; type B =
+# A;``) or a chain deeper than ``_RUST_ALIAS_DEPTH`` reads ``unknown``.
+_RUST_ALIAS_ACTIVE: set[str] = set()
+
+
+def _walk_rust_aliases(token: str, ctx: _WalkCtx) -> WalkResult:
+    """What the Rust ``type`` aliases called ``token`` stand for.
+
+    An alias has no members, so a call on a value of it is a call on
+    its target, read in the alias's own file: zed's ``pub type
+    HashMap<K, V> = FxHashMap<K, V>;`` is outside the repo, ``type
+    WrapPatch = Patch<u32>;`` is ``Patch``. Unlike a C/C++ alias, which
+    C++ lookup has already narrowed to the one in scope, the name is
+    looked up repo-wide, so aliases in unrelated crates can share it:
+    every one outside the repo is ``foreign``, one reading they all
+    share is that reading, and anything else (or a loop, or a chain too
+    deep) is ``unknown``.
+    """
+    aliases = [
+        s
+        for s in ctx.index.get(token, ())
+        if s.kind == "type_alias" and s.language == "rust" and s.returns
+    ]
+    if not aliases or len(_RUST_ALIAS_ACTIVE) >= _RUST_ALIAS_DEPTH:
+        return _WALK_UNKNOWN
+    seen: list[WalkResult] = []
+    for alias in aliases:
+        if alias.id in _RUST_ALIAS_ACTIVE:
+            seen.append(_WALK_UNKNOWN)
+            continue
+        _RUST_ALIAS_ACTIVE.add(alias.id)
+        try:
+            seen.append(
+                _walk_type_text_uncached(alias.returns, alias.path, ctx)
+            )
+        finally:
+            _RUST_ALIAS_ACTIVE.discard(alias.id)
+    if all(w.kind == "foreign" for w in seen):
+        return _WALK_FOREIGN
+    shapes = {
+        (w.kind, w.open, tuple(tuple(s.id for s in t) for t in w.layers))
+        for w in seen
+    }
+
+    return seen[0] if len(shapes) == 1 else _WALK_UNKNOWN
+
+
 def _is_cpp_type(sym: Symbol) -> bool:
     """Whether ``sym`` is a C/C++ type."""
     return sym.kind in TYPE_KINDS and sym.language in _CPP_FAMILY
@@ -8133,12 +8205,12 @@ def _walk_type_token(
     ``None`` when it names none: an import from outside the repo, a
     name no repo type has, or (JS/TS) a name the file neither imports
     nor defines, which is a global like the DOM's ``Request``. ``()``
-    when it names only a Rust ``type`` alias, which the walk can't see
-    through. Otherwise the types the import was followed to, else the
-    same-file types, else (Java, Kotlin) the type the file's import or
-    package names (``_walk_jvm_named``), else those nearest ``path``. A
-    C/C++ type nested in a class counts only where C++ lookup sees it
-    (``_cpp_nested_visible``).
+    when it names only a Rust ``type`` alias, which the caller reads
+    through (``_walk_rust_aliases``). Otherwise the types the import
+    was followed to, else the same-file types, else (Java, Kotlin) the
+    type the file's import or package names (``_walk_jvm_named``), else
+    those nearest ``path``. A C/C++ type nested in a class counts only
+    where C++ lookup sees it (``_cpp_nested_visible``).
     """
     key = (path, token)
     if key not in _WALK_TOKENS:
