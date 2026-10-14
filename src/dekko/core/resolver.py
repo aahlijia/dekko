@@ -6860,17 +6860,23 @@ def _walk_declared_receiver(
 
     Java and Kotlin: a parameter or local declared with a type the walk
     can read, outside or in-repo (``_walk_jvm_declared``).
+
+    Rust: a typed parameter, kept only when its type is outside the repo
+    (``_walk_rust_param``).
     """
     local = _walk_local_type(call, ctx)
     if local is not None:
         return local
-    if _site_language(call.path) in ("java", "kotlin"):
+    language = _site_language(call.path)
+    if language in ("java", "kotlin"):
         return _walk_jvm_declared(name, call, caller, ctx)
     if caller is None:
         return None
-    if _site_language(call.path) == "python":
+    if language == "python":
         return _walk_python_self(name, call, caller, ctx)
-    if _site_language(call.path) in _CPP_FAMILY:
+    if language == "rust":
+        return _walk_rust_param(name, call, caller, ctx)
+    if language in _CPP_FAMILY:
         param = _walk_param(caller, name)
         if param is None or not param.type:
             return None
@@ -6878,6 +6884,68 @@ def _walk_declared_receiver(
         return result
 
     return None
+
+
+def _walk_rust_param(
+    name: str, call: RawCall, caller: Symbol, ctx: _WalkCtx
+) -> WalkResult | None:
+    """A Rust parameter typed outside the repo, walked: the call is
+    external.
+
+    ``rng.random_range(0..9)`` on ``mut rng: StdRng`` can only be
+    rand's, but nothing read the parameter's type when it named no
+    repo type, so the ladder handed the call to the repo's one
+    ``random_range``. Only a ``foreign`` verdict is kept; any other
+    leaves the receiver to the rungs below, as before. It abstains when
+    the outside reading may be wrong (``_rust_param_abstains``).
+
+    Only a dot-call is judged: ``filter::init_env_filter(filter)``
+    names the crate's ``filter`` module, whatever a parameter called
+    ``filter`` holds.
+    """
+    if not _rust_is_dot_call(call) or _walk_is_self(name, call.path):
+        return None
+    param = _walk_param(caller, name)
+    if param is None or not param.type:
+        return None
+    if _rust_param_abstains(param.type, call, ctx):
+        return None
+    result, _ = _walk_param_type(param, None, caller, ctx)
+    if result.kind != "foreign":
+        return None
+
+    return result
+
+
+def _rust_param_abstains(text: str, call: RawCall, ctx: _WalkCtx) -> bool:
+    """Whether a Rust parameter type's outside reading can't be trusted.
+
+    ``source: &mut Self`` names the caller's own type, which the walk
+    can't look up by name. A trait in the repo can bring ``call.name``
+    to an outside value (``lparam.signed_hiword()`` through ``impl
+    HiLoWord for LPARAM``). And the extractor files a ``use`` inside
+    ``mod tests {}`` for the whole file, so an outside import there
+    (``use anyhow::Context``) shadows the repo type of that name the
+    rest of the file means (``cx: &mut Context<Self>``).
+    """
+    if "Self" in _TYPE_TOKEN_RE.findall(text):
+        return True
+    if ctx.index.get(_RUST_TRAIT_REACH_KEY + call.name):
+        return True
+    imports = ctx.imports_by_file.get(call.path, {})
+    for token, _ in _typed_param_token_candidates(text):
+        imp = imports.get(token)
+        if imp is None or _import_is_in_repo(imp, ctx.repo_stems):
+            continue
+        if any(
+            s.kind in TYPE_KINDS
+            and s.kind != "type_alias"
+            and s.language == "rust"
+            for s in ctx.index.get(token, ())
+        ):
+            return True
+
+    return False
 
 
 def _walk_jvm_declared(
@@ -11581,6 +11649,12 @@ _PY_STAR_KEY = "::py-star::"
 # dot-call can mean (``_rust_dot_call_narrowed``). Read only by
 # ``.get``, so no per-call rule scans ``candidates`` for them.
 _RUST_DOT_KEY = "::rust-dot::"
+# Reserved ``index`` namespace: ``_RUST_TRAIT_REACH_KEY + name`` holds
+# the Rust methods called ``name`` taking ``self`` that a trait declares
+# or that implement one for a type their crate doesn't define (``impl
+# HiLoWord for LPARAM``): the ones that can bring ``name`` to a value of
+# an outside type (``_walk_rust_param``).
+_RUST_TRAIT_REACH_KEY = "::rust-trait-reach::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -11595,8 +11669,8 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
     ``_CPP_FILE_SCOPES_KEY``, ``_CPP_FILE_USING_KEY``,
     ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY``,
-    ``_RUST_RENAMED_KEY``, ``_RUST_DOT_KEY`` and ``_SUPERS_KEY``
-    entries."""
+    ``_RUST_RENAMED_KEY``, ``_RUST_DOT_KEY``, ``_RUST_TRAIT_REACH_KEY``
+    and ``_SUPERS_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -11615,6 +11689,7 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     _index_cpp_phantoms(files, index)
     _index_constructions(files, index)
     _index_supertypes(files, index)
+    _index_rust_trait_reach(index)
     for name, original in sorted(rust_renames(files)):
         index.setdefault(_RUST_RENAMED_KEY + name, []).append(
             _stand_in(original)
@@ -11637,6 +11712,52 @@ def _index_symbol(sym: Symbol, index: dict[str, list[Symbol]]) -> None:
         for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
             if scope:
                 index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
+
+
+def _index_rust_trait_reach(index: dict[str, list[Symbol]]) -> None:
+    """File the ``_RUST_DOT_KEY`` methods a trait can carry to an outside
+    type under ``_RUST_TRAIT_REACH_KEY``.
+
+    A method qualifies when its owner is a trait declared in the same
+    file, or when no non-trait, non-alias Rust type of the owner's name
+    lives in the method's crate: an ``impl`` for a type from elsewhere
+    (``impl HiLoWord for LPARAM``, a blanket ``impl<T> Ext for T``).
+    """
+    reach: dict[str, list[Symbol]] = {}
+    for key in [k for k in index if k.startswith(_RUST_DOT_KEY)]:
+        for method in index[key]:
+            if "." in method.qualname and _rust_trait_can_reach(method, index):
+                reach.setdefault(key[len(_RUST_DOT_KEY) :], []).append(method)
+    for name, methods in reach.items():
+        index[_RUST_TRAIT_REACH_KEY + name] = methods
+
+
+def _rust_trait_can_reach(
+    method: Symbol, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether ``method`` is a trait's, or implements one for a type its
+    crate doesn't define (``_index_rust_trait_reach``)."""
+    owner_qualname = method.qualname.rsplit(".", 1)[0]
+    owner = owner_qualname.rsplit(".", 1)[-1]
+    types = [
+        s
+        for s in index.get(owner, ())
+        if s.kind in TYPE_KINDS and s.language == "rust"
+    ]
+    if any(
+        s.kind == "trait"
+        and s.path == method.path
+        and s.qualname == owner_qualname
+        for s in types
+    ):
+        return True
+    crate = _rust_crate_dir(method.path)
+
+    return not any(
+        s.kind not in ("trait", "type_alias")
+        and _rust_crate_dir(s.path) == crate
+        for s in types
+    )
 
 
 def _index_cpp_file_using(fm: FileMap, index: dict[str, list[Symbol]]) -> None:

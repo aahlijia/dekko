@@ -9,6 +9,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.27] — 2026-10-14
+
+### Fixed
+- **A Rust method call on a parameter typed outside the repo is
+  external.** `rng.random_range(0..9)` on `mut rng: StdRng` can only be
+  rand's, but nothing read a parameter's type that named no repo type,
+  so the ladder handed the call to the repo's one `random_range`
+  (zed's test scheduler `SharedRng`). A dot-call on a typed parameter
+  is now walked from the parameter's type, and an outside type sends
+  it external; an in-repo type still leaves it to the usual rungs. It
+  holds back where the outside reading may be wrong: a `Self` type, a
+  method a repo trait can bring to an outside value (`impl HiLoWord
+  for LPARAM`), and an outside import that shares its name with a repo
+  type (a `use` inside `mod tests` is still recorded for the whole
+  file). A `module::f(..)` path call whose head shares a parameter's
+  name is not judged. zed: -251 caller -> callee pairs (-574 sites),
+  external +1,951 sites, ambiguous rows 74,350 -> 73,448;
+  `SharedRng.random_range` loses 359 wrong callers and `random_bool`
+  68. `unused` 9,851 -> 9,853: `MultiBufferOffsetUniformSampler.sample`
+  and `RsaRngCompat.next_u32` lost only `rng` calls on rand values.
+  Rust records no local bindings, so a local that shadows a parameter
+  (`let primitive = primitive.into()` on `primitive: impl
+  Into<Primitive>`) is still read as the parameter: about 8 right
+  sites on zed go external with the wrong ones.
+
 ## [1.9.26] — 2026-10-14
 
 ### Fixed
