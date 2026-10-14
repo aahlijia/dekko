@@ -6466,15 +6466,20 @@ class WalkResult:
         open: Whether a deeper layer is a type the walk can't read (a
             type parameter), so a member missing from ``layers`` may
             still be there.
+        type_args: For ``foreign``, whether the type text carried type
+            arguments (``std::vector<Foo>``), so a call on it can hand
+            one of them back.
     """
 
     kind: str
     layers: tuple[tuple[Symbol, ...], ...] = ()
     open: bool = False
+    type_args: bool = False
 
 
 _WALK_UNKNOWN = WalkResult("unknown")
 _WALK_FOREIGN = WalkResult("foreign")
+_WALK_FOREIGN_WITH_ARGS = WalkResult("foreign", type_args=True)
 
 _WALK_SEGMENT_SPLIT = re.compile(r"->|::|\.")
 # Languages whose methods use a field without ``this``; C has no
@@ -6647,6 +6652,10 @@ def _call_walk(
     ``Health``'s same-named method. A C/C++ cast receiver
     (``llvm::cast<T>(v)``) is typed by its template argument.
 
+    A foreign hop with more segments after it is ``unknown``: what it
+    hands back may be in-repo. A C/C++ chain of calls on an outside type
+    without type arguments stays foreign (``_foreign_holds_through``).
+
     Args:
         call: The raw call being resolved.
         caller: Its enclosing symbol, or ``None`` at module level.
@@ -6673,12 +6682,31 @@ def _call_walk(
         result, used = _walk_step(result, segments[at], nxt, ctx)
         at += used
     if result.kind == "foreign" and not _walk_only_transparent(segments[at:]):
+        if _foreign_holds_through(result, segments[at:], call.path):
+            return result
         # ``this.tasks.get(id).abort()`` on a ``Map``: the foreign hop
         # hands back something the walk can't name, not something
         # foreign.
         return _WALK_UNKNOWN
 
     return result
+
+
+def _foreign_holds_through(
+    result: WalkResult, rest: list[str], path: str
+) -> bool:
+    """Whether a foreign hop stays foreign through the segments after it.
+
+    C and C++: when every later segment is a call and the outside type
+    had no type arguments. ``v.getType().getElementType()`` on an
+    ``mlir::Value`` asks MLIR's ``getType()`` for another MLIR value; a
+    ``std::vector<Foo>`` can hand back its ``Foo`` (``front()``), and a
+    field of an outside value can be anything.
+    """
+    if _site_language(path) in _CPP_FAMILY:
+        return not result.type_args and all(s.endswith("()") for s in rest)
+
+    return False
 
 
 def _settled_before_lookup(
@@ -7190,12 +7218,18 @@ def _declared_type_text(text: str, path: str) -> str:
 
 
 def _walk_type_text(text: str, path: str, ctx: _WalkCtx) -> WalkResult:
-    """The types a declared type text names, read in ``path`` (memoized)."""
+    """The types a declared type text names, read in ``path`` (memoized).
+
+    A foreign verdict on a text with type arguments says so
+    (``WalkResult.type_args``).
+    """
     text = _declared_type_text(text, path)
     key = (path, text)
     hit = _WALK_TEXTS.get(key)
     if hit is None:
         hit = _walk_type_text_uncached(text, path, ctx)
+        if hit.kind == "foreign" and "<" in text:
+            hit = _WALK_FOREIGN_WITH_ARGS
         _WALK_TEXTS[key] = hit
     return hit
 

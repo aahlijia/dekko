@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.12] — 2026-10-14
+
+### Fixed
+- **A C/C++ chain of calls off an outside value stays outside.** The
+  receiver walk gave up after a hop typed outside the repo whenever
+  more segments followed, so `v.getType().getElementType()` on an
+  `mlir::Value` and proto chains like `fdef().signature().name()` went
+  back to the ladder and landed on the repo's one method of that
+  name. In C and C++, when every later segment is a call and the
+  outside type has no template arguments, the call is now external. A
+  template (`std::vector<Foo>`, `absl::StatusOr<Foo>`) can hand back
+  its argument and a field of an outside value can be anything, so
+  those chains still go to the ladder. tensorflow: -410 wrong call
+  sites (all 30 read were MLIR, proto, flatbuffer or XLA chains),
+  +1,802 external sites, ambiguous rows 178,352 -> 177,602;
+  `MlirTensor.getElementType` loses 25 more, `Node.name` 20,
+  `DataTypeSet.begin`/`end`/`size` 54. Map time unchanged.
+
 ## [1.9.11] — 2026-10-14
 
 ### Fixed
