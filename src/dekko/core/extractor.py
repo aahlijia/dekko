@@ -92,6 +92,8 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     """
     try:
         source = (root / rel).read_bytes()
+        if spec.name in ("c", "cpp"):
+            source = _mask_attribute_macros(source)
         parser = Parser(get_grammar(spec.grammar))
         tree = parser.parse(source)
     except (OSError, ValueError) as exc:
@@ -198,9 +200,42 @@ def looks_like_cpp_header(source: bytes) -> bool:
         tree.
     """
     parser = Parser(get_grammar("cpp"))
-    tree = parser.parse(source)
+    tree = parser.parse(_mask_attribute_macros(source))
     matches = _run_query("cpp", _CPP_HEADER_MARKER_QUERY, tree.root_node)
     return bool(matches)
+
+
+# A deprecation macro invoked with string literals only
+# (``ABSL_DEPRECATED("Use X.")``, ``TFLITE_DEPRECATED(...)``, the
+# message possibly split across lines). Its expansion is an attribute
+# and nothing else, but tree-sitter doesn't know the macro: with a long
+# enough message it gives up on the whole enclosing class and reads the
+# rest of the file one namespace level too high. A ``#define`` of the
+# macro and a call with a non-string argument don't match.
+_ATTRIBUTE_MACRO = re.compile(
+    rb'\b[A-Z][A-Z0-9_]*_DEPRECATED\(\s*(?:"(?:[^"\\\n]|\\.)*"\s*)*\)'
+)
+_NOT_NEWLINE = re.compile(rb"[^\n]")
+
+
+def _mask_attribute_macros(source: bytes) -> bytes:
+    """Blank out every deprecation-macro invocation in C/C++ source.
+
+    The preprocessor step dekko doesn't run, for the one macro family
+    whose expansion is only an attribute. Each byte of a match becomes
+    a space and newlines stay, so every offset and line number in the
+    parse tree is the same as in the file.
+
+    Args:
+        source: Raw file bytes.
+
+    Returns:
+        ``source`` with each match replaced by whitespace of the same
+        length.
+    """
+    return _ATTRIBUTE_MACRO.sub(
+        lambda m: _NOT_NEWLINE.sub(b" ", m.group(0)), source
+    )
 
 
 # ---------------------------------------------------------------------

@@ -1827,7 +1827,7 @@ def exception_handling_supported(language: str) -> bool:
 # logic is discarded automatically -- every file re-parses once on the
 # next non-``--full`` ``dekko map`` run -- rather than requiring users
 # to know to pass ``--full`` themselves.
-_HEADER_DISPATCH_HEURISTIC_VERSION = 1
+_HEADER_DISPATCH_HEURISTIC_VERSION = 2
 
 # Bumped whenever ``extractor._heritage_rust_impl``'s subject-recovery
 # logic changes: an ``impl Trait
@@ -1896,6 +1896,11 @@ _CPP_USING_VERSION = 1
 # Bump when the extractor changes how it records C++ function
 # prototypes (``FileMap.cpp_decls``). The same kind of tree walk.
 _CPP_DECLS_VERSION = 1
+
+# Bump when ``extractor._mask_attribute_macros`` changes which C/C++
+# macro invocations it blanks out before the parse. Text rewriting
+# outside any query, so the spec loop below can't see it.
+_CPP_ATTRIBUTE_MACRO_VERSION = 1
 
 # Bump when the Tier-2 engine (``extractor_generic.py``) changes what
 # it yields for an unchanged row. The rows themselves are hashed below,
@@ -1974,6 +1979,7 @@ def spec_fingerprint() -> str:
     ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``,
     ``_CPP_CONSTRUCTION_VERSION``, ``_CPP_QUALIFIED_PATH_VERSION``,
     ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION``,
+    ``_CPP_ATTRIBUTE_MACRO_VERSION``,
     ``_TIER2_ENGINE_VERSION``, ``_PY_IMPORT_REBIND_VERSION``,
     ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION``,
     ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``,
@@ -2006,6 +2012,7 @@ def spec_fingerprint() -> str:
         f"cpp_qualified_path={_CPP_QUALIFIED_PATH_VERSION}",
         f"cpp_using={_CPP_USING_VERSION}",
         f"cpp_decls={_CPP_DECLS_VERSION}",
+        f"cpp_attribute_macro={_CPP_ATTRIBUTE_MACRO_VERSION}",
         f"tier2_engine={_TIER2_ENGINE_VERSION}",
         f"py_import_rebind={_PY_IMPORT_REBIND_VERSION}",
         f"call_arg_count={_CALL_ARG_COUNT_VERSION}",

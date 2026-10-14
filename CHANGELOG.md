@@ -9,6 +9,32 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.9] — 2026-10-14
+
+### Fixed
+- **A C/C++ class with a deprecated member is no longer dropped from
+  the map, namespace and all.** tree-sitter doesn't know
+  `ABSL_DEPRECATED("...")`; with a long enough message it gave up on
+  the whole enclosing class. The class symbol was lost, its inline
+  methods became free functions, and every later class in the file
+  lost a namespace level. tensorflow's `DatasetBase` (the base of
+  every dataset op) was a function with no subtypes, and a header
+  with no namespace could even be read as C. A deprecation macro
+  called with string literals only (`ABSL_DEPRECATED`,
+  `TFLITE_DEPRECATED`, any `*_DEPRECATED`) is now blanked out before
+  the parse, byte for byte, so spans and line numbers don't move. A
+  `#define` of the macro, or a call with a non-string argument, is
+  left alone. Every C/C++ file re-extracts once after the upgrade.
+  tensorflow: 10 core classes come back (`DatasetBase` with its 28
+  direct subtypes, `DeviceBase` 13, `DeviceFactory` 10,
+  `FunctionLibraryDefinition`, `XlaOpKernelContext`, `SparseTensor`,
+  ...), 183 symbols move to their right ids and 12 are new, heritage
+  rows +58, +713 / -284 call sites. Most lost sites were wrong
+  before (bare `indices(i)` calls had landed on `SparseTensor.indices`
+  once it was a free function, and are ambiguous now); 22
+  `flr->Instantiate(..)` sites on a typed parameter go ambiguous
+  until typed C++ parameters are walked. Map time unchanged.
+
 ## [1.9.8] — 2026-10-14
 
 ### Fixed
