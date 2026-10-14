@@ -6564,6 +6564,9 @@ _WALK_CPP_CAST = re.compile(
     r"\s*<(.+)>\s*\(\)\Z",
     re.S,
 )
+# A type name inside a Java type's arguments (``Repo`` in
+# ``Optional<Repo>``, ``Entry`` in ``Map<String, Entry>``).
+_JAVA_TYPE_ARG_TOKEN = re.compile(r"\b[A-Z]\w*")
 # Lowercase smart pointers whose methods are reached through ``->``.
 _WALK_LOWER_WRAPPERS = frozenset(
     {"unique_ptr", "shared_ptr", "optional", "reference_wrapper"}
@@ -6684,7 +6687,9 @@ def _call_walk(
 
     A foreign hop with more segments after it is ``unknown``: what it
     hands back may be in-repo. A C/C++ chain of calls on an outside type
-    without type arguments stays foreign (``_foreign_holds_through``).
+    without type arguments stays foreign (``_foreign_holds_through``),
+    and so does a Java chain of bare calls whose head is declared with
+    an outside type (``_java_chain_stays_outside``).
 
     Args:
         call: The raw call being resolved.
@@ -6717,7 +6722,11 @@ def _call_walk(
         # ``this.tasks.get(id).abort()`` on a ``Map``: the foreign hop
         # hands back something the walk can't name, not something
         # foreign.
-        return _WALK_UNKNOWN
+        result = _WALK_UNKNOWN
+    if result.kind == "unknown" and _java_chain_stays_outside(
+        call, segments, ctx
+    ):
+        return _WALK_FOREIGN
 
     return result
 
@@ -6737,6 +6746,33 @@ def _foreign_holds_through(
         return not result.type_args and all(s.endswith("()") for s in rest)
 
     return False
+
+
+def _java_chain_stays_outside(
+    call: RawCall, segments: list[str], ctx: _WalkCtx
+) -> bool:
+    """Whether a Java chain's head keeps every hop outside the repo.
+
+    ``ds.getConnection().getMetaData().getURL()`` on a ``DataSource
+    ds``: a method declared outside the repo returns a type declared
+    outside it, so the last call can't land on the repo's one
+    ``getURL``. Java's types are nominal, so this holds unless a hop
+    is generic in something the repo declares: a type argument of the
+    head's type (``Optional<Repo>.get()``), or a call's own argument,
+    which the extractor rules out by recording the head's type
+    (``RawCall.receiver_type``) only for a chain of bare calls.
+    """
+    text = call.receiver_type
+    if not text or len(segments) < 2 or _site_language(call.path) != "java":
+        return False
+    if _walk_type_text(text, call.path, ctx).kind != "foreign":
+        return False
+    _, _, args = text.partition("<")
+
+    return not any(
+        _walk_type_token(token, call.path, ctx)
+        for token in _JAVA_TYPE_ARG_TOKEN.findall(args)
+    )
 
 
 def _settled_before_lookup(

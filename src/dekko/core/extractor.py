@@ -1963,16 +1963,50 @@ def _java_receiver_type(
     node: Node,
     patterns: dict[int, frozenset[str]],
 ) -> str | None:
-    """The type a Java call's plain-name receiver is declared with.
+    """The type a Java call's receiver, or its chain's head, is declared
+    with.
 
-    Only for a receiver bound to a parameter or a local
+    A plain-name receiver bound to a parameter or a local
     (``config.getMaxRequestSize()`` on ``MultipartConfigElement
-    config``); a field's type is read by the resolver's walk.
+    config``); a field's type is read by the resolver's walk. For a
+    chain (``ds.getConnection().getMetaData().getURL()``), the type of
+    its head, a declared name or ``this.x``, when no call in the chain
+    takes an argument (``_java_chain_head_type``).
     """
+    obj = node.child_by_field_name("object")
+    if obj is None:
+        return None
+    if obj.type != "identifier":
+        return _java_chain_head_type(obj, patterns)
     if call.bound not in ("param", "local"):
         return None
-    obj = node.child_by_field_name("object")
-    if obj is None or obj.type != "identifier":
+
+    return _java_declared_type(obj, patterns)
+
+
+def _java_chain_head_type(
+    obj: Node,
+    patterns: dict[int, frozenset[str]],
+) -> str | None:
+    """The declared type of a Java chain's head, if every call is bare.
+
+    ``ds.getConnection().getMetaData()`` gives ``ds``'s type, and
+    ``this.flyway.getConfiguration()`` the field's. A call with
+    arguments ends it: a generic method can return a type its
+    arguments name (``template.findOne(q, Entry.class)``), and the
+    receiver text the resolver walks has no arguments left to tell.
+    """
+    while obj.type in ("method_invocation", "field_access"):
+        args = obj.child_by_field_name("arguments")
+        if args is not None and args.named_child_count:
+            return None
+        inner = obj.child_by_field_name("object")
+        if inner is None:
+            return None
+        if obj.type == "field_access" and inner.type == "this":
+            return _java_this_field_type(obj)
+        obj = inner
+    if obj.type != "identifier":
         return None
 
     return _java_declared_type(obj, patterns)

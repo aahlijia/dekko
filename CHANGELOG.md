@@ -9,6 +9,30 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.25] — 2026-10-14
+
+### Fixed
+- **A Java call chain that starts at a receiver declared outside the
+  repo stays outside.** `ds.getConnection().getMetaData().getURL()` on
+  a `DataSource ds` asks JDBC for a connection and then its metadata,
+  but past the first hop the walk only knew "outside, something", so
+  the ladder handed the last call to the repo's one `getURL`
+  (`OriginTrackedResource.getURL`), and `context.getEnvironment()
+  .getProperty(..)` to a test class's own `getProperty`. Java's types
+  are nominal, so a chain off a local, parameter, field or `this.x`
+  declared with an outside type is now external, when every call
+  before the last takes no arguments (a generic `template.findOne(q,
+  Entry.class)` can hand back a repo type) and the type names no
+  in-repo type argument (`Optional<Repo>.get()` does). Kotlin chains
+  are unchanged. spring-boot: -131 caller -> callee pairs at 158
+  sites, every one read wrong before (Flyway's `Configuration`,
+  Spring's `Environment`, `Stream.map`, Tomcat's `ProtocolHandler
+  .stop`); ambiguous rows 24,535 -> 22,967 (`webTestClient.get().uri
+  (..)` alone was 518), all now external; `unused` 1,740 -> 1,742
+  (`JavaConventions.apply`/`KotlinConventions.apply`, which Gradle
+  calls, lost their only callers, `project.getPlugins().apply(..)`),
+  `sanity --all` unchanged, map 26 s -> 27 s.
+
 ## [1.9.24] — 2026-10-14
 
 ### Fixed

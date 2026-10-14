@@ -261,9 +261,12 @@ class RawCall:
             cast<T>(..)`` records ``T``). Java: when the receiver is one
             plain name bound to a parameter or a local
             (``MultipartConfigElement``, ``Map<String, String>``,
-            ``var``). ``None`` when the declaration says nothing (``auto
-            x = f()``, an untyped lambda parameter), the head is neither,
-            or the language doesn't record it (only C++ and Java do).
+            ``var``), or the head of a chain whose calls take no
+            arguments (``ds`` in ``ds.getConnection().getMetaData()
+            .getURL()``, or ``this.x``). ``None`` when the declaration
+            says nothing (``auto x = f()``, an untyped lambda
+            parameter), the head is neither, or the language doesn't
+            record it (only C++ and Java do).
             Read by the resolver's receiver walk, like a typed
             parameter.
         receiver_init: Java only: the class a local receiver is built

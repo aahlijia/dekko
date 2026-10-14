@@ -1957,9 +1957,10 @@ _JAVA_TYPED_ARG_VERSION = 1
 _JAVA_ANONYMOUS_BODY_VERSION = 1
 
 # Bump when ``extractor._java_receiver_type`` changes which Java calls
-# get the declared type of their parameter or local receiver
-# (``RawCall.receiver_type``). Code outside the query.
-_JAVA_RECEIVER_TYPE_VERSION = 1
+# get the declared type of their parameter or local receiver, or of
+# their chain's head (``RawCall.receiver_type``). Code outside the
+# query.
+_JAVA_RECEIVER_TYPE_VERSION = 2
 
 # Bump when ``extractor._java_receiver_init`` changes which Java local
 # receivers record the class they are built from
