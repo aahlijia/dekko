@@ -6795,10 +6795,15 @@ def _walk_declared_receiver(
 
     Python: ``self``/``cls``, declared by the method's class
     (``_walk_python_self``).
+
+    Java and Kotlin: a parameter or local declared with an outside type
+    (``_walk_jvm_declared``).
     """
     local = _walk_local_type(call, ctx)
     if local is not None:
         return local
+    if _site_language(call.path) in ("java", "kotlin"):
+        return _walk_jvm_declared(name, call, caller, ctx)
     if caller is None:
         return None
     if _site_language(call.path) == "python":
@@ -6811,6 +6816,35 @@ def _walk_declared_receiver(
         return result
 
     return None
+
+
+def _walk_jvm_declared(
+    name: str, call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> WalkResult | None:
+    """A JVM parameter or local declared with an outside type: foreign.
+
+    ``config.getMaxRequestSize()`` on ``MultipartConfigElement config``
+    can only call the servlet API's method, so it goes external, as a
+    field of that type already does; the ladder used to hand it the
+    repo's lone ``getMaxRequestSize``. That holds for an outside
+    interface an in-repo class implements: the declared type is all the
+    call site knows. Java reads the type the extractor recorded
+    (``RawCall.receiver_type``); Kotlin reads a parameter's (its locals
+    are mostly inferred). Any other verdict is ``None``, so an in-repo
+    type stays with the rungs that read it today.
+    """
+    if call.bound not in ("param", "local"):
+        return None
+    if _site_language(call.path) == "kotlin":
+        param = _walk_param(caller, name) if call.bound == "param" else None
+        text = param.type if param is not None else None
+    else:
+        text = call.receiver_type
+    if not text or text.strip() in ("", "var"):
+        return None
+    result = _walk_type_text(text, call.path, ctx)
+
+    return result if result.kind == "foreign" else None
 
 
 def _walk_local_type(call: RawCall, ctx: _WalkCtx) -> WalkResult | None:

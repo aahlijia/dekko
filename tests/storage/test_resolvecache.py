@@ -1036,7 +1036,7 @@ JVM_ACCESS_SRC = {
     "src/main/java/app/User.java": (
         "package app;\n"
         "public class User {\n"
-        '    void go(Object h) { h.tidy("x"); }\n'
+        '    void go() { var h = make(); h.tidy("x"); }\n'
         "}\n"
     ),
     "src/main/java/app/Other.java": "package app;\npublic class Other { }\n",
@@ -1100,7 +1100,7 @@ JAVA_OVERLOAD_SRC = {
     "src/main/java/app/User.java": (
         "package app;\n"
         "public class User {\n"
-        '    void go(Object h) { h.tidy("x"); }\n'
+        '    void go() { var h = make(); h.tidy("x"); }\n'
         "}\n"
     ),
     "src/main/java/app/Other.java": "package app;\npublic class Other { }\n",

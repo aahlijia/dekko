@@ -1819,7 +1819,7 @@ def _collect_calls(
         if call is None:
             continue
         _tag_bound(spec, call, callee, bindings)
-        _tag_call_scope(spec, call, callee, cpp_locals)
+        _tag_call_scope(spec, call, callee, cpp_locals, patterns)
         if (
             spec.name == "java"
             and call_node is not None
@@ -1937,18 +1937,44 @@ def _tag_bound(
 
 
 def _tag_call_scope(
-    spec: LanguageSpec, call: RawCall, node: Node, cpp_locals: "_CppLocals"
+    spec: LanguageSpec,
+    call: RawCall,
+    node: Node,
+    cpp_locals: "_CppLocals",
+    patterns: dict[int, frozenset[str]],
 ) -> None:
     """Set what a call's language reads off the scope it sits in.
 
     Java: whether it is inside an anonymous class body
-    (``RawCall.anonymous``). C++: the declared type of a local receiver
-    head (``RawCall.receiver_type``).
+    (``RawCall.anonymous``), and the declared type of a receiver that
+    is a parameter or a local (``RawCall.receiver_type``). C++: the
+    declared type of a local receiver head.
     """
     if spec.name == "java":
         call.anonymous = _java_in_anonymous_body(node)
+        call.receiver_type = _java_receiver_type(call, node, patterns)
     elif spec.name == "cpp" and call.bound == "local" and call.receiver:
         call.receiver_type = cpp_locals.receiver_type(call, node)
+
+
+def _java_receiver_type(
+    call: RawCall,
+    node: Node,
+    patterns: dict[int, frozenset[str]],
+) -> str | None:
+    """The type a Java call's plain-name receiver is declared with.
+
+    Only for a receiver bound to a parameter or a local
+    (``config.getMaxRequestSize()`` on ``MultipartConfigElement
+    config``); a field's type is read by the resolver's walk.
+    """
+    if call.bound not in ("param", "local"):
+        return None
+    obj = node.child_by_field_name("object")
+    if obj is None or obj.type != "identifier":
+        return None
+
+    return _java_declared_type(obj, patterns)
 
 
 # One C++ local declaration: (declaration start byte, scope start byte,

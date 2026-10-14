@@ -9,6 +9,34 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.20] — 2026-10-14
+
+### Fixed
+- **A Java call on a parameter or local declared with an outside type
+  is external.** `config.getMaxRequestSize()` on a local
+  `MultipartConfigElement config` can only call the servlet API's
+  method, but nothing read a local's or a parameter's declared type,
+  so the ladder handed the call to the repo's lone
+  `getMaxRequestSize`, or left an ambiguous row when the repo had two
+  (`beanFactory.getBean(..)` on a Spring `BeanFactory`, `list.add(x)`,
+  `map.put(..)`, `sb.append(..)`). The extractor now records the type
+  a Java receiver's declaration writes when the receiver is a
+  parameter or a local, and a type that reads outside the repo sends
+  the call external, as a field of that type already did. That holds
+  for an outside interface an in-repo class implements: the declared
+  type is all the call site says. Kotlin parameters are read the same
+  way. An untyped declaration (`var`, a lambda parameter) and an
+  in-repo type leave the call as before. spring-boot: -1,109 caller
+  -> callee pairs at 1,217 call sites (`Object o; o.hashCode()` was
+  `ItemMetadata.hashCode`, `Thread t; t.start()` was
+  `NettyRSocketServer.start`), ambiguous rows 42,349 -> 32,985,
+  external call sites +14,579, `unused` 2,051 -> 2,054 (three methods
+  whose only callers were `List.size`, `HttpServletRequest` and Gradle
+  calls). About a dozen right edges go too, on a local declared with
+  an outside interface and built by an in-repo class (`provider =
+  new PropertiesChannelCredentialsProvider(..)`); the declared type
+  is what this reads.
+
 ## [1.9.19] — 2026-10-14
 
 ### Fixed
