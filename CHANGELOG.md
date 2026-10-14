@@ -9,6 +9,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.15] — 2026-10-14
+
+### Fixed
+- **A C++ class with a macro between `class` and its name is a class
+  again, and a deprecated alias parses as an alias.** tree-sitter took
+  `TF_LOCKABLE` in `class TF_LOCKABLE Sqlite : public RefCounted {`
+  for the class name and read the rest as a function, so there was no
+  `Sqlite` class and its methods hung off nothing. And
+  `using Status ABSL_DEPRECATE_AND_INLINE() = ::absl::Status;` read
+  as an assignment, not an alias. Both macros only expand to an
+  attribute, so they're now blanked out before the parse, byte for
+  byte, like the `*_DEPRECATED("..")` family: an ALL-CAPS name with
+  an underscore between `class`/`struct`/`union` and a name followed
+  by `final`, `:` or `{` (`TF_LOCKABLE`, `TF_SCOPED_LOCKABLE`,
+  `TF_PACKED`, `TF_CAPABILITY("mutex")`), and any empty
+  `*_DEPRECATE_AND_INLINE()`. `class RNG {` and `struct STAT_T x =
+  {..}` are left alone. Every C/C++ file re-extracts once after the
+  upgrade. tensorflow: 8 classes come back (`Sqlite`, `SqliteLock`,
+  `SqliteTransaction`, `ScopedUnlockUnrefVar`, the `wav` chunk
+  structs, ...), +56 / -4 call sites (the 4 lost were declarations
+  the bad parse read as calls), `Sqlite.Prepare` 8 -> 18 callers.
+
 ## [1.9.14] — 2026-10-14
 
 ### Fixed

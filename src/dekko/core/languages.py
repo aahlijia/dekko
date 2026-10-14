@@ -1900,7 +1900,7 @@ _CPP_DECLS_VERSION = 1
 # Bump when ``extractor._mask_attribute_macros`` changes which C/C++
 # macro invocations it blanks out before the parse. Text rewriting
 # outside any query, so the spec loop below can't see it.
-_CPP_ATTRIBUTE_MACRO_VERSION = 1
+_CPP_ATTRIBUTE_MACRO_VERSION = 2
 
 # Bump when the Tier-2 engine (``extractor_generic.py``) changes what
 # it yields for an unchanged row. The rows themselves are hashed below,

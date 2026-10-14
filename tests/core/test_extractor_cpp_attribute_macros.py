@@ -1,13 +1,16 @@
-"""C/C++ deprecation macros masked before parsing.
+"""C/C++ attribute macros masked before parsing.
 
 tree-sitter doesn't know ``ABSL_DEPRECATED("...")``. With a long enough
 message it gives up on the whole enclosing class: the class symbol is
 lost, its inline methods become free functions, and every later class
-in the file drops a namespace level. The extractor blanks the macro
-out, byte for byte, before the parse.
+in the file drops a namespace level. A macro between ``class`` and its
+name (``class TF_LOCKABLE Sqlite``) breaks the parse the same way. The
+extractor blanks each one out, byte for byte, before the parse.
 """
 
 from pathlib import Path
+
+from tree_sitter import Parser
 
 from dekko.core import languages
 from dekko.core.extractor import (
@@ -15,6 +18,7 @@ from dekko.core.extractor import (
     extract_file,
     looks_like_cpp_header,
 )
+from dekko.core.grammars import get_grammar
 
 _LONG = "Use the overload that passes in the options parameter."
 
@@ -119,3 +123,69 @@ def test_other_deprecation_macros_are_masked_too(tmp_path: Path) -> None:
     )
     symbols = _symbols(tmp_path, source, "r.h")
     assert "t.R.f" in symbols
+
+
+def _node_types(source: bytes) -> set[str]:
+    tree = Parser(get_grammar("cpp")).parse(_mask_attribute_macros(source))
+    seen: set[str] = set()
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        seen.add(node.type)
+        stack.extend(node.children)
+    return seen
+
+
+def test_an_empty_deprecate_and_inline_leaves_an_alias() -> None:
+    source = (
+        b"namespace tensorflow {\n"
+        b"using Status ABSL_DEPRECATE_AND_INLINE() = ::absl::Status;\n"
+        b"}\n"
+    )
+    masked = _mask_attribute_macros(source)
+    assert b"DEPRECATE_AND_INLINE" not in masked
+    assert len(masked) == len(source)
+    assert "alias_declaration" in _node_types(source)
+
+
+def test_a_macro_between_class_and_its_name_keeps_the_class(
+    tmp_path: Path,
+) -> None:
+    source = (
+        "namespace t {\n"
+        "class TF_LOCKABLE Sqlite : public Base {\n"
+        " public:\n"
+        "  int Prepare() { return 0; }\n"
+        "};\n"
+        "struct TF_PACKED Hdr {\n"
+        "  int size() const { return 1; }\n"
+        "};\n"
+        'class TF_CAPABILITY("mutex") mutex {\n'
+        "  void lock() {}\n"
+        "};\n"
+        "}\n"
+    )
+    symbols = _symbols(tmp_path, source, "s.h")
+    assert symbols["t.Sqlite"] == 2
+    assert symbols["t.Sqlite.Prepare"] == 4
+    assert "t.Hdr.size" in symbols
+    assert "t.mutex.lock" in symbols
+    assert not any("TF_" in name for name in symbols)
+
+
+def test_a_class_macro_mask_keeps_every_byte_offset() -> None:
+    source = b'class TF_CAPABILITY("mutex") mutex final : B {\n};\n'
+    masked = _mask_attribute_macros(source)
+    assert len(masked) == len(source)
+    assert masked.startswith(b"class ")
+    assert masked.endswith(b"mutex final : B {\n};\n")
+    assert b"CAPABILITY" not in masked
+
+
+def test_plain_class_heads_are_left_as_written() -> None:
+    source = (
+        b"class RNG {\n};\n"
+        b"class Foo final : Bar {\n};\n"
+        b"struct STAT_T x = {0};\n"
+    )
+    assert _mask_attribute_macros(source) == source

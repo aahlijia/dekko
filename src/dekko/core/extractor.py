@@ -207,35 +207,65 @@ def looks_like_cpp_header(source: bytes) -> bool:
 
 # A deprecation macro invoked with string literals only
 # (``ABSL_DEPRECATED("Use X.")``, ``TFLITE_DEPRECATED(...)``, the
-# message possibly split across lines). Its expansion is an attribute
-# and nothing else, but tree-sitter doesn't know the macro: with a long
-# enough message it gives up on the whole enclosing class and reads the
-# rest of the file one namespace level too high. A ``#define`` of the
-# macro and a call with a non-string argument don't match.
+# message possibly split across lines), or with no argument at all
+# (``using Status ABSL_DEPRECATE_AND_INLINE() = ::absl::Status;``). Its
+# expansion is an attribute and nothing else, but tree-sitter doesn't
+# know the macro: with a long enough message it gives up on the whole
+# enclosing class and reads the rest of the file one namespace level
+# too high, and the empty form turns an alias into an assignment. A
+# ``#define`` of the macro and a call with a non-string argument don't
+# match.
 _ATTRIBUTE_MACRO = re.compile(
     rb'\b[A-Z][A-Z0-9_]*_DEPRECATED\(\s*(?:"(?:[^"\\\n]|\\.)*"\s*)*\)'
+    rb"|\b[A-Z][A-Z0-9_]*_DEPRECATE_AND_INLINE\(\s*\)"
+)
+# An attribute macro between ``class``/``struct``/``union`` and the
+# real name (``class TF_LOCKABLE Sqlite : ..``, ``struct TF_PACKED H
+# {``, ``class TF_CAPABILITY("mutex") mutex {``). tree-sitter takes the
+# macro for the name and reads the rest as a function. C++ can't put a
+# type there, so an ALL-CAPS name with an underscore, followed by a
+# name and then ``final``, ``:`` or ``{``, is a macro; the underscore
+# keeps a short ALL-CAPS class name (``class RNG {``) out. Group 1 is
+# the macro.
+_CLASS_MACRO = re.compile(
+    rb"\b(?:class|struct|union)\s+"
+    rb"([A-Z][A-Z0-9]*_[A-Z0-9_]*(?:\([^()\n]*\))?)"
+    rb"\s+(?=[A-Za-z_]\w*\s*(?:final\b\s*)?[:{])"
 )
 _NOT_NEWLINE = re.compile(rb"[^\n]")
 
 
-def _mask_attribute_macros(source: bytes) -> bytes:
-    """Blank out every deprecation-macro invocation in C/C++ source.
+def _blank(text: bytes) -> bytes:
+    """``text`` with every byte but a newline turned into a space."""
+    return _NOT_NEWLINE.sub(b" ", text)
 
-    The preprocessor step dekko doesn't run, for the one macro family
-    whose expansion is only an attribute. Each byte of a match becomes
-    a space and newlines stay, so every offset and line number in the
-    parse tree is the same as in the file.
+
+def _blank_group(m: re.Match[bytes]) -> bytes:
+    """A match with its group 1 blanked and the rest kept as written."""
+    start = m.start(1) - m.start(0)
+    end = m.end(1) - m.start(0)
+    whole = m.group(0)
+    return whole[:start] + _blank(whole[start:end]) + whole[end:]
+
+
+def _mask_attribute_macros(source: bytes) -> bytes:
+    """Blank out every attribute-only macro invocation in C/C++ source.
+
+    The preprocessor step dekko doesn't run, for the macro shapes whose
+    expansion is only an attribute and which break the parse: the
+    deprecation family and a macro between ``class`` and its name. Each
+    masked byte becomes a space and newlines stay, so every offset and
+    line number in the parse tree is the same as in the file.
 
     Args:
         source: Raw file bytes.
 
     Returns:
-        ``source`` with each match replaced by whitespace of the same
+        ``source`` with each macro replaced by whitespace of the same
         length.
     """
-    return _ATTRIBUTE_MACRO.sub(
-        lambda m: _NOT_NEWLINE.sub(b" ", m.group(0)), source
-    )
+    masked = _ATTRIBUTE_MACRO.sub(lambda m: _blank(m.group(0)), source)
+    return _CLASS_MACRO.sub(_blank_group, masked)
 
 
 # ---------------------------------------------------------------------
