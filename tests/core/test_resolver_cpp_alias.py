@@ -271,7 +271,7 @@ def test_alias_is_never_a_call_or_heritage_target(tmp_path: Path) -> None:
         },
     )
     assert _callees(g, "use.cc::T") == {"base.h::Base.Ref"}
-    assert not any(e.supertype_id == "base.h::BaseAlias" for e in g.heritage)
+    assert not any(e.supertype == "base.h::BaseAlias" for e in g.heritage)
 
 
 def test_alias_is_visible_only_where_cpp_sees_it(tmp_path: Path) -> None:
