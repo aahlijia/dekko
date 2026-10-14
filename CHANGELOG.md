@@ -9,6 +9,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.18] — 2026-10-14
+
+### Fixed
+- **A bare C++ type name no longer reads a type nested in some other
+  class.** protobuf's `NodeDef` isn't in the map, and the repo's only
+  `NodeDef` is tflite's `GraphFloat32::NodeDef`, so every `NodeDef*`
+  and `NodeDef` local read as that struct; it has no `set_op` or
+  `name`, so the call fell through to the repo's lone method of that
+  name (`node->set_op("Const")` on a test matcher's `set_op`,
+  `node->name()` on a grappler optimizer's `name()`). A type nested in
+  a class is now read by its bare name only where C++ can see it:
+  inside the class (a file defining it or its members), in a class
+  derived from it, or in a file holding a class defined out of line
+  (`class Op::Dataset : public Base`), whose bases the map can't read.
+  A name that then matches nothing reads as outside the repo, unless
+  the repo has members of an out-of-line member class of that name
+  (`ClientSession::Impl`), which stays open. tensorflow: -2,009 / +64
+  call sites (every lost site read was a protobuf call, wrong before;
+  about 45 of the gains are known by-name misreads such as tflite's
+  flatbuffer `Tensor` and `table::Iterator`), ambiguous rows 135,360
+  -> 131,851, `NodeMatcherProperties.set_op` 741 -> 79 sites,
+  `ConstantFolding.name` 369 -> 128, `unused` 36,471 -> 36,476 (10
+  new, each an optimizer `name()` or similar that lost only protobuf
+  callers).
+
 ## [1.9.17] — 2026-10-14
 
 ### Fixed

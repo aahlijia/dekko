@@ -8016,7 +8016,9 @@ def _walk_type_token(
     nor defines, which is a global like the DOM's ``Request``. ``()``
     when it names only a Rust ``type`` alias, which the walk can't see
     through. Otherwise the types the import was followed to, else the
-    same-file types, else those nearest ``path``.
+    same-file types, else those nearest ``path``. A C/C++ type nested
+    in a class counts only where C++ lookup sees it
+    (``_cpp_nested_visible``).
     """
     key = (path, token)
     if key not in _WALK_TOKENS:
@@ -8065,6 +8067,13 @@ def _walk_type_token_uncached(
         for s in types
         if not (s.kind == "type_alias" and s.language == "rust")
     ]
+    if language in _CPP_FAMILY:
+        real = [s for s in real if _cpp_nested_visible(s, path, ctx)]
+        if not real:
+            # A member class the map has members for but no symbol
+            # (``class Outer::Impl {..}`` out of line) may be what the
+            # name means: open, not outside the repo.
+            return () if _CPP_PHANTOM_KEY + name in ctx.index else None
     if not real:
         return () if types else None
     if language == "rust" and imp is not None:
@@ -8076,6 +8085,78 @@ def _walk_type_token_uncached(
         return None
 
     return tuple(_walk_nearest(real, path))
+
+
+def _cpp_enclosing_type(sym: Symbol, ctx: _WalkCtx) -> Symbol | None:
+    """The in-repo C/C++ class ``sym`` is nested in, if any."""
+    segs = [s for s in _PATH_SPLIT.split(sym.qualname) if s]
+    if len(segs) < 2:
+        return None
+    parent = ".".join(segs[:-1])
+    for t in ctx.index.get(segs[-2], ()):
+        if _is_cpp_type(t) and t.qualname == parent and not _is_cpp_alias(t):
+            return t
+
+    return None
+
+
+def _cpp_nested_visible(sym: Symbol, path: str, ctx: _WalkCtx) -> bool:
+    """Whether C++ lookup from ``path`` can see type ``sym`` by its bare
+    name.
+
+    A type nested in a class is visible that way only inside the class
+    (a file defining it or its members), in a class derived from it,
+    or in a file holding a class defined out of line
+    (``class Op::Dataset : public Base``), whose bases the map can't
+    read. Any other type is always visible.
+    """
+    if sym.language not in _CPP_FAMILY:
+        return True
+    outer = _cpp_enclosing_type(sym, ctx)
+    if outer is None:
+        return True
+    scopes = {s.name for s in ctx.index.get(_CPP_FILE_SCOPES_KEY + path, ())}
+    if outer.path == path or outer.qualname in scopes:
+        return True
+    if _CPP_OOL_KEY + path in ctx.index:
+        return True
+
+    return any(_cpp_scope_derives(scope, outer, ctx) for scope in scopes)
+
+
+def _cpp_scope_derives(scope: str, outer: Symbol, ctx: _WalkCtx) -> bool:
+    """Whether the C/C++ class named ``scope`` has ``outer`` among its
+    supertypes, read by clause name up to ``_WALK_SUPER_DEPTH`` levels.
+
+    By name only: reading the clauses as types would come back through
+    ``_walk_type_token``.
+    """
+    last = scope.rsplit(".", 1)[-1]
+    level = [
+        t
+        for t in ctx.index.get(last, ())
+        if _is_cpp_type(t) and t.qualname == scope
+    ]
+    seen = {t.id for t in level}
+    for _ in range(_WALK_SUPER_DEPTH):
+        names = {
+            stand_in.name
+            for t in level
+            for stand_in in ctx.index.get(_SUPERS_KEY + t.id, [])
+        }
+        if outer.name in names:
+            return True
+        level = [
+            t
+            for n in names
+            for t in ctx.index.get(n, ())
+            if _is_cpp_type(t) and t.id not in seen
+        ]
+        seen.update(t.id for t in level)
+        if not level:
+            break
+
+    return False
 
 
 def _walk_in_import_crate(
@@ -11168,6 +11249,16 @@ _CPP_FILE_SCOPES_KEY = "::cpp-file-scopes::"
 # file (``name`` the declared name, ``qualname`` the written path), for
 # ``_walk_cpp_bare_token``.
 _CPP_FILE_USING_KEY = "::cpp-file-using::"
+# Reserved ``index`` namespace: ``_CPP_OOL_KEY + path`` is present when
+# that C/C++ file defines a class out of line (``class Op::Dataset :
+# public Base {..}``), whose bases the map can't read, so every nested
+# type stays visible there (``_cpp_nested_visible``).
+_CPP_OOL_KEY = "::cpp-out-of-line::"
+# Reserved ``index`` namespace: ``_CPP_PHANTOM_KEY + name`` is present
+# when the repo has members of a C/C++ member class called ``name`` that
+# the map has no symbol for (``ClientSession::Impl`` defined out of
+# line), so the bare name reads open rather than outside the repo.
+_CPP_PHANTOM_KEY = "::cpp-phantom::"
 
 # Reserved ``index`` namespace for C/C++ definitions whose arity a
 # prototype declares: ``_CPP_DECLARED_KEY + sym.id`` holds one copy of
@@ -11244,6 +11335,7 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
         _index_cpp_file_using(fm, index)
         _index_cpp_file_scopes(fm, index)
     _index_cpp_declared(files, index)
+    _index_cpp_phantoms(files, index)
     _index_constructions(files, index)
     _index_supertypes(files, index)
     for name, original in sorted(rust_renames(files)):
@@ -11286,7 +11378,13 @@ def _index_cpp_file_scopes(
     fm: FileMap, index: dict[str, list[Symbol]]
 ) -> None:
     """File the scopes ``fm``'s C/C++ definitions sit in, under
-    ``_CPP_FILE_SCOPES_KEY``."""
+    ``_CPP_FILE_SCOPES_KEY``, and mark a file defining a class out of
+    line under ``_CPP_OOL_KEY``."""
+    if any(
+        sym.language in _CPP_FAMILY and "::" in sym.qualname
+        for sym in fm.symbols
+    ):
+        index[_CPP_OOL_KEY + fm.path] = [_stand_in(fm.path)]
     scopes: set[str] = set()
     for sym in fm.symbols:
         if sym.language not in _CPP_FAMILY:
@@ -11367,6 +11465,37 @@ def _index_constructions(
         for clause in fm.heritage:
             if clause.subtype_id and clause.relation == "extends":
                 index.setdefault(_EXTENDS_KEY + clause.subtype_id, [])
+
+
+def _index_cpp_phantoms(
+    files: list[FileMap], index: dict[str, list[Symbol]]
+) -> None:
+    """File the names of C/C++ member classes the map has members for
+    but no symbol, under ``_CPP_PHANTOM_KEY``.
+
+    ``class ClientSession::Impl {..}`` defined out of line is no class
+    symbol, only its members are (``ClientSession.Impl.M``): a member
+    whose parent is not a type but whose grandparent is.
+    """
+    types = {
+        ".".join(s for s in _PATH_SPLIT.split(sym.qualname) if s)
+        for fm in files
+        for sym in fm.symbols
+        if sym.language in _CPP_FAMILY and sym.kind in TYPE_KINDS
+    }
+    for fm in files:
+        for sym in fm.symbols:
+            if sym.language not in _CPP_FAMILY or sym.kind in TYPE_KINDS:
+                continue
+            segs = [s for s in _PATH_SPLIT.split(sym.qualname) if s]
+            if len(segs) < 3:
+                continue
+            if ".".join(segs[:-1]) not in types and ".".join(segs[:-2]) in (
+                types
+            ):
+                index.setdefault(
+                    _CPP_PHANTOM_KEY + segs[-2], [_stand_in(segs[-2])]
+                )
 
 
 def _index_cpp_declared(
