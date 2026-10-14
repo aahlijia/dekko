@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.32] — 2026-10-14
+
+### Fixed
+- **A TS field typed with a utility type, a union or a type query no
+  longer reads as a type outside the repo.** The receiver walk took
+  `Pick<Svc, "run">`, `Partial<Svc>` and `Readonly<Svc>` by their
+  outer name, which no repo type has, so calls through such a field
+  went external: cline's `this.options.rebuilds.request(..)` on a
+  `Pick<SdkSessionRebuildScheduler, "request">` reached nothing. Those
+  utility types (and `Required`, `NonNullable`, `Omit`, `NoInfer`) are
+  now read as their first argument. A union drops its
+  `null`/`undefined` members and is outside only when every member is
+  (`string | Buffer`), so `Error | ClineError` no longer is. A type the
+  walk can't compute (`typeof x`, `typeof import('..')`, `keyof`, an
+  indexed access, `ReturnType<..>`) is unknown rather than outside, and
+  the name ladder takes the call as it does for an untyped receiver.
+  claude-code: +4 caller -> callee pairs (+5 sites, the lazy
+  `typeof import(..)` thunks); cline: +6 pairs (+6 sites); nothing
+  lost on either.
+
 ## [1.9.31] — 2026-10-14
 
 ### Fixed

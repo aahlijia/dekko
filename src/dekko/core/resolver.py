@@ -7977,11 +7977,14 @@ def _walk_type_text_uncached(
     Otherwise each token of the wrapper chain that names an in-repo
     type becomes a layer (``_walk_type_tokens``). A C/C++ text written
     with a scope is read by that whole path first
-    (``_walk_cpp_written_type``), and a JVM nested path with type
+    (``_walk_cpp_written_type``), a TS union or type operator by what it
+    means (``_walk_ts_written_type``), and a JVM nested path with type
     arguments (``JsonWriter.Members<LogEvent>``) by its path, not its
     outer type.
     """
     written = _walk_cpp_written_type(text, path, ctx)
+    if written is None:
+        written = _walk_ts_written_type(text, path, ctx)
     if written is not None:
         return written
     if _site_language(path) in _JVM_TYPE_LANGUAGES:
@@ -8130,6 +8133,90 @@ def _walk_cpp_bare_token(
             best.append(sym)
 
     return tuple(_walk_nearest(best, path)) or None
+
+
+# TS utility types that are still their first type argument to a
+# caller (``Pick<Svc, "run">`` has ``Svc``'s ``run``).
+_TS_PASS_THROUGH = re.compile(
+    r"\s*(?:Partial|Readonly|Required|NonNullable|Pick|Omit|NoInfer)"
+    r"\s*<(.*)>\s*\Z",
+    re.S,
+)
+# A TS type the walk can't compute: an object type literal, a type
+# query or operator, an indexed access, or a utility type whose result
+# isn't its argument.
+_TS_UNREADABLE = re.compile(
+    r"\A\s*\{|\btypeof\b|\bkeyof\b|\binfer\b|[\w$>)\]]\[\s*[\"'\w]"
+    r"|(?:\A|[^\w$.])(?:ReturnType|InstanceType|Awaited|Parameters"
+    r"|ConstructorParameters|Extract|Exclude|ThisType)\s*<"
+)
+_TS_NULLISH = frozenset({"null", "undefined", "void"})
+
+
+def _walk_ts_written_type(
+    text: str, path: str, ctx: _WalkCtx
+) -> WalkResult | None:
+    """What a TS union or type operator names; ``None`` for any other
+    text, or outside JS/TS.
+
+    A union or intersection drops its ``null``/``undefined``/``void``
+    members: one left is read on its own, several are ``foreign`` only
+    when every one is (``string | Buffer``) and ``unknown`` otherwise
+    (``Error | AppError``). ``Partial``, ``Readonly``, ``Required``,
+    ``NonNullable``, ``Pick``, ``Omit`` and ``NoInfer`` are read as
+    their first argument. ``typeof x``, ``keyof``, an indexed access,
+    an object type literal and the computing utility types
+    (``ReturnType<..>``) are ``unknown``: they name a type the walk
+    can't work out, which isn't one outside the repo.
+    """
+    if _site_language(path) not in _JS_FAMILY:
+        return None
+    members = _ts_type_members(text)
+    if len(members) > 1:
+        kinds = {_walk_type_text(m, path, ctx).kind for m in members}
+        return _WALK_FOREIGN if kinds == {"foreign"} else _WALK_UNKNOWN
+    if len(members) == 1 and members[0] != text.strip():
+        return _walk_type_text(members[0], path, ctx)
+    through = _TS_PASS_THROUGH.match(text)
+    if through:
+        first = _ts_first_type_arg(through.group(1))
+        return _walk_type_text(first, path, ctx) if first else _WALK_UNKNOWN
+    if _TS_UNREADABLE.search(text):
+        return _WALK_UNKNOWN
+
+    return None
+
+
+def _ts_type_members(text: str) -> list[str]:
+    """The top-level ``|``/``&`` members of a TS type text, nullish
+    ones dropped."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in "<([{":
+            depth += 1
+        elif ch in ">)]}":
+            depth -= 1
+        elif ch in "|&" and depth == 0:
+            parts.append(text[start:i].strip())
+            start = i + 1
+    parts.append(text[start:].strip())
+    return [p for p in parts if p and p not in _TS_NULLISH]
+
+
+def _ts_first_type_arg(args: str) -> str:
+    """The first top-level argument of a TS type argument list."""
+    depth = 0
+    for i, ch in enumerate(args):
+        if ch in "<([{":
+            depth += 1
+        elif ch in ">)]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return args[:i].strip()
+
+    return args.strip()
 
 
 # A C/C++ type written as a path: an optional leading ``::``, the
