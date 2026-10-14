@@ -9,6 +9,32 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.10] — 2026-10-14
+
+### Fixed
+- **A C/C++ type written with a scope is read by that whole path.**
+  The receiver walk read a declared type by its last token, so a field
+  or return typed `absl::Status` found the repo's unrelated
+  `tensorflow::experimental::cc::Status`, and every `status_.ok()`,
+  `Finish().ok()` and `.code()` on it landed there; `absl::Span<int>`
+  likewise found `mlrt::bc::Span`. A type text with scopes
+  (`absl::Status`, `const ::tflite::Interpreter&`,
+  `internal::GraphView*`) now finds only the in-repo C/C++ types on
+  that path, the innermost one when the writing file's own namespaces
+  reach several (C++ looks `internal::X` up from the enclosing
+  namespace first). A path through an in-repo class (a member alias
+  like `Analysis::Info`) is left to the ladder, a type under the head
+  namespace answers for a namespace-level alias
+  (`tflite::Interpreter` for `tflite::impl::Interpreter`), and
+  anything else, `std::` always, is outside the repo. A template is
+  judged by its outer path, unless that is a wrapper such as
+  `std::unique_ptr<Foo>`, which still reads as `Foo`. An unqualified
+  name reads as before. tensorflow: `experimental.cc.Status.ok` callers
+  270 -> 17, -592 / +50 call sites (the lost ones on `absl::Status`,
+  std containers, `xla::Shape` and MLIR types; `grappler::utils`
+  callers move to their own `utils::internal::GraphViewInternal`),
+  ambiguous rows 185,800 -> 185,740. Map time unchanged.
+
 ## [1.9.9] — 2026-10-14
 
 ### Fixed

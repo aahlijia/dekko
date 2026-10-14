@@ -7160,8 +7160,12 @@ def _walk_type_text_uncached(
     is ``foreign``. A text that says nothing (``any``) is ``unknown``.
     Otherwise each token of the wrapper chain
     (``_typed_param_token_candidates``) that names an in-repo type
-    becomes a layer.
+    becomes a layer. A C/C++ text written with a scope is read by that
+    whole path first (``_walk_cpp_written_type``).
     """
+    written = _walk_cpp_written_type(text, path, ctx)
+    if written is not None:
+        return written
     stripped = _walk_unwrapped(text.strip().lstrip("&*").strip())
     if stripped is None:
         return _WALK_FOREIGN
@@ -7183,6 +7187,119 @@ def _walk_type_text_uncached(
         return WalkResult("typed", tuple(layers), is_open)
 
     return _WALK_UNKNOWN if is_open else _WALK_FOREIGN
+
+
+# A C/C++ type written as a path: an optional leading ``::``, the
+# scopes, the name. Decorations (``_CPP_TYPE_DECORATION``, ``*``, ``&``)
+# and spaces are dropped before matching.
+_CPP_WRITTEN_PATH = re.compile(r"(::)?((?:[A-Za-z_]\w*::)+)?([A-Za-z_]\w*)\Z")
+_CPP_TYPE_DECORATION = re.compile(
+    r"\b(?:const|volatile|struct|class|typename|enum)\b"
+)
+
+
+def _walk_cpp_written_type(
+    text: str, path: str, ctx: _WalkCtx
+) -> WalkResult | None:
+    """The types a C/C++ type text written with a scope names.
+
+    ``absl::Status`` is read as that whole path, not by its last token
+    (which finds the repo's unrelated ``tf::experimental::Status``):
+
+    1. the in-repo C/C++ types whose qualname ends with the path; of
+       several, the innermost a scope of ``path``'s own definitions
+       reaches (``internal::View`` written in ``a::utils`` is
+       ``a::utils::internal``'s, as C++ lookup reads it);
+    2. none, and a scope of the path is an in-repo type: a member
+       alias (``Analysis::Info``) the map can't see, so ``unknown``;
+    3. none, and an in-repo type of that name sits under the head
+       namespace (``tflite::Interp`` for ``tflite::impl::Interp``, a
+       namespace-level alias): those types;
+    4. otherwise ``foreign``. ``std::`` is always foreign.
+
+    A template is judged by its outer path (``absl::Span<int>``),
+    unless its outer name is a wrapper whose argument is the type
+    (``std::unique_ptr<Foo>``).
+
+    Returns:
+        The verdict, or ``None`` outside C/C++ and for a text written
+        without a scope (or a name no in-repo type has), which the
+        by-name reading handles.
+    """
+    if _site_language(path) not in _CPP_FAMILY:
+        return None
+    written = _CPP_TYPE_DECORATION.sub(" ", text)
+    written = re.sub(r"\s+", "", written.replace("*", " ").replace("&", " "))
+    if "<" in written:
+        outer = written.split("<", 1)[0]
+        last = outer.rsplit("::", 1)[-1]
+        if (
+            "::" in outer
+            and last not in _WALK_LOWER_WRAPPERS
+            and last not in _TRANSPARENT_TYPE_WRAPPERS
+        ):
+            written = outer
+    match = _CPP_WRITTEN_PATH.match(written)
+    if match is None or not match.group(2):
+        return None
+    scopes = [s for s in match.group(2).split("::") if s]
+    name = match.group(3)
+    if scopes[0] == "std":
+        return _WALK_FOREIGN
+    types = [s for s in ctx.index.get(name, ()) if _is_cpp_type(s)]
+    if not types:
+        return None
+    anchored = bool(match.group(1))
+    found = [
+        s
+        for s in types
+        if _on_written_path(s.qualname, [*scopes, name], anchored)
+    ]
+    if found:
+        found = _cpp_innermost(found, len(scopes) + 1, path, ctx)
+    elif any(_is_cpp_type(s) for q in scopes for s in ctx.index.get(q, ())):
+        return _WALK_UNKNOWN
+    else:
+        found = [
+            s for s in types if scopes[0] in _PATH_SPLIT.split(s.qualname)[:-1]
+        ]
+    if not found:
+        return _WALK_FOREIGN
+
+    return WalkResult("typed", (tuple(_walk_nearest(found, path)),))
+
+
+def _is_cpp_type(sym: Symbol) -> bool:
+    """Whether ``sym`` is a C/C++ type."""
+    return sym.kind in TYPE_KINDS and sym.language in _CPP_FAMILY
+
+
+def _cpp_innermost(
+    found: list[Symbol], depth: int, path: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """The ``found`` types whose scope above the written path is the
+    longest one ``path``'s own definitions sit in; all of them when
+    none is.
+
+    ``depth`` is the written path's segment count, so what is left of
+    a qualname above it is the scope the path was looked up from.
+    """
+    scopes = {
+        "",
+        *(s.name for s in ctx.index.get(_CPP_FILE_SCOPES_KEY + path, ())),
+    }
+    best: list[Symbol] = []
+    best_len = -1
+    for sym in found:
+        prefix = [s for s in _PATH_SPLIT.split(sym.qualname) if s][:-depth]
+        if ".".join(prefix) not in scopes:
+            continue
+        if len(prefix) > best_len:
+            best, best_len = [sym], len(prefix)
+        elif len(prefix) == best_len:
+            best.append(sym)
+
+    return best or found
 
 
 def _walk_unwrapped(text: str) -> str | None:
@@ -10335,6 +10452,11 @@ _RUST_VARIANT_KEY = "::variant::"
 # re-exports as ``H::Name``.
 _CPP_SCOPE_KEY = "::cpp-scope::"
 _CPP_USING_KEY = "::cpp-using::"
+# Reserved ``index`` namespace holding stand-ins: ``_CPP_FILE_SCOPES_KEY
+# + path`` has one per scope a C/C++ file's own definitions sit in (each
+# dotted qualname prefix, the stand-in's ``name``), for
+# ``_cpp_innermost``.
+_CPP_FILE_SCOPES_KEY = "::cpp-file-scopes::"
 
 # Reserved ``index`` namespace for C/C++ definitions whose arity a
 # prototype declares: ``_CPP_DECLARED_KEY + sym.id`` holds one copy of
@@ -10387,9 +10509,9 @@ _UNNAMED_CTOR_LANGUAGES = frozenset(_UNNAMED_CTOR_NAMES)
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
     ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
-    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY``,
-    ``_RUST_RENAMED_KEY``, ``_RUST_DOT_KEY`` and ``_SUPERS_KEY``
-    entries."""
+    ``_CPP_FILE_SCOPES_KEY``, ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``,
+    ``_EXTENDS_KEY``, ``_RUST_RENAMED_KEY``, ``_RUST_DOT_KEY`` and
+    ``_SUPERS_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -10402,6 +10524,7 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     for fm in files:
         for entry in fm.cpp_using:
             _index_cpp_using(entry, index)
+        _index_cpp_file_scopes(fm, index)
     _index_cpp_declared(files, index)
     _index_constructions(files, index)
     _index_supertypes(files, index)
@@ -10423,6 +10546,24 @@ def _index_symbol(sym: Symbol, index: dict[str, list[Symbol]]) -> None:
         for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
             if scope:
                 index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
+
+
+def _index_cpp_file_scopes(
+    fm: FileMap, index: dict[str, list[Symbol]]
+) -> None:
+    """File the scopes ``fm``'s C/C++ definitions sit in, under
+    ``_CPP_FILE_SCOPES_KEY``."""
+    scopes: set[str] = set()
+    for sym in fm.symbols:
+        if sym.language not in _CPP_FAMILY:
+            continue
+        segs = [s for s in _PATH_SPLIT.split(sym.qualname) if s]
+        for i in range(1, len(segs)):
+            scopes.add(".".join(segs[:i]))
+    if scopes:
+        index[_CPP_FILE_SCOPES_KEY + fm.path] = [
+            _stand_in(scope) for scope in sorted(scopes)
+        ]
 
 
 def _stand_in(name: str, path: str = "", qualname: str = "") -> Symbol:
