@@ -254,6 +254,14 @@ class RawCall:
             at any depth. That class's supertype isn't recorded, so the
             resolver can't read the scope a simple name is looked up
             in there. Always ``False`` outside Java.
+        receiver_type: The type the receiver's head was declared with
+            when that head is a local (``bound == "local"``), as written
+            (``mlir::ShapedType``, ``const OpContext*``), or the target
+            of a cast it was initialized from (``auto t =
+            cast<T>(..)`` records ``T``). ``None`` when the declaration
+            says nothing (``auto x = f()``), the head isn't a local, or
+            the language doesn't record it (only C++ does). Read by the
+            resolver's receiver walk, like a typed parameter.
     """
 
     caller_id: str | None
@@ -266,6 +274,7 @@ class RawCall:
     arg_kinds: tuple[str, ...] | None = None
     bound: str | None = None
     anonymous: bool = False
+    receiver_type: str | None = None
 
 
 @dataclass

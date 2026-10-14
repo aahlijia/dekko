@@ -1711,6 +1711,7 @@ def _collect_calls(
     calls: list[RawCall] = []
     # Pattern variable names per Java function (``_java_pattern_names``).
     patterns: dict[int, frozenset[str]] = {}
+    cpp_locals = _CppLocals(spec, root)
     for _, caps in _run_query(spec.grammar, spec.call_query, root):
         callee = _one(caps, "callee")
         if callee is None:
@@ -1733,8 +1734,7 @@ def _collect_calls(
         if call is None:
             continue
         _tag_bound(spec, call, callee, bindings)
-        if spec.name == "java":
-            call.anonymous = _java_in_anonymous_body(callee)
+        _tag_call_scope(spec, call, callee, cpp_locals)
         if (
             spec.name == "java"
             and call_node is not None
@@ -1849,6 +1849,152 @@ def _tag_bound(
         return
     claims = bindings.get(_callee_head(call.text))
     call.bound = _bound_kind(spec, node, claims)
+
+
+def _tag_call_scope(
+    spec: LanguageSpec, call: RawCall, node: Node, cpp_locals: "_CppLocals"
+) -> None:
+    """Set what a call's language reads off the scope it sits in.
+
+    Java: whether it is inside an anonymous class body
+    (``RawCall.anonymous``). C++: the declared type of a local receiver
+    head (``RawCall.receiver_type``).
+    """
+    if spec.name == "java":
+        call.anonymous = _java_in_anonymous_body(node)
+    elif spec.name == "cpp" and call.bound == "local" and call.receiver:
+        call.receiver_type = cpp_locals.receiver_type(call, node)
+
+
+# One C++ local declaration: (declaration start byte, scope start byte,
+# scope end byte, declared type or ``None`` when it says nothing).
+_LocalType = tuple[int, int, int, str | None]
+
+
+class _CppLocals:
+    """A C++ file's local declarations, read on the first call that
+    needs them (``_cpp_local_types``)."""
+
+    def __init__(self, spec: LanguageSpec, root: Node) -> None:
+        self._spec = spec
+        self._root = root
+        self._table: dict[str, list[_LocalType]] | None = None
+
+    def receiver_type(self, call: RawCall, node: Node) -> str | None:
+        """The declared type of ``call``'s local receiver head."""
+        if self._table is None:
+            self._table = _cpp_local_types(self._spec, self._root)
+
+        return _cpp_receiver_type(self._table, call, node)
+
+
+# Where C++ declares a typed local, and its scope's captures.
+_CPP_LOCAL_TYPE_QUERY = """
+(declaration type: (_) @type) @decl
+(for_range_loop type: (_) @type) @range
+"""
+
+# Casts whose template argument is the type of what they hand back.
+_CPP_CASTS = frozenset(
+    {
+        "static_cast",
+        "dynamic_cast",
+        "reinterpret_cast",
+        "const_cast",
+        "cast",
+        "dyn_cast",
+        "cast_or_null",
+        "dyn_cast_or_null",
+        "down_cast",
+        "cast_if_present",
+        "dyn_cast_if_present",
+    }
+)
+
+
+def _cpp_local_types(
+    spec: LanguageSpec, root: Node
+) -> dict[str, list[_LocalType]]:
+    """Every C++ local declaration in the file, keyed by name.
+
+    A declaration outside every function and block scope is a global,
+    not a local, and is left out (the binding pass leaves it out too).
+    A range ``for`` binds its name in the loop.
+    """
+    scopes = spec.binding_function_scopes + spec.binding_block_scopes
+    out: dict[str, list[_LocalType]] = {}
+    for _, caps in _run_query(spec.grammar, _CPP_LOCAL_TYPE_QUERY, root):
+        type_node = _one(caps, "type")
+        range_loop = _one(caps, "range")
+        decl = range_loop or _one(caps, "decl")
+        if type_node is None or decl is None:
+            continue
+        scope = (
+            range_loop
+            if range_loop is not None
+            else _scope_above(decl.parent, scopes)
+        )
+        if scope is None:
+            continue
+        written = _text(type_node)
+        for declarator in decl.children_by_field_name("declarator"):
+            typ = _cpp_declared_type(written, declarator)
+            for ident in _pattern_identifiers(declarator):
+                out.setdefault(_text(ident), []).append(
+                    (decl.start_byte, scope.start_byte, scope.end_byte, typ)
+                )
+    return out
+
+
+def _cpp_declared_type(written: str, declarator: Node) -> str | None:
+    """The type one C++ declarator gives its name, or ``None``.
+
+    ``auto`` says nothing, unless the initializer is a cast
+    (``auto t = llvm::cast<T>(v)``), whose template argument is the
+    type.
+    """
+    if written != "auto":
+        return written
+    if declarator.type != "init_declarator":
+        return None
+
+    return _cpp_cast_target(declarator.child_by_field_name("value"))
+
+
+def _cpp_cast_target(init: Node | None) -> str | None:
+    """``T`` of an initializer ``[ns::]cast<T>(..)``, else ``None``."""
+    if init is None or init.type != "call_expression":
+        return None
+    fn = init.child_by_field_name("function")
+    while fn is not None and fn.type == "qualified_identifier":
+        fn = fn.child_by_field_name("name")
+    if fn is None or fn.type != "template_function":
+        return None
+    name = fn.child_by_field_name("name")
+    args = fn.child_by_field_name("arguments")
+    if name is None or args is None or _text(name) not in _CPP_CASTS:
+        return None
+
+    return _text(args)[1:-1].strip() or None
+
+
+def _cpp_receiver_type(
+    local_types: dict[str, list[_LocalType]], call: RawCall, node: Node
+) -> str | None:
+    """The declared type of a C++ call's local receiver head.
+
+    The nearest declaration of the head before the call, in a scope
+    the call sits in, decides; a declaration that says nothing
+    (``auto x = f()``) shadows an outer typed one.
+    """
+    at = node.start_byte
+    best: _LocalType | None = None
+    for entry in local_types.get(_callee_head(call.text), ()):
+        start, scope_start, scope_end, _ = entry
+        if start < at and scope_start <= at < scope_end:
+            if best is None or start > best[0]:
+                best = entry
+    return best[3] if best is not None else None
 
 
 def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:

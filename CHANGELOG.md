@@ -9,6 +9,34 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.13] — 2026-10-14
+
+### Fixed
+- **A C++ call on a typed local is walked from the local's type.**
+  Nothing read the type a local was declared with, so
+  `mlir::ShapedType t = ..; t.getElementType()`, `const Tensor& t =
+  ..; t.dims()` and `for (const Edge* e : n->in_edges())
+  e->IsControlEdge()` all went to the ladder by name, landing on the
+  repo's one method of that name or tying across every one. The
+  extractor now records a local receiver's declared type
+  (`RawCall.receiver_type`): the type as written, the target of a
+  cast it was initialized from (`auto t = llvm::cast<T>(v)`), or
+  nothing for a plain `auto x = f()`, which also shadows an outer
+  typed declaration. The walk takes it like a typed parameter's: an
+  outside type sends the call external, an in-repo type narrows it
+  to that type's members. tensorflow: +21,783 / -9,993 call sites
+  (7,870 of the lost are external now, 1,697 moved to the right
+  member), ambiguous rows 177,602 -> 162,369;
+  `MlirTensor.getElementType` callers 651 -> 140,
+  `DataTypeSet.size` 408 -> 217. Map time unchanged.
+- **Known gap:** a type written through a C++ `using`/`typedef` alias
+  is still read by name. `Status s; s.ok()` (an alias of
+  `absl::Status`) lands on the repo's `experimental::cc::Status.ok`
+  again (callers 20 -> 173), and a local typed by an in-repo alias
+  (tflite's `SumOpConstModel m; m.Invoke()`, ~490 sites) or by a
+  class tree-sitter mis-parses (`class TF_LOCKABLE Sqlite`) now goes
+  external instead of reaching the method.
+
 ## [1.9.12] — 2026-10-14
 
 ### Fixed

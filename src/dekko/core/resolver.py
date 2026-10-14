@@ -6779,12 +6779,16 @@ def _walk_declared_receiver(
     the ladder. ``None`` means the language has no reading for this
     receiver, and the one-segment rules below run as before.
 
-    C and C++: a typed parameter of the caller. The typed-parameter
-    rung compares ``Type.name`` with qualnames, which a namespaced C++
-    member never matches, and an outside type (``mlir::Value``,
-    ``std::vector<int>``) gives it nothing to say, so the ladder's sole
-    candidate took the call.
+    C and C++: a typed local (``RawCall.receiver_type``), else a typed
+    parameter of the caller. The typed-parameter rung compares
+    ``Type.name`` with qualnames, which a namespaced C++ member never
+    matches, an outside type (``mlir::Value``, ``std::vector<int>``)
+    gives it nothing to say, and nothing read a local's type at all, so
+    the ladder's sole candidate took the call.
     """
+    local = _walk_local_type(call, ctx)
+    if local is not None:
+        return local
     if caller is None:
         return None
     if _site_language(call.path) in _CPP_FAMILY:
@@ -6795,6 +6799,18 @@ def _walk_declared_receiver(
         return result
 
     return None
+
+
+def _walk_local_type(call: RawCall, ctx: _WalkCtx) -> WalkResult | None:
+    """The walk from the declared type of a call's local receiver head.
+
+    ``None`` when the extractor recorded no type for it (only C++
+    records one: ``mlir::ShapedType t = ..``, ``auto t = cast<T>(..)``).
+    """
+    if not call.receiver_type or _site_language(call.path) not in _CPP_FAMILY:
+        return None
+
+    return _walk_type_text(call.receiver_type, call.path, ctx)
 
 
 def _walk_nested_param(
@@ -6968,8 +6984,9 @@ def _walk_hop_zero(
     caller: Symbol | None,
     ctx: _WalkCtx,
 ) -> tuple[WalkResult, int]:
-    """Type a receiver's first segment: self, a parameter, a type, or
-    (Java, Kotlin, C++) a field used without ``this``.
+    """Type a receiver's first segment: self, a typed local (C++), a
+    parameter, a type, or (Java, Kotlin, C++) a field used without
+    ``this``.
 
     Returns the result and how many segments it used: two for a
     parameter with an inline object type (``input: { client: Client }``),
@@ -6980,6 +6997,9 @@ def _walk_hop_zero(
         return _walk_container(caller, ctx), 1
     if first.endswith("()"):
         return _walk_bare_call(first[:-2], path, caller, ctx), 1
+    local = _walk_local_type(call, ctx)
+    if local is not None:
+        return local, 1
     param = _walk_param(caller, first)
     if param is not None:
         return _walk_param_type(param, nxt, caller, ctx)
