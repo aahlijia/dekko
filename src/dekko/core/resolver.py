@@ -6590,6 +6590,11 @@ _SCOPE_SUPERS: dict[str, tuple[tuple[Symbol, ...], bool]] = {}
 # Whether a type's supertype clauses (its own or an in-repo
 # supertype's) name an in-repo Java type that didn't resolve, per id.
 _SCOPE_UNREAD: dict[str, bool] = {}
+# Python module (dotted, from the repo root) -> its file, and whether a
+# Python class layer has a supertype clause up its chain the map can't
+# place, per layer's ids.
+_PY_MODULE_FILES: dict[str, str] = {}
+_PY_SUPERS_UNREAD: dict[tuple[str, ...], bool] = {}
 
 
 def _reset_walk_memo() -> None:
@@ -6603,6 +6608,8 @@ def _reset_walk_memo() -> None:
         _SCOPE_LEVELS,
         _SCOPE_SUPERS,
         _SCOPE_UNREAD,
+        _PY_MODULE_FILES,
+        _PY_SUPERS_UNREAD,
     ):
         memo.clear()
 
@@ -6785,12 +6792,17 @@ def _walk_declared_receiver(
     matches, an outside type (``mlir::Value``, ``std::vector<int>``)
     gives it nothing to say, and nothing read a local's type at all, so
     the ladder's sole candidate took the call.
+
+    Python: ``self``/``cls``, declared by the method's class
+    (``_walk_python_self``).
     """
     local = _walk_local_type(call, ctx)
     if local is not None:
         return local
     if caller is None:
         return None
+    if _site_language(call.path) == "python":
+        return _walk_python_self(name, call, caller, ctx)
     if _site_language(call.path) in _CPP_FAMILY:
         param = _walk_param(caller, name)
         if param is None or not param.type:
@@ -6811,6 +6823,264 @@ def _walk_local_type(call: RawCall, ctx: _WalkCtx) -> WalkResult | None:
         return None
 
     return _walk_type_text(call.receiver_type, call.path, ctx)
+
+
+def _walk_python_self(
+    name: str, call: RawCall, caller: Symbol, ctx: _WalkCtx
+) -> WalkResult | None:
+    """``self``/``cls`` in a Python method: the caller's class, walked.
+
+    ``self.skipTest()`` in a ``unittest.TestCase`` subclass found no
+    ``skipTest`` on the class, so the ladder's one repo ``skipTest``, on
+    an unrelated class, took it. Walked, the class's own and inherited
+    members decide, then a subclass's (a template hook the base calls),
+    and a method none of them has is external.
+
+    ``None`` keeps the old reading: outside a class, for a nested class
+    built through ``self`` (``self._Creator(..)``: a type is no member
+    the walk reads), and when a supertype clause up the class's chain
+    is one the map can't place, which could hold the method.
+    """
+    if name not in ("self", "cls"):
+        return None
+    container = _walk_container(caller, ctx)
+    if container.kind != "typed":
+        return None
+    layer = container.layers[0]
+    if _python_nested_type(layer, call.name, ctx):
+        return None
+    if _python_supers_unread(layer, ctx):
+        return None
+
+    return container
+
+
+def _python_nested_type(
+    layer: tuple[Symbol, ...], name: str, ctx: _WalkCtx
+) -> bool:
+    """Whether a type in ``layer``, or a supertype, declares a nested
+    type called ``name``."""
+    level = list(layer)
+    seen = {t.id for t in layer}
+    for _ in range(_WALK_SUPER_DEPTH + 1):
+        for owner in level:
+            qual = f"{owner.qualname}.{name}"
+            if any(
+                s.kind in TYPE_KINDS and s.qualname == qual
+                for s in ctx.by_name_path.get((name, owner.path), ())
+            ):
+                return True
+        level = [
+            s
+            for t in level
+            for s in _walk_supertypes(t, ctx)
+            if s.id not in seen
+        ]
+        if not level:
+            break
+        seen.update(s.id for s in level)
+    return False
+
+
+def _python_supers_unread(layer: tuple[Symbol, ...], ctx: _WalkCtx) -> bool:
+    """Whether a supertype clause up ``layer``'s chain is unread
+    (``_python_supertype_clause``), memoized per layer."""
+    key = tuple(t.id for t in layer)
+    hit = _PY_SUPERS_UNREAD.get(key)
+    if hit is None:
+        hit = _python_supers_unread_uncached(layer, ctx)
+        _PY_SUPERS_UNREAD[key] = hit
+    return hit
+
+
+def _python_supers_unread_uncached(
+    layer: tuple[Symbol, ...], ctx: _WalkCtx
+) -> bool:
+    """``_python_supers_unread`` without the memo: breadth-first up the
+    in-repo supertypes."""
+    seen = {t.id for t in layer}
+    level = list(layer)
+    for _ in range(_WALK_SUPER_DEPTH + 2):
+        nxt: list[Symbol] = []
+        for owner in level:
+            for stand_in in ctx.index.get(_SUPERS_KEY + owner.id, []):
+                found, verdict = _python_supertype_clause(stand_in, owner, ctx)
+                if verdict == _CLAUSE_UNREAD:
+                    return True
+                nxt.extend(t for t in found if t.id not in seen)
+        if not nxt:
+            break
+        seen.update(t.id for t in nxt)
+        level = nxt
+    return False
+
+
+# How a Python supertype clause reads (``_python_supertype_clause``):
+# to in-repo types, to something outside the repo, or to nothing the
+# map can place.
+_CLAUSE_READ = "read"
+_CLAUSE_OUTSIDE = "outside"
+_CLAUSE_UNREAD = "unread"
+# Bases that are Python's own: a class deriving from one has no repo
+# supertype there.
+_PY_BUILTIN_BASES = frozenset(
+    {
+        "object",
+        "type",
+        "property",
+        "staticmethod",
+        "classmethod",
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "str",
+        "bytes",
+        "int",
+        "float",
+        "BaseException",
+        "Exception",
+        "ArithmeticError",
+        "AssertionError",
+        "AttributeError",
+        "ImportError",
+        "IndexError",
+        "IOError",
+        "KeyError",
+        "LookupError",
+        "NotImplementedError",
+        "OSError",
+        "RuntimeError",
+        "StopIteration",
+        "TypeError",
+        "ValueError",
+        "Warning",
+        "UserWarning",
+        "DeprecationWarning",
+    }
+)
+# Import hops followed through re-exporting modules before giving up.
+_PY_REEXPORT_DEPTH = 4
+
+
+def _python_supertype_clause(
+    stand_in: Symbol, owner: Symbol, ctx: _WalkCtx
+) -> tuple[tuple[Symbol, ...], str]:
+    """The in-repo types one Python supertype clause names, and how it read.
+
+    ``mod.Name``, with ``mod`` an in-repo module the file imports, is
+    read in that module (``_python_reexported_type``): tensorflow's
+    ``test.TestCase`` is ``platform/test.py``'s import of
+    ``TensorFlowTestCase``, which the bare name ``TestCase`` never
+    finds. A bare ``Name`` is read as a type token. A clause is outside
+    when it names an import from outside the repo, a builtin, a keyword
+    (``metaclass=``) or a name no repo type has, and unread when the map
+    can't place it at all.
+    """
+    written = stand_in.qualname.strip()
+    head, dot, name = written.rpartition(".")
+    imports = ctx.imports_by_file.get(owner.path, {})
+    if dot and head and "." not in head and "(" not in written:
+        imp = imports.get(head)
+        if imp is None:
+            return (), _CLAUSE_UNREAD
+        if not _import_is_in_repo(imp, ctx.repo_stems):
+            return (), _CLAUSE_OUTSIDE
+        module_file = _python_module_file(imp.source, ctx)
+        if module_file is None:
+            return (), _CLAUSE_UNREAD
+        return _python_reexported_type(module_file, name, ctx, 0)
+    if dot:
+        return (), _CLAUSE_UNREAD
+    imp = imports.get(written)
+    if imp is not None and not _import_is_in_repo(imp, ctx.repo_stems):
+        return (), _CLAUSE_OUTSIDE
+    found = _walk_type_token(written, owner.path, ctx) or ()
+    if found:
+        return found, _CLAUSE_READ
+    if written in _PY_BUILTIN_BASES or "(" in written or "=" in written:
+        return (), _CLAUSE_OUTSIDE
+    if imp is None and not any(
+        s.kind in TYPE_KINDS for s in ctx.index.get(written, ())
+    ):
+        return (), _CLAUSE_OUTSIDE
+
+    return (), _CLAUSE_UNREAD
+
+
+def _python_reexported_type(
+    module_file: str, name: str, ctx: _WalkCtx, depth: int
+) -> tuple[tuple[Symbol, ...], str]:
+    """The type ``name`` means in a Python module, and how it read.
+
+    The module's own class ``name``, else its import of ``name``
+    followed (``from x import Y as name`` follows ``Y``), else its star
+    imports: ``from absl.testing.absltest import *`` puts ``TestCase``
+    outside the repo when no in-repo star has it.
+    """
+    own = tuple(
+        s
+        for s in ctx.by_name_path.get((name, module_file), ())
+        if s.kind in TYPE_KINDS and s.qualname == name
+    )
+    if own:
+        return own, _CLAUSE_READ
+    if depth >= _PY_REEXPORT_DEPTH:
+        return (), _CLAUSE_UNREAD
+    table = ctx.imports_by_file.get(module_file, {})
+    imp = table.get(name)
+    if imp is None:
+        return _python_star_type(table, name, ctx, depth)
+    if not _import_is_in_repo(imp, ctx.repo_stems):
+        return (), _CLAUSE_OUTSIDE
+    parent, _, last = imp.source.rpartition(".")
+    target = _python_module_file(parent, ctx)
+    if target is None:
+        return (), _CLAUSE_UNREAD
+
+    return _python_reexported_type(target, last, ctx, depth + 1)
+
+
+def _python_star_type(
+    table: dict[str, Import], name: str, ctx: _WalkCtx, depth: int
+) -> tuple[tuple[Symbol, ...], str]:
+    """``name`` through a module's star imports (``_PY_STAR_KEY``)."""
+    stars = [imp for key, imp in table.items() if key.startswith(_PY_STAR_KEY)]
+    if not stars:
+        return (), _CLAUSE_UNREAD
+    for star in stars:
+        if not _import_is_in_repo(star, ctx.repo_stems):
+            continue
+        target = _python_module_file(star.source, ctx)
+        if target is None:
+            continue
+        found = _python_reexported_type(target, name, ctx, depth + 1)
+        if found[0]:
+            return found
+    if all(not _import_is_in_repo(s, ctx.repo_stems) for s in stars):
+        return (), _CLAUSE_OUTSIDE
+
+    return (), _CLAUSE_UNREAD
+
+
+# ``_PY_MODULE_FILES`` holds this key once it has been filled.
+_PY_MODULES_BUILT = "::built::"
+
+
+def _python_module_file(source: str, ctx: _WalkCtx) -> str | None:
+    """The file of the Python module ``source`` names (``a.b.c``),
+    dotted from the repo root, or ``None``."""
+    if _PY_MODULES_BUILT not in _PY_MODULE_FILES:
+        paths = {path for _, path in ctx.by_name_path}
+        paths.update(ctx.imports_by_file)
+        for path in sorted(paths):
+            if path.endswith(_PY_EXTENSIONS):
+                module = _python_module_path(path).replace("/", ".")
+                _PY_MODULE_FILES.setdefault(module, path)
+        _PY_MODULE_FILES[_PY_MODULES_BUILT] = ""
+
+    return _PY_MODULE_FILES.get(source) or None
 
 
 def _walk_nested_param(
@@ -7197,8 +7467,12 @@ def _walk_supertype(
     A JVM clause written as a nested path is read by that path:
     ``class Options extends Api.Options`` by its last segment alone
     would find the ``Options`` declaring it, and see no supertype at
-    all. Every other clause is read by its name, as a type token.
+    all. A Python clause is read through the module it names
+    (``_python_supertype_clause``). Every other clause is read by its
+    name, as a type token.
     """
+    if owner.language == "python":
+        return _python_supertype_clause(stand_in, owner, ctx)[0]
     written = _declared_type_text(stand_in.qualname, owner.path).strip()
     if (
         owner.language in _JVM_TYPE_LANGUAGES
@@ -7828,20 +8102,72 @@ def _walk_typed_verdict(
 def _walk_implementor_members(
     walk: WalkResult, name: str, ctx: _WalkCtx
 ) -> list[Symbol]:
-    """``name`` on the types that implement the walked layer's types."""
+    """``name`` on the types that implement the walked layer's types.
+
+    Python looks further (``_python_descendant_members``).
+    """
     for layer in walk.layers:
         found = _walk_unique(
             [
                 m
                 for owner in layer
-                for sub in ctx.index.get(_SUBS_KEY + owner.name, ())
-                if _resolution_language(sub.language)
-                == _resolution_language(owner.language)
-                for m in _walk_own_members(sub, name, ctx)
+                for m in _walk_owner_implementor_members(owner, name, ctx)
             ]
         )
         if found:
             return found
+    return []
+
+
+def _walk_owner_implementor_members(
+    owner: Symbol, name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """``name`` on the types that implement ``owner``."""
+    subs = _walk_direct_subtypes(owner, ctx)
+    if owner.language == "python":
+        return _python_descendant_members(owner, subs, name, ctx)
+
+    return [m for sub in subs for m in _walk_own_members(sub, name, ctx)]
+
+
+def _walk_direct_subtypes(owner: Symbol, ctx: _WalkCtx) -> list[Symbol]:
+    """The types that name ``owner`` as a supertype, in its language."""
+    return [
+        sub
+        for sub in ctx.index.get(_SUBS_KEY + owner.name, ())
+        if _resolution_language(sub.language)
+        == _resolution_language(owner.language)
+    ]
+
+
+def _python_descendant_members(
+    owner: Symbol, subs: list[Symbol], name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """``name`` on ``owner``'s Python subclasses, nearest level first.
+
+    A template hook can live further down than a direct subclass
+    (``Layer.add_loss`` calls ``self._graph_network_add_loss()``, which
+    only ``Functional``, a ``Model`` subclass, defines), and a subclass
+    also counts what it inherits from its other bases: a mixin's
+    ``self.assertProtoEquals()`` is the method its host class gets from
+    ``TestCase``.
+    """
+    seen = {owner.id}
+    level = subs
+    for _ in range(_WALK_SUPER_DEPTH):
+        level = [s for s in level if s.id not in seen]
+        if not level:
+            break
+        seen.update(s.id for s in level)
+        found = [
+            m
+            for sub in level
+            for m in _walk_own_members(sub, name, ctx)
+            or _walk_inherited_members((sub,), name, ctx)
+        ]
+        if found:
+            return found
+        level = [d for sub in level for d in _walk_direct_subtypes(sub, ctx)]
     return []
 
 
@@ -10597,6 +10923,11 @@ _RUST_PATH_KEY = "::rust-path::"
 # binding for (``_rust_head_entries``). Only a call written
 # ``serde_json::..`` reads it, never a local ``serde_json.f()``.
 _RUST_HEAD_KEY = "::rust-head::"
+# Reserved import-table namespace: ``_PY_STAR_KEY + "a.b"`` holds a
+# Python file's ``from a.b import *``. A star binds no name, so only
+# the walk reads it, to follow a supertype a module re-exports
+# (``_python_reexported_type``).
+_PY_STAR_KEY = "::py-star::"
 # Reserved ``index`` namespace: ``_RUST_DOT_KEY + name`` holds the Rust
 # functions and methods called ``name`` that take ``self``, the ones a
 # dot-call can mean (``_rust_dot_call_narrowed``). Read only by
@@ -12636,6 +12967,17 @@ def _rust_own_crate_narrowed(
     return inside, True
 
 
+def _python_star_entries(fm: FileMap) -> dict[str, Import]:
+    """A Python file's star imports, keyed under ``_PY_STAR_KEY``; none
+    for any other file."""
+    if not fm.path.endswith(_PY_EXTENSIONS):
+        return {}
+
+    return {
+        _PY_STAR_KEY + imp.source: imp for imp in fm.imports if imp.name == "*"
+    }
+
+
 def _imports_by_file(
     files: list[FileMap],
     workspace_pkgs: dict[str, str] | None = None,
@@ -12659,7 +13001,8 @@ def _imports_by_file(
     the repo (``_rust_head_entries``). With none of them, every record
     is left as-is.
 
-    A Python or Rust glob binds no name, so it stays out of the table.
+    A Python or Rust glob binds no name, so it stays out of the name
+    table; a Python one is kept under ``_PY_STAR_KEY``.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
@@ -12667,6 +13010,7 @@ def _imports_by_file(
         used = _member_names(fm) if lookup is not None else {}
         python = fm.path.endswith(_PY_EXTENSIONS)
         rust = fm.path.endswith(".rs")
+        table.update(_python_star_entries(fm))
         for imp in fm.imports:
             if imp.name in table or ((python or rust) and imp.name == "*"):
                 continue

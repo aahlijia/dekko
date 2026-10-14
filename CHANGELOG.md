@@ -9,6 +9,37 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.9.14] — 2026-10-14
+
+### Fixed
+- **A Python `self`/`cls` call is decided by the method's class.**
+  `self.skipTest()` in a test class found no `skipTest` on the class,
+  so the ladder handed it to the repo's one `skipTest`, on an
+  unrelated class: tensorflow's `DTensorBaseTest.skipTest` had 788
+  callers it doesn't have, and `assertLess`, `assertRegex` and
+  `assertListEqual` sat on other test classes that override them.
+  The class is now walked: its own and inherited members decide,
+  then a subclass's at any depth (a template hook such as
+  `Layer.add_loss` calling `self._graph_network_add_loss()`, which
+  only `Functional` defines, and a mixin's `self.assertX()` reaching
+  what its host class inherits), and a method none of them has is
+  external. A nested class built through `self` (`self._Creator(..)`)
+  and a class whose supertype the map can't place keep the old
+  reading.
+- **A Python supertype written `mod.Name` is read in that module.**
+  tensorflow's `class OpsTest(test.TestCase)` names
+  `platform/test.py`'s import of `TensorFlowTestCase`; read by the
+  bare name `TestCase`, it found nothing or the wrong class. The
+  module's own class, its import of the name (followed through
+  re-exporting modules) and its star imports are followed now, so
+  `self.evaluate()` and `self.assertAllEqual()` in 453 test classes
+  reach `TensorFlowTestCase`, and a `TestCase` from
+  `from absl.testing.absltest import *` is outside the repo.
+  tensorflow: +30,761 / -1,753 call sites, ambiguous rows 162,369 ->
+  136,145, `DTensorBaseTest.skipTest` callers 788 -> 60, `unused`
+  36,645 -> 36,576 with none new. dekko's own map is unchanged. Map
+  time unchanged.
+
 ## [1.9.13] — 2026-10-14
 
 ### Fixed
