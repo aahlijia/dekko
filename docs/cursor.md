@@ -178,9 +178,12 @@ install is already partly active in Cursor. What that means:
   format of the tool that called it, judged from what that tool sent,
   so a Claude Code hook running inside Cursor answers in Cursor's
   format. One difference: an imported `pre-bash` arrives through
-  Cursor's general tool hook, which can't ask you, so it advises
-  instead (the agent gets the dekko command and the shell command
-  runs), and under `--strict` it denies.
+  Cursor's general tool hook, which can't ask you. The only other
+  answer that could carry dekko's hint would approve the whole command,
+  so it stays silent and the command goes through Cursor's normal
+  approval. Under `--strict` it still denies. For the prompt with the
+  dekko command, install the native hooks
+  (`dekko hooks install --agent cursor --enable pre-bash`).
 - **dekko can load twice.** With the Claude Code plugin and the Cursor
   plugin both installed, Cursor may list dekko's skills and MCP server
   twice. With dekko hooks in both `.claude/settings.json` and

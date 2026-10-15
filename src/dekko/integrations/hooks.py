@@ -1014,9 +1014,17 @@ def _cursor_dispatch(
     The payload is reshaped into the Claude form the handlers read, and
     their Claude-shaped answer is converted for the Cursor event that
     fired. ``pre-bash`` answers in Claude's flavor (``ask``), which the
-    converter keeps for a shell event and softens to an advisory on
-    ``preToolUse``, where Cursor doesn't enforce ``ask``.
+    converter keeps for a shell event and drops on ``preToolUse``,
+    where Cursor can't ask. A hook fired by an event it doesn't belong
+    to says nothing.
     """
+    event_name = payload.get("hook_event_name")
+    if not isinstance(event_name, str) or not event_name:
+        event_name = hooks_cursor.CURSOR_EVENTS[event][0]
+
+    if not hooks_cursor.answers(event, event_name):
+        return None
+
     normalized = hooks_cursor.normalize_payload(payload)
     if event == "pre-bash":
         output = pre_bash(normalized, strict=strict, agent="claude")
@@ -1027,10 +1035,6 @@ def _cursor_dispatch(
         )
     else:
         output = _HANDLERS[event](normalized)
-
-    event_name = payload.get("hook_event_name")
-    if not isinstance(event_name, str) or not event_name:
-        event_name = hooks_cursor.CURSOR_EVENTS[event][0]
 
     return hooks_cursor.cursor_output(event_name, output)
 

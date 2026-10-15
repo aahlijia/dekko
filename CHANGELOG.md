@@ -111,7 +111,10 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   to `.cursor/hooks.json`, keeps the user's entries and `version`, and
   warns when `.claude/settings.json` already has dekko hooks (Cursor
   would run both). Native `pre-bash` asks (denies under `--strict`);
-  an imported one, which arrives on Cursor's general tool hook, advises.
+  an imported one, which arrives on Cursor's general tool hook, stays
+  silent unless `--strict` denies, since that hook can't ask and an
+  `allow` could approve a whole compound command. A hook fired by an
+  event it doesn't belong to says nothing.
   Cursor's session-start context stays under 9,500 characters (Cursor
   drops it past 10,000), with a "run `dekko lean --budget N`" note when
   even the narrowest map won't fit (refs #39).

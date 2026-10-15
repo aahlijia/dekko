@@ -40,6 +40,16 @@ CURSOR_EVENTS: dict[str, tuple[str, str | None]] = {
     "pre-read": ("preToolUse", "Read"),
     "pre-bash": ("beforeShellExecution", None),
 }
+# The Cursor events each dekko hook may answer: its own, plus
+# ``preToolUse`` for ``pre-bash``, where an imported Claude Code shell
+# hook arrives.
+_ACCEPTED_EVENTS: dict[str, frozenset[str]] = {
+    event: frozenset({cursor_event})
+    for event, (cursor_event, _matcher) in CURSOR_EVENTS.items()
+}
+_ACCEPTED_EVENTS["pre-bash"] = frozenset(
+    {"beforeShellExecution", "preToolUse"},
+)
 # Keys a Cursor read tool may name its file under.
 _READ_PATH_KEYS = ("file_path", "path", "target_file")
 
@@ -54,6 +64,24 @@ def is_cursor_payload(payload: dict) -> bool:
         ``True`` when it carries Cursor's ``cursor_version`` key.
     """
     return "cursor_version" in payload
+
+
+def answers(event: str, cursor_event: str) -> bool:
+    """Whether dekko's ``event`` hook should answer ``cursor_event``.
+
+    A hook wired to the wrong event (a hand-edited file, say) stays
+    silent rather than answer in a shape the event doesn't expect: a
+    context hook on ``preToolUse`` would otherwise allow every tool
+    call.
+
+    Args:
+        event: The dekko event the hook runs (``pre-bash``, ...).
+        cursor_event: The Cursor event that fired it.
+
+    Returns:
+        ``True`` when ``event`` belongs on ``cursor_event``.
+    """
+    return cursor_event in _ACCEPTED_EVENTS.get(event, frozenset())
 
 
 def _root(payload: dict) -> str | None:
@@ -127,14 +155,20 @@ def _first_line(text: str) -> str:
     return text.splitlines()[0] if text else text
 
 
-def _permission_output(event_name: str, decision: str, reason: str) -> dict:
-    """A permission decision in Cursor's flat format.
+def _permission_output(
+    event_name: str,
+    decision: str,
+    reason: str,
+) -> dict | None:
+    """A permission decision in Cursor's flat format, or ``None``.
 
-    ``preToolUse`` doesn't enforce ``ask``, so an ask there becomes an
-    ``allow`` that still hands the model the reason.
+    ``preToolUse`` doesn't enforce ``ask``, and the only other answer
+    that carries the reason is ``allow``, which could approve a whole
+    compound command on the strength of one matched stage. So an ask
+    there says nothing; only a deny goes out.
     """
     if event_name == "preToolUse" and decision != "deny":
-        return {"permission": "allow", "agent_message": reason}
+        return None
 
     return {
         "permission": decision,

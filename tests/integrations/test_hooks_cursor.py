@@ -186,11 +186,6 @@ def _cases() -> list[tuple[str, dict, dict]]:
         ),
         (
             "preToolUse",
-            _decision("ask"),
-            {"permission": "allow", "agent_message": REASON},
-        ),
-        (
-            "preToolUse",
             _decision("deny"),
             {
                 "permission": "deny",
@@ -235,6 +230,36 @@ def test_output_keys_are_documented(
 
     assert converted is not None
     assert set(converted) <= ALLOWED_KEYS[event]
+
+
+def test_an_ask_on_pre_tool_use_says_nothing() -> None:
+    # ``preToolUse`` can't ask, and answering ``allow`` there could
+    # approve a whole compound command on the strength of one matched
+    # stage, so a non-strict match stays silent.
+    assert hc.cursor_output("preToolUse", _decision("ask")) is None
+
+
+@pytest.mark.parametrize(
+    ("event", "cursor_event", "accepted"),
+    [
+        ("session-start", "sessionStart", True),
+        ("session-start", "preToolUse", False),
+        ("prompt-submit", "beforeSubmitPrompt", True),
+        ("prompt-submit", "beforeShellExecution", False),
+        ("pre-read", "preToolUse", True),
+        ("pre-read", "sessionStart", False),
+        ("pre-bash", "beforeShellExecution", True),
+        ("pre-bash", "preToolUse", True),
+        ("pre-bash", "sessionStart", False),
+        ("nonsense", "sessionStart", False),
+    ],
+)
+def test_answers_only_the_events_each_hook_belongs_to(
+    event: str,
+    cursor_event: str,
+    accepted: bool,
+) -> None:
+    assert hc.answers(event, cursor_event) is accepted
 
 
 def test_no_output_and_unknown_events_give_none() -> None:
@@ -325,25 +350,47 @@ def test_cursor_session_start_answers_in_cursor_format(
     assert "dekko orientation" in doc["additional_context"]
 
 
-def test_a_cursor_payload_under_agent_claude_answers_in_cursor_format(
-    make_mapped_repo: RepoFactory,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # What a hook from .claude/settings.json gets when Cursor imports it.
-    root = make_mapped_repo(_FILES)
-    payload = {
+def _imported_shell_payload(root: Path, tool_input: object) -> dict:
+    """What a hook from .claude/settings.json gets inside Cursor."""
+    return {
         "cursor_version": "3.15.19",
         "hook_event_name": "preToolUse",
         "tool_name": "Shell",
-        "tool_input": {"command": 'grep -rn "login" .'},
+        "tool_input": tool_input,
         "cwd": str(root),
     }
 
-    doc = json.loads(_dispatch(capsys, "pre-bash", payload, agent="claude"))
 
-    assert doc["permission"] == "allow"
+@pytest.mark.parametrize(
+    "command",
+    ['grep -rn "login" .', 'grep -rn "login" . ; rm -rf /tmp/dekko-x'],
+)
+def test_an_imported_pre_bash_never_allows_a_command(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    # ``allow`` on ``preToolUse`` could approve the whole command,
+    # including stages dekko never looked at.
+    root = make_mapped_repo(_FILES)
+    payload = _imported_shell_payload(root, {"command": command})
+
+    assert _dispatch(capsys, "pre-bash", payload, agent="claude") == ""
+
+
+def test_an_imported_strict_pre_bash_denies_in_cursor_format(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = make_mapped_repo(_FILES)
+    payload = _imported_shell_payload(root, {"command": 'grep -rn "x" .'})
+
+    out = _dispatch(capsys, "pre-bash", payload, strict=True)
+    doc = json.loads(out)
+
+    assert doc["permission"] == "deny"
     assert "search_code" in doc["agent_message"]
-    assert set(doc) == {"permission", "agent_message"}
+    assert set(doc) <= ALLOWED_KEYS["preToolUse"]
 
 
 def test_an_imported_pre_bash_with_a_string_tool_input_matches(
@@ -351,17 +398,37 @@ def test_an_imported_pre_bash_with_a_string_tool_input_matches(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     root = make_mapped_repo(_FILES)
+    payload = _imported_shell_payload(
+        root,
+        json.dumps({"command": "rg login"}),
+    )
+
+    doc = json.loads(_dispatch(capsys, "pre-bash", payload, strict=True))
+
+    assert doc["permission"] == "deny"
+
+
+@pytest.mark.parametrize(
+    ("event", "cursor_event"),
+    [("session-start", "preToolUse"), ("pre-bash", "sessionStart")],
+)
+def test_a_hook_wired_to_the_wrong_event_prints_nothing(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+    event: str,
+    cursor_event: str,
+) -> None:
+    root = make_mapped_repo(_FILES)
     payload = {
         "cursor_version": "3.15.19",
-        "hook_event_name": "preToolUse",
+        "hook_event_name": cursor_event,
         "tool_name": "Shell",
-        "tool_input": json.dumps({"command": "rg login"}),
+        "command": "rg login",
+        "workspace_roots": [str(root)],
         "cwd": str(root),
     }
 
-    doc = json.loads(_dispatch(capsys, "pre-bash", payload))
-
-    assert doc["permission"] == "allow"
+    assert _dispatch(capsys, event, payload, agent="cursor") == ""
 
 
 @pytest.mark.parametrize(
