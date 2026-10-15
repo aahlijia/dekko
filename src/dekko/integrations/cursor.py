@@ -14,6 +14,11 @@ the bare name.
 
 Cursor also imports Claude Code's installed plugins, so a user with
 both installs can get dekko twice; the installer says so.
+
+``--mcp-only`` instead merges just the MCP server into a project's
+``.cursor/mcp.json``, with the same idempotent read/merge/write as
+:mod:`dekko.integrations.cline`: a malformed file is never reset
+without ``force``, since it may hold the user's other servers.
 """
 
 import json
@@ -222,4 +227,143 @@ def uninstall_plugin() -> int:
 
     shutil.rmtree(dest)
     print(f"dekko: removed {dest}. Reload the Cursor window.")
+    return 0
+
+
+def mcp_config_path(root: Path) -> Path:
+    """A project's Cursor MCP config file, ``<root>/.cursor/mcp.json``."""
+    return root / ".cursor" / "mcp.json"
+
+
+def _load_mcp_config(path: Path, *, force: bool) -> dict | None:
+    """Best-effort read of a Cursor ``mcp.json``.
+
+    Args:
+        path: The config file to read.
+        force: Treat malformed JSON as an empty object instead of
+            refusing.
+
+    Returns:
+        ``{}`` for a missing file, the parsed object, or ``None`` when
+        the file isn't a JSON object and ``force`` is ``False``.
+    """
+    if not path.is_file():
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {} if force else None
+
+    if not isinstance(data, dict):
+        return {} if force else None
+
+    return data
+
+
+def _malformed_mcp_error(path: Path) -> None:
+    """Print the "malformed JSON, use --force" refusal."""
+    print(
+        f"dekko: {path} is not a valid JSON object; refusing to "
+        "overwrite it (it may hold other MCP servers). Fix it, or rerun "
+        "with --force to replace it.",
+        file=sys.stderr,
+    )
+
+
+def _write_mcp_config(path: Path, config: dict) -> None:
+    """Write ``config`` with 2-space indent and a trailing newline."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
+def install_mcp(root: Path, *, force: bool) -> int:
+    """Merge the dekko server into a project's ``.cursor/mcp.json``.
+
+    Rerunning converges on the same entry, so it both installs and
+    refreshes. Every other key and server in the file is kept.
+
+    Args:
+        root: The project root.
+        force: Replace a malformed existing file instead of refusing.
+
+    Returns:
+        Process exit code: ``0`` ok, ``2`` on malformed JSON without
+        ``force``.
+    """
+    path = mcp_config_path(root)
+    config = _load_mcp_config(path, force=force)
+    if config is None:
+        _malformed_mcp_error(path)
+        return 2
+
+    exe = shutil.which("dekko")
+    if exe is None:
+        print(
+            "dekko: warning: 'dekko' not found on PATH; writing the bare "
+            "name, so Cursor must find it on its own PATH.",
+            file=sys.stderr,
+        )
+
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = config["mcpServers"] = {}
+
+    servers[PLUGIN_NAME] = {
+        "command": exe or "dekko",
+        "args": list(MCP_ARGS),
+    }
+    _write_mcp_config(path, config)
+    print(f"dekko: MCP server registered in {path}.")
+    print(
+        "  Cursor asks you to approve a project MCP server once; in the "
+        "`agent` CLI, `agent mcp enable dekko` approves it."
+    )
+    return 0
+
+
+def _remove_if_empty(directory: Path) -> None:
+    """Delete ``directory`` if it exists and holds nothing."""
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+
+
+def uninstall_mcp(root: Path, *, force: bool) -> int:
+    """Remove the dekko server from a project's ``.cursor/mcp.json``.
+
+    Drops only dekko's entry; an emptied ``mcpServers``, an emptied
+    file and then an empty ``.cursor/`` go with it.
+
+    Args:
+        root: The project root.
+        force: Treat a malformed file as empty instead of refusing.
+
+    Returns:
+        Process exit code: ``0`` ok (including nothing to remove),
+        ``2`` on malformed JSON without ``force``.
+    """
+    path = mcp_config_path(root)
+    config = _load_mcp_config(path, force=force)
+    if config is None:
+        _malformed_mcp_error(path)
+        return 2
+
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict) or PLUGIN_NAME not in servers:
+        print(f"dekko: no dekko entry in {path}; nothing to remove.")
+        return 0
+
+    del servers[PLUGIN_NAME]
+    if not servers:
+        del config["mcpServers"]
+
+    if config:
+        _write_mcp_config(path, config)
+    else:
+        path.unlink()
+        _remove_if_empty(path.parent)
+
+    print(f"dekko: removed dekko from {path}.")
     return 0

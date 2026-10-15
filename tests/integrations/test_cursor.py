@@ -272,3 +272,194 @@ def test_claude_plugin_is_not_installed(
         path.write_text(registry, encoding="utf-8")
 
     assert cursor.claude_plugin_installed() is False
+
+
+def _write_mcp(root: Path, config: object) -> Path:
+    """Write ``config`` as the project's ``.cursor/mcp.json``."""
+    path = cursor.mcp_config_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def _read_mcp(root: Path) -> dict:
+    """The project's parsed ``.cursor/mcp.json``."""
+    return json.loads(
+        cursor.mcp_config_path(root).read_text(encoding="utf-8"),
+    )
+
+
+def test_mcp_config_lives_in_the_project(tmp_path: Path) -> None:
+    assert cursor.mcp_config_path(tmp_path) == (
+        tmp_path / ".cursor" / "mcp.json"
+    )
+
+
+def test_install_mcp_writes_the_server_entry(
+    tmp_path: Path,
+    on_path: None,
+) -> None:
+    rc = cursor.install_mcp(tmp_path, force=False)
+
+    assert rc == 0
+    assert _read_mcp(tmp_path) == {
+        "mcpServers": {
+            "dekko": {"command": FAKE_EXE, "args": list(cursor.MCP_ARGS)},
+        },
+    }
+
+
+def test_install_mcp_matches_the_plugin_bundle_args(
+    tmp_path: Path,
+    on_path: None,
+) -> None:
+    cursor.install_mcp(tmp_path, force=False)
+
+    args = _read_mcp(tmp_path)["mcpServers"]["dekko"]["args"]
+    assert args == _mcp_server(SOURCE_BUNDLE)["args"]
+
+
+def test_install_mcp_keeps_bare_command_without_dekko_on_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cursor.shutil, "which", lambda _name: None)
+
+    rc = cursor.install_mcp(tmp_path, force=False)
+
+    assert rc == 0
+    assert _read_mcp(tmp_path)["mcpServers"]["dekko"]["command"] == "dekko"
+    assert "not found on PATH" in capsys.readouterr().err
+
+
+def test_install_mcp_keeps_other_servers(
+    tmp_path: Path,
+    on_path: None,
+) -> None:
+    other = {"command": "other-server"}
+    _write_mcp(tmp_path, {"mcpServers": {"other": other}, "extra": 1})
+
+    cursor.install_mcp(tmp_path, force=False)
+    config = _read_mcp(tmp_path)
+
+    assert config["mcpServers"]["other"] == other
+    assert config["extra"] == 1
+    assert "dekko" in config["mcpServers"]
+
+
+def test_install_mcp_is_idempotent(tmp_path: Path, on_path: None) -> None:
+    cursor.install_mcp(tmp_path, force=False)
+    first = cursor.mcp_config_path(tmp_path).read_bytes()
+
+    cursor.install_mcp(tmp_path, force=False)
+
+    assert cursor.mcp_config_path(tmp_path).read_bytes() == first
+    assert first.endswith(b"}\n")
+
+
+def test_install_mcp_tells_the_user_to_approve_it(
+    tmp_path: Path,
+    on_path: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cursor.install_mcp(tmp_path, force=False)
+
+    assert "agent mcp enable dekko" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("text", ["{not json", "[1, 2]"])
+def test_install_mcp_refuses_malformed_json(
+    tmp_path: Path,
+    on_path: None,
+    capsys: pytest.CaptureFixture[str],
+    text: str,
+) -> None:
+    path = cursor.mcp_config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text(text, encoding="utf-8")
+
+    rc = cursor.install_mcp(tmp_path, force=False)
+
+    assert rc == 2
+    assert path.read_text(encoding="utf-8") == text
+    assert "--force" in capsys.readouterr().err
+
+
+def test_install_mcp_force_replaces_malformed_json(
+    tmp_path: Path,
+    on_path: None,
+) -> None:
+    path = cursor.mcp_config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text("{not json", encoding="utf-8")
+
+    rc = cursor.install_mcp(tmp_path, force=True)
+
+    assert rc == 0
+    assert list(_read_mcp(tmp_path)["mcpServers"]) == ["dekko"]
+
+
+def test_uninstall_mcp_removes_an_emptied_file_and_dir(
+    tmp_path: Path,
+    on_path: None,
+) -> None:
+    cursor.install_mcp(tmp_path, force=False)
+
+    rc = cursor.uninstall_mcp(tmp_path, force=False)
+
+    assert rc == 0
+    assert not (tmp_path / ".cursor").exists()
+
+
+def test_uninstall_mcp_keeps_a_cursor_dir_with_other_files(
+    tmp_path: Path,
+    on_path: None,
+) -> None:
+    cursor.install_mcp(tmp_path, force=False)
+    (tmp_path / ".cursor" / "hooks.json").write_text("{}", encoding="utf-8")
+
+    cursor.uninstall_mcp(tmp_path, force=False)
+
+    assert not cursor.mcp_config_path(tmp_path).exists()
+    assert (tmp_path / ".cursor" / "hooks.json").is_file()
+
+
+def test_uninstall_mcp_keeps_other_servers(
+    tmp_path: Path,
+    on_path: None,
+) -> None:
+    _write_mcp(tmp_path, {"mcpServers": {"other": {"command": "x"}}})
+    cursor.install_mcp(tmp_path, force=False)
+
+    rc = cursor.uninstall_mcp(tmp_path, force=False)
+
+    assert rc == 0
+    assert _read_mcp(tmp_path) == {
+        "mcpServers": {"other": {"command": "x"}},
+    }
+
+
+def test_uninstall_mcp_without_an_entry_is_ok(tmp_path: Path) -> None:
+    _write_mcp(tmp_path, {"mcpServers": {"other": {"command": "x"}}})
+
+    rc = cursor.uninstall_mcp(tmp_path, force=False)
+
+    assert rc == 0
+    assert _read_mcp(tmp_path) == {
+        "mcpServers": {"other": {"command": "x"}},
+    }
+
+
+def test_uninstall_mcp_without_a_file_is_ok(tmp_path: Path) -> None:
+    assert cursor.uninstall_mcp(tmp_path, force=False) == 0
+    assert not (tmp_path / ".cursor").exists()
+
+
+def test_uninstall_mcp_refuses_malformed_json(tmp_path: Path) -> None:
+    path = cursor.mcp_config_path(tmp_path)
+    path.parent.mkdir()
+    path.write_text("{not json", encoding="utf-8")
+
+    assert cursor.uninstall_mcp(tmp_path, force=False) == 2
+    assert path.read_text(encoding="utf-8") == "{not json"
