@@ -399,6 +399,21 @@ and never auto-fixes anything — reporting only. Full check list and the
 Claude Code `/doctor` slash command:
 [claude-code.md](claude-code.md#the-doctor-command).
 
+When Codex is installed (`codex` resolves on `$PATH`, or
+`$CODEX_HOME/plugins/cache/` exists; `CODEX_HOME` defaults to
+`~/.codex`), doctor adds Codex rows. A leftover `~/.codex/` alone
+doesn't count.
+
+| Row | Checks | Fix it names |
+|---|---|---|
+| `codex-plugin-installed` | `codex plugin list --json` has dekko installed and enabled, at this dekko's version (Codex caches the plugin and refreshes it only when the version changes, so a mismatch is `stale`) | `dekko install codex` |
+| `codex-mcp-registered` | `codex mcp list --json` has an enabled `dekko` server that runs `dekko serve`; plugin-provided servers show here too | `dekko install codex` (or `--mcp-only`) |
+| `agents-md-policy` | The policy block is in the root `AGENTS.md`; `advisory` when a root `AGENTS.override.md` shadows it, or the file is over Codex's 32 KiB default | `dekko install agents-md` |
+| `codex-hook:<event>` | One row each for `session-start`, `prompt-submit`, `pre-bash` in `.codex/hooks.json`. `stale` when an entry differs from what this dekko writes (Codex reads a changed hook as modified and won't run it until it's reviewed again). On Python 3.11+, `advisory` when Codex's config has no trust record for the hook yet; a record found reads "trusted (hash not verified)" | `dekko hooks install --agent codex --enable <event>` |
+
+The `agents-md-policy` row also shows without Codex when the block is
+already in `AGENTS.md`, since other agents read that file too.
+
 ## Sanity-checking a low/zero call-graph result
 
 `dekko sanity <target>` automates the `dekko-verify` skill's "reach
