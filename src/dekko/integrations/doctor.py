@@ -1,6 +1,7 @@
 """Environment + install-state diagnostic: composition only, no new
 extraction. Reuses ``mapfile``'s freshness signal, ``hooks``'s
-``.claude/settings.json`` shape, and ``policy_md``'s marker string.
+``.claude/settings.json`` / ``.codex/hooks.json`` shape, and
+``policy_md``'s marker string.
 
 Three independent opt-in installers exist (``dekko install claude``,
 ``dekko hooks install``, ``dekko install claude-md``, plus a separate
@@ -27,6 +28,7 @@ auto-fixes anything; it only reports and names the command that would.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -262,8 +264,8 @@ def _claude_exe() -> str | None:
     return shutil.which("claude")
 
 
-def _run_claude(exe: str, *args: str) -> subprocess.CompletedProcess | None:
-    """Best-effort ``claude <args>`` run; ``None`` on any failure."""
+def _run_cli(exe: str, *args: str) -> subprocess.CompletedProcess | None:
+    """Best-effort ``<exe> <args>`` run; ``None`` on any failure."""
     try:
         return subprocess.run(
             [exe, *args],
@@ -273,6 +275,41 @@ def _run_claude(exe: str, *args: str) -> subprocess.CompletedProcess | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def _check_cli_registration(
+    exe: str | None,
+    cli_name: str,
+    args: tuple[str, ...],
+    name: str,
+    judge: Callable[[str, str], Finding],
+) -> Finding:
+    """Shared body for every "is dekko registered with this client" check.
+
+    Runs ``<cli_name> <args>`` and hands its stdout, with the command
+    as typed, to ``judge``. A missing CLI or a failed run is
+    ``"unknown"``, never a false ``"missing"``.
+
+    Args:
+        exe: The client CLI's resolved path, or ``None`` if not found.
+        cli_name: The CLI's name as the user would type it.
+        args: Arguments to run it with.
+        name: Finding name for the unknown cases.
+        judge: Reads ``(stdout, command)`` into the finding.
+
+    Returns:
+        The finding.
+    """
+    if exe is None:
+        return Finding(
+            name, "unknown", f"can't check ({cli_name} CLI not found)", None
+        )
+    cmd = " ".join([cli_name, *args])
+    result = _run_cli(exe, *args)
+    if result is None or result.returncode != 0:
+        return Finding(name, "unknown", f"can't check ('{cmd}' failed)", None)
+
+    return judge(result.stdout, cmd)
 
 
 def _check_claude_registration(
@@ -287,15 +324,16 @@ def _check_claude_registration(
     ``"unknown"`` rather than a false ``"missing"`` whenever the shape
     can't be read at all.
     """
-    if exe is None:
-        return Finding(
-            name, "unknown", "can't check (claude CLI not found)", None
-        )
-    cmd = " ".join(["claude", *args])
-    result = _run_claude(exe, *args)
-    if result is None or result.returncode != 0:
-        return Finding(name, "unknown", f"can't check ('{cmd}' failed)", None)
-    if "dekko" in result.stdout.lower():
+
+    def judge(stdout: str, cmd: str) -> Finding:
+        return _loose_match(stdout, cmd, name, fix)
+
+    return _check_cli_registration(exe, "claude", args, name, judge)
+
+
+def _loose_match(stdout: str, cmd: str, name: str, fix: str) -> Finding:
+    """``ok`` when ``dekko`` appears anywhere in ``stdout``, else missing."""
+    if "dekko" in stdout.lower():
         return Finding(name, "ok", f"found in '{cmd}'", None)
 
     return Finding(name, "missing", f"not found in '{cmd}'", fix)
@@ -521,6 +559,394 @@ def _check_claude_md(root: Path) -> Finding:
     )
 
 
+# --- Codex -------------------------------------------------------------
+
+_CODEX_PLUGIN_FIX = "dekko install codex"
+_CODEX_MCP_FIX = "dekko install codex (or dekko install codex --mcp-only)"
+
+
+def _codex_exe() -> str | None:
+    """Resolve the ``codex`` CLI to its full path, or ``None``.
+
+    Silent on a miss for the same reason as :func:`_claude_exe`.
+    """
+    return shutil.which("codex")
+
+
+def _codex_home() -> Path:
+    """Codex's state directory: ``$CODEX_HOME``, else ``~/.codex``."""
+    env = os.environ.get("CODEX_HOME")
+    if env:
+        return Path(env)
+
+    return Path.home() / ".codex"
+
+
+def _codex_present(exe: str | None) -> bool:
+    """Whether Codex looks installed, so its rows are worth showing.
+
+    A bare ``~/.codex/`` outlives an uninstalled Codex, so it isn't
+    enough on its own: the binary has to resolve, or Codex's plugin
+    cache has to exist.
+    """
+    if exe is not None:
+        return True
+
+    return (_codex_home() / "plugins" / "cache").is_dir()
+
+
+def _named_dekko(items: list) -> dict | None:
+    """The first entry in a Codex JSON listing named ``dekko``, if any."""
+    for item in items:
+        if isinstance(item, dict) and item.get("name") == "dekko":
+            return item
+
+    return None
+
+
+def _judge_codex_plugin(stdout: str, cmd: str) -> Finding:
+    """Read ``codex plugin list --json`` into the plugin finding.
+
+    The JSON is ``{"installed": [{"name", "enabled", "version", ...}],
+    ...}``. Output that doesn't parse to that shape falls back to the
+    loose match the Claude checks use.
+    """
+    name = "codex-plugin-installed"
+    try:
+        installed = json.loads(stdout).get("installed")
+    except (ValueError, AttributeError):
+        installed = None
+    if not isinstance(installed, list):
+        return _loose_match(stdout, cmd, name, _CODEX_PLUGIN_FIX)
+    entry = _named_dekko(installed)
+    if entry is None:
+        return Finding(
+            name, "missing", f"not installed per '{cmd}'", _CODEX_PLUGIN_FIX
+        )
+
+    return _codex_plugin_state(entry, name)
+
+
+def _codex_plugin_state(entry: dict, name: str) -> Finding:
+    """Judge an installed dekko plugin entry: enabled, and current."""
+    if entry.get("enabled") is False:
+        return Finding(
+            name,
+            "advisory",
+            "installed but disabled in Codex",
+            "enable the dekko plugin in Codex's plugin settings",
+        )
+    cached = entry.get("version")
+    running = _running_version()
+    if isinstance(cached, str) and cached != running:
+        # Codex copies the plugin into its cache and only refreshes the
+        # copy when the bundled manifest's version changes.
+        return Finding(
+            name,
+            "stale",
+            f"Codex has dekko {cached} cached; this dekko is {running}",
+            "dekko install codex, then restart Codex",
+        )
+
+    return Finding(name, "ok", f"installed ({cached or 'unknown version'})")
+
+
+# How a server launching dekko names its executable, on any platform.
+_DEKKO_EXE_NAMES = frozenset({"dekko", "dekko.exe", "dekko.cmd"})
+
+
+def _is_dekko_server(transport: object) -> bool:
+    """Whether an MCP transport launches ``dekko serve``."""
+    if not isinstance(transport, dict):
+        return False
+    command = transport.get("command")
+    args = transport.get("args")
+    if not isinstance(command, str) or not isinstance(args, list):
+        return False
+    exe = re.split(r"[\\/]", command)[-1].lower()
+
+    return exe in _DEKKO_EXE_NAMES and "serve" in args
+
+
+def _judge_codex_mcp(stdout: str, cmd: str) -> Finding:
+    """Read ``codex mcp list --json`` into the MCP finding.
+
+    The JSON is a list of ``{"name", "enabled", "transport": {...}}``,
+    and it includes servers a plugin provides, so one check covers both
+    install paths.
+    """
+    name = "codex-mcp-registered"
+    try:
+        servers = json.loads(stdout)
+    except ValueError:
+        servers = None
+    if not isinstance(servers, list):
+        return Finding(name, "unknown", f"can't read '{cmd}' output", None)
+    entry = _named_dekko(servers)
+    if entry is None:
+        return Finding(
+            name, "missing", f"not found in '{cmd}'", _CODEX_MCP_FIX
+        )
+    if entry.get("enabled") is False:
+        return Finding(
+            name,
+            "advisory",
+            "registered but disabled in Codex",
+            "enable the dekko MCP server in Codex's config",
+        )
+    if not _is_dekko_server(entry.get("transport")):
+        return Finding(
+            name,
+            "advisory",
+            f"a server named 'dekko' in '{cmd}' doesn't run 'dekko serve'",
+            _CODEX_MCP_FIX,
+        )
+
+    return Finding(name, "ok", f"found in '{cmd}'")
+
+
+def _check_codex_plugin(exe: str | None) -> Finding:
+    """Whether the dekko plugin is installed and current in Codex."""
+    return _check_cli_registration(
+        exe,
+        "codex",
+        ("plugin", "list", "--json"),
+        "codex-plugin-installed",
+        _judge_codex_plugin,
+    )
+
+
+def _check_codex_mcp(exe: str | None) -> Finding:
+    """Whether Codex has a ``dekko`` MCP server that runs dekko."""
+    return _check_cli_registration(
+        exe,
+        "codex",
+        ("mcp", "list", "--json"),
+        "codex-mcp-registered",
+        _judge_codex_mcp,
+    )
+
+
+def _agents_md_has_block(root: Path) -> bool:
+    """Whether the root ``AGENTS.md`` holds the usage-policy block."""
+    path = policy_md_mod.policy_path(root, "agents")
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    return policy_md_mod._find_block(text) is not None
+
+
+def _check_agents_md(root: Path) -> Finding:
+    """Whether Codex will actually read the policy block in AGENTS.md."""
+    name = "agents-md-policy"
+    path = policy_md_mod.policy_path(root, "agents")
+    if not _agents_md_has_block(root):
+        return Finding(
+            name,
+            "missing",
+            f"no dekko usage-policy block in {path}",
+            "dekko install agents-md",
+        )
+    override = policy_md_mod.agents_md_override(root)
+    if override is not None:
+        return Finding(
+            name,
+            "advisory",
+            f"block present, but Codex reads {override} instead of "
+            f"{path} (shadowed)",
+            f"move the dekko block into {override.name}, or remove it",
+        )
+    size = policy_md_mod.agents_md_overflow(root)
+    if size is not None:
+        return Finding(
+            name,
+            "advisory",
+            f"{path} is {size} bytes, over Codex's "
+            f"{policy_md_mod.AGENTS_MD_MAX_BYTES}-byte limit; Codex cuts "
+            "the end of the file, where the dekko block is",
+            f"trim {path.name} below "
+            f"{policy_md_mod.AGENTS_MD_MAX_BYTES} bytes",
+        )
+
+    return Finding(name, "ok", f"usage-policy block present in {path}")
+
+
+def _find_codex_handler(
+    hooks_by_event: dict, codex_event: str, event: str
+) -> tuple[int, int, dict, dict] | None:
+    """Locate dekko's handler for ``event`` in a Codex hooks table.
+
+    Returns:
+        ``(group index, handler index, group, handler)``, or ``None``.
+    """
+    bucket = hooks_by_event.get(codex_event, [])
+    if not isinstance(bucket, list):
+        return None
+    command = f"{hooks_mod._HOOK_COMMAND_PREFIX}{event}"
+    for g, group in enumerate(bucket):
+        handlers = group.get("hooks", []) if isinstance(group, dict) else []
+        for h, handler in enumerate(handlers):
+            cmd = handler.get("command") if isinstance(handler, dict) else None
+            if isinstance(cmd, str) and (
+                cmd == command or cmd.startswith(f"{command} ")
+            ):
+                return g, h, group, handler
+
+    return None
+
+
+def _codex_entry_matches(
+    event: str, matcher: str | None, group: dict, handler: dict
+) -> bool:
+    """Whether an installed Codex entry is exactly what this dekko writes.
+
+    Codex's trust hash covers the matcher and the whole handler, so any
+    difference means Codex treats the hook as modified.
+    """
+    strict = "--strict" in handler.get("command", "").split()
+    expected = hooks_mod._entry(event, matcher, strict=strict, agent="codex")
+
+    return (
+        group.get("matcher") == expected.get("matcher")
+        and handler == expected["hooks"][0]
+    )
+
+
+def _codex_trust_keys(
+    path: Path, codex_event: str, g: int, h: int
+) -> set[str]:
+    """The ``[hooks.state]`` keys Codex may file this handler under.
+
+    Codex keys trust by ``<hooks.json path>:<event>:<group>:<handler>``
+    with the event in snake case. The path is tried both as given and
+    resolved, since a symlinked temp or home dir can make them differ.
+    """
+    label = re.sub(r"(?<!^)(?=[A-Z])", "_", codex_event).lower()
+
+    return {f"{p}:{label}:{g}:{h}" for p in (path.absolute(), path.resolve())}
+
+
+def _load_codex_hook_state() -> dict | None:
+    """``[hooks.state]`` from Codex's user config, or ``None`` if unreadable.
+
+    ``tomllib`` is stdlib only from Python 3.11, so on 3.10 the trust
+    state can't be read at all. A missing config means nothing has been
+    reviewed yet, which reads as an empty state.
+    """
+    if sys.version_info < (3, 11):
+        return None
+    import tomllib
+
+    path = _codex_home() / "config.toml"
+    if not path.is_file():
+        return {}
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    state = config.get("hooks", {}).get("state", {})
+
+    return state if isinstance(state, dict) else {}
+
+
+def _codex_trust_finding(
+    name: str, event: str, keys: set[str], state: dict | None
+) -> Finding:
+    """Report whether Codex has a trust record for a wired dekko hook.
+
+    A record proves the user reviewed the hook at some point, not that
+    its hash still matches, so the best this can say is "trusted (hash
+    not verified)".
+    """
+    if state is None:
+        return Finding(name, "ok", f"{event} hook wired (trust not checked)")
+    record = next((state[k] for k in keys if k in state), None)
+    if isinstance(record, dict) and record.get("trusted_hash"):
+        return Finding(
+            name, "ok", f"{event} hook wired, trusted (hash not verified)"
+        )
+
+    return Finding(
+        name,
+        "advisory",
+        f"{event} hook wired but not yet reviewed in Codex, so it won't run",
+        "start codex in this repo and approve it under 'Hooks need review'",
+    )
+
+
+def _check_codex_hooks(root: Path) -> list[Finding]:
+    """One row per Codex hook event, read from ``.codex/hooks.json``."""
+    path = hooks_mod.settings_path(root, "codex")
+    hooks_by_event = hooks_mod._load_settings(path).get("hooks", {})
+    if not isinstance(hooks_by_event, dict):
+        hooks_by_event = {}
+    state = _load_codex_hook_state()
+    findings = []
+    for event, (codex_event, matcher) in hooks_mod.events_for("codex").items():
+        findings.append(
+            _codex_hook_finding(
+                path, hooks_by_event, event, codex_event, matcher, state
+            )
+        )
+
+    return findings
+
+
+def _codex_hook_finding(
+    path: Path,
+    hooks_by_event: dict,
+    event: str,
+    codex_event: str,
+    matcher: str | None,
+    state: dict | None,
+) -> Finding:
+    """The row for one Codex hook event."""
+    name = f"codex-hook:{event}"
+    found = _find_codex_handler(hooks_by_event, codex_event, event)
+    if found is None:
+        return Finding(
+            name,
+            "missing",
+            f"{event} hook not installed for Codex",
+            f"dekko hooks install --agent codex --enable {event}",
+        )
+    g, h, group, handler = found
+    if not _codex_entry_matches(event, matcher, group, handler):
+        return Finding(
+            name,
+            "stale",
+            f"{event} entry in {path} differs from what this dekko writes; "
+            "Codex treats a changed hook as modified and won't run it "
+            "until it's reviewed again",
+            "dekko hooks uninstall --agent codex, then dekko hooks install "
+            f"--agent codex --enable {event}",
+        )
+    keys = _codex_trust_keys(path, codex_event, g, h)
+
+    return _codex_trust_finding(name, event, keys, state)
+
+
+def _collect_codex(root: Path) -> list[Finding]:
+    """Codex rows, shown only when Codex looks installed.
+
+    The ``AGENTS.md`` row also shows without Codex when the block is
+    already there, since other agents read ``AGENTS.md`` too.
+    """
+    exe = _codex_exe()
+    if not _codex_present(exe):
+        if _agents_md_has_block(root):
+            return _safe("agents-md-policy", lambda: _check_agents_md(root))
+        return []
+    findings: list[Finding] = []
+    findings += _safe(
+        "codex-plugin-installed", lambda: _check_codex_plugin(exe)
+    )
+    findings += _safe("codex-mcp-registered", lambda: _check_codex_mcp(exe))
+    findings += _safe("agents-md-policy", lambda: _check_agents_md(root))
+    findings += _safe("codex-hooks", lambda: _check_codex_hooks(root))
+
+    return findings
+
+
 def _safe(
     name: str, check: Callable[[], "Finding | list[Finding]"]
 ) -> list[Finding]:
@@ -571,6 +997,7 @@ def collect(root: Path) -> list[Finding]:
     findings += _safe("plugin-installed", lambda: _check_plugin_installed(exe))
     findings += _safe("hooks", lambda: _check_hooks(root))
     findings += _safe("claude-md-policy", lambda: _check_claude_md(root))
+    findings += _safe("codex", lambda: _collect_codex(root))
     findings += _safe("json-backend", _check_json_backend)
     return findings
 

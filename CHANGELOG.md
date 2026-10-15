@@ -69,6 +69,18 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   Codex's own hook schemas, vendored under `tests/fixtures/codex/`,
   since Codex drops a hook's context when its output carries an unknown
   key (refs #38).
+- **`dekko doctor` checks the Codex install.** When Codex is installed
+  (`codex` on `$PATH`, or `$CODEX_HOME/plugins/cache/`; a leftover
+  `~/.codex/` alone doesn't count), doctor adds rows for the plugin
+  (installed, enabled, and at this dekko's version, since Codex only
+  refreshes its cached copy on a version change), the `dekko` MCP
+  server (read from `codex mcp list --json`, which includes
+  plugin-provided servers), the `AGENTS.md` policy block (flagged when
+  a root `AGENTS.override.md` shadows it or the file is past Codex's
+  32 KiB default), and each Codex hook. A hook entry that differs from
+  what this dekko writes is `stale`, because Codex reads a changed hook
+  as modified and stops running it; on Python 3.11+ doctor also reports
+  whether Codex has a trust record for each hook yet (refs #38).
 
 ### Changed
 - **The skills, usage policy and session preamble read the same to any
