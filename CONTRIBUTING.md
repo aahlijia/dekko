@@ -190,18 +190,21 @@ builds and publishes to PyPI via [trusted publishing](https://docs.pypi.org/trus
 The trusted publisher for `aahlijia/dekko` must be configured on PyPI first.
 See [CHANGELOG.md](CHANGELOG.md) for per-version history.
 
-The version is declared in four places that must all agree
-(`pyproject.toml`, `plugin.json`, `marketplace.json`, `uv.lock`) --
+The version is declared in six places that must all agree:
+`pyproject.toml`, `uv.lock`, and the four plugin manifests under
+`integrations/claude/` (Claude Code's `.claude-plugin/plugin.json` and
+`.claude-plugin/marketplace.json`, Codex's `.codex-plugin/plugin.json`,
+and Cursor's `.cursor-plugin/plugin.json`).
 `tests/test_version.py::test_declared_versions_agree` checks this.
 Bump the version with `scripts/sync_plugin_version.py <new-version>`
 rather than hand-editing `pyproject.toml`; it updates `pyproject.toml`,
-both plugin manifests, and `uv.lock` together. If `pyproject.toml`
+every plugin manifest, and `uv.lock` together. If `pyproject.toml`
 still ends up hand-edited (e.g. a merge conflict resolution), the
 `sync-plugin-version` pre-commit hook re-syncs the plugin manifests to
 it automatically on commit, the same way the existing `uv-lock` hook
 already keeps `uv.lock` in sync. `release.yml`'s `build` job is the
-last line of defense: it fails the release if the plugin manifests
-don't match the tag being released.
+last line of defense: it fails the release if any plugin manifest
+doesn't match the tag being released.
 
 ## Reporting issues
 

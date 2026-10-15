@@ -10,8 +10,9 @@ tree-sitter (no model tokens spent parsing) into `MAP.md` (human-readable)
 and `map.json` (machine-readable), then answers targeted structural
 questions — "who calls this function," "what does this file contain,"
 "what tests does this change impact" — without an agent reading whole
-files or grepping blind. It ships three ways: a CLI (`dekko`), a Claude
-Code `/map` plugin + MCP server, and Cline MCP support.
+files or grepping blind. It ships as a CLI (`dekko`), an MCP server,
+plugins for Claude Code (`/map`), OpenAI Codex and Cursor, and Cline
+MCP support.
 
 Source lives under `src/dekko/`, split into subpackages by role:
 `core/` (parsing primitives — model, extractor, grammars, languages,
@@ -19,8 +20,8 @@ walker, resolver), `render/` (MAP.md/JSON/HTML/lean/export
 rendering), `analysis/` (read-side commands — query, outline, search,
 affected, trace, unused, stats, summary, workset, contextpack, diff,
 relevance, ambiguous, deps, sanity), `daemon/` (the daemon process and
-its transport), `integrations/` (cli, server, hooks, cline, orient,
-policy_md, doctor), `storage/` (on-disk caches/locks/notes/ledger under
+its transport), `integrations/` (cli, server, hooks, hooks_cursor,
+cline, cursor, orient, policy_md, doctor), `storage/` (on-disk caches/locks/notes/ledger under
 `.dekko/`), and a handful of modules with no subpackage-specific home
 (`classify.py`, `textutil.py`, `source.py`, `repo_ops.py`) staying
 directly under `src/dekko/`. `dekko outline src/dekko/<subpackage>/<file>.py` or
