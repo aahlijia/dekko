@@ -26,6 +26,7 @@ from dekko.analysis import ambiguous
 from dekko.storage import cache as cache_mod
 from dekko.integrations import policy_md as policy_md_mod
 from dekko.integrations import cline as cline_mod
+from dekko.integrations import cursor as cursor_mod
 from dekko.analysis import contextpack
 from dekko.daemon import daemon as daemon_mod
 from dekko.analysis import deps
@@ -2155,6 +2156,29 @@ def _add_codex_target_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_cursor_target_args(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``cursor`` target's options."""
+    parser.add_argument(
+        "--mcp-only",
+        action="store_true",
+        help="register (or remove) only the MCP server, in a project's "
+        ".cursor/mcp.json, without the plugin's skills",
+    )
+    parser.add_argument(
+        "--root",
+        default=None,
+        metavar="DIR",
+        help="with --mcp-only: the project whose .cursor/mcp.json to "
+        "edit (default: cwd)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="with --mcp-only: replace a malformed .cursor/mcp.json "
+        "instead of aborting",
+    )
+
+
 def _add_cline_target_args(parser: argparse.ArgumentParser) -> None:
     """Attach the ``cline`` target's options."""
     parser.add_argument(
@@ -2218,6 +2242,51 @@ def _uninstall_codex(args: argparse.Namespace) -> int:
         return codex_mcp_uninstall(dry_run=args.dry_run)
 
     return codex_uninstall(dry_run=args.dry_run)
+
+
+def _cursor_mcp_flags_misused(args: argparse.Namespace) -> bool:
+    """Refuse ``--root``/``--force`` given without ``--mcp-only``.
+
+    Both only mean something for the project ``mcp.json``; silently
+    ignoring them on a plugin install would hide a mistyped command.
+    """
+    if args.mcp_only or (args.root is None and not args.force):
+        return False
+
+    print(
+        "dekko: --root and --force only apply with --mcp-only",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _cursor_root(args: argparse.Namespace) -> Path:
+    """The project a ``cursor --mcp-only`` target edits."""
+    return Path(args.root or ".").resolve()
+
+
+def _install_cursor(args: argparse.Namespace) -> int:
+    """Handle ``dekko install cursor [--mcp-only]``."""
+    if _cursor_mcp_flags_misused(args):
+        return 2
+
+    if args.mcp_only:
+        return cursor_mod.install_mcp(_cursor_root(args), force=args.force)
+
+    return cursor_mod.install_plugin(
+        Path(str(_pkg_files("dekko"))) / "_plugin",
+    )
+
+
+def _uninstall_cursor(args: argparse.Namespace) -> int:
+    """Handle ``dekko uninstall cursor [--mcp-only]``."""
+    if _cursor_mcp_flags_misused(args):
+        return 2
+
+    if args.mcp_only:
+        return cursor_mod.uninstall_mcp(_cursor_root(args), force=args.force)
+
+    return cursor_mod.uninstall_plugin()
 
 
 def _cline_config(args: argparse.Namespace) -> Path | None:
@@ -2309,6 +2378,16 @@ INSTALL_TARGETS: tuple[InstallTarget, ...] = (
         install=_install_codex,
         uninstall=_uninstall_codex,
         previewable=True,
+    ),
+    InstallTarget(
+        name="cursor",
+        summary="the Cursor plugin (MCP server, skills) in "
+        "~/.cursor/plugins/local, or with --mcp-only just the MCP server "
+        "in this repo's .cursor/mcp.json",
+        add_args=_add_cursor_target_args,
+        install=_install_cursor,
+        uninstall=_uninstall_cursor,
+        previewable=False,
     ),
     InstallTarget(
         name="cline",

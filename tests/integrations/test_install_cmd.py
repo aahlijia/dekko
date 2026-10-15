@@ -22,6 +22,10 @@ _HANDLERS = (
     (cli, "codex_mcp_uninstall"),
     (cli.cline_mod, "install"),
     (cli.cline_mod, "uninstall"),
+    (cli.cursor_mod, "install_plugin"),
+    (cli.cursor_mod, "uninstall_plugin"),
+    (cli.cursor_mod, "install_mcp"),
+    (cli.cursor_mod, "uninstall_mcp"),
     (cli.policy_md_mod, "install"),
     (cli.policy_md_mod, "uninstall"),
 )
@@ -154,7 +158,9 @@ def test_codex_target_calls_its_handler(
 
 
 @pytest.mark.parametrize("verb", ["install", "uninstall"])
-@pytest.mark.parametrize("target", ["cline", "claude-md", "agents-md"])
+@pytest.mark.parametrize(
+    "target", ["cline", "cursor", "claude-md", "agents-md"]
+)
 def test_dry_run_is_refused_on_a_file_editing_target(
     calls: Calls,
     tmp_path: Path,
@@ -212,6 +218,7 @@ def test_help_lists_every_target(
         ("claude", True),
         ("codex", True),
         ("cline", False),
+        ("cursor", False),
         ("claude-md", False),
         ("agents-md", False),
     ],
@@ -248,6 +255,67 @@ def test_install_and_uninstall_never_route_through_the_daemon(
             command=verb, target="claude-md", root=str(tmp_path)
         )
         assert daemon_mod.try_daemon(args) is None
+
+
+def test_install_cursor_copies_the_wheel_bundle(calls: Calls) -> None:
+    bundle = Path(str(cli._pkg_files("dekko"))) / "_plugin"
+
+    assert cli.main(["install", "cursor"]) == 0
+
+    assert calls == [("cursor.install_plugin", (bundle,), {})]
+
+
+def test_uninstall_cursor_removes_the_plugin(calls: Calls) -> None:
+    assert cli.main(["uninstall", "cursor"]) == 0
+
+    assert calls == [("cursor.uninstall_plugin", (), {})]
+
+
+@pytest.mark.parametrize("verb", ["install", "uninstall"])
+@pytest.mark.parametrize("force", [False, True])
+def test_cursor_mcp_only_edits_the_project(
+    calls: Calls,
+    tmp_path: Path,
+    verb: str,
+    force: bool,
+) -> None:
+    argv = [verb, "cursor", "--mcp-only", "--root", str(tmp_path)]
+    if force:
+        argv.append("--force")
+
+    assert cli.main(argv) == 0
+
+    assert calls == [
+        (f"cursor.{verb}_mcp", (tmp_path.resolve(),), {"force": force}),
+    ]
+
+
+def test_cursor_mcp_only_defaults_to_the_cwd(
+    calls: Calls,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["install", "cursor", "--mcp-only"]) == 0
+
+    assert calls == [
+        ("cursor.install_mcp", (tmp_path.resolve(),), {"force": False}),
+    ]
+
+
+@pytest.mark.parametrize("verb", ["install", "uninstall"])
+@pytest.mark.parametrize("extra", [["--root", "."], ["--force"]])
+def test_cursor_root_and_force_need_mcp_only(
+    calls: Calls,
+    capsys: pytest.CaptureFixture,
+    verb: str,
+    extra: list[str],
+) -> None:
+    assert cli.main([verb, "cursor", *extra]) == 2
+
+    assert calls == []
+    assert "--mcp-only" in capsys.readouterr().err
 
 
 def test_target_names_are_unique() -> None:
