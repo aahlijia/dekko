@@ -51,6 +51,9 @@ def test_declared_versions_agree() -> None:
         "codex plugin.json": _json_version(
             "integrations/claude/.codex-plugin/plugin.json", "version"
         ),
+        "cursor plugin.json": _json_version(
+            "integrations/claude/.cursor-plugin/plugin.json", "version"
+        ),
         "uv.lock": _uvlock_version(),
     }
     assert len(set(versions.values())) == 1, (

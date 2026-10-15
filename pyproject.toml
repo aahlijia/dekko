@@ -96,6 +96,8 @@ packages = ["src/dekko"]
 "integrations/claude/.codex-plugin" = "dekko/_plugin/.codex-plugin"
 "integrations/claude/skills-codex" = "dekko/_plugin/skills-codex"
 "integrations/claude/codex.mcp.json" = "dekko/_plugin/codex.mcp.json"
+"integrations/claude/.cursor-plugin" = "dekko/_plugin/.cursor-plugin"
+"integrations/claude/cursor.mcp.json" = "dekko/_plugin/cursor.mcp.json"
 
 [dependency-groups]
 dev = [

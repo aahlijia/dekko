@@ -2,10 +2,10 @@
 """Keep the plugin manifests' version in sync with pyproject.toml.
 
 Run with no arguments to sync the plugin manifests (Claude Code's
-plugin.json and marketplace.json, and Codex's plugin.json) to
-whatever version pyproject.toml already declares -- this is what the
-``sync-plugin-version`` pre-commit hook runs on every commit that
-touches ``pyproject.toml``. Pass a version string to also bump
+plugin.json and marketplace.json, and the Codex and Cursor plugin.json
+files) to whatever version pyproject.toml already declares -- this is
+what the ``sync-plugin-version`` pre-commit hook runs on every commit
+that touches ``pyproject.toml``. Pass a version string to also bump
 pyproject.toml itself and refresh uv.lock in one step, e.g.::
 
     uv run python scripts/sync_plugin_version.py 0.44.0
@@ -35,6 +35,10 @@ PLUGIN_MANIFESTS: tuple[tuple[Path, tuple[str, ...]], ...] = (
     ),
     (
         ROOT / "integrations/claude/.codex-plugin/plugin.json",
+        ("version",),
+    ),
+    (
+        ROOT / "integrations/claude/.cursor-plugin/plugin.json",
         ("version",),
     ),
 )

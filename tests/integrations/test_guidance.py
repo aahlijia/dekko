@@ -10,6 +10,7 @@ a skill fire less often.
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -26,9 +27,23 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "integrations" / "claude"
 SKILL_ROOTS = (BUNDLE / "skills", BUNDLE / "skills-codex")
 CODEX_MANIFEST = BUNDLE / ".codex-plugin" / "plugin.json"
-# What the wheel must carry for Codex to load the bundle: its manifest,
-# its MCP server file (no ``cwd``), and the skills only Codex lists.
-CODEX_BUNDLE_PARTS = (".codex-plugin", "codex.mcp.json", "skills-codex")
+CURSOR_MANIFEST = BUNDLE / ".cursor-plugin" / "plugin.json"
+# Cursor's published plugin manifest schema, vendored from
+# github.com/cursor/plugins (schemas/plugin.schema.json) at commit
+# e5136d82418d2db3165ea1050d17577cd618cc05.
+CURSOR_SCHEMA = REPO_ROOT / "tests/fixtures/cursor/plugin.schema.json"
+# Cursor warns about a skill description past this many characters.
+CURSOR_MAX_DESCRIPTION = 1024
+# What the wheel must carry for Codex and Cursor to load the bundle:
+# their manifests, their MCP server files, and the skills only they
+# list.
+PLUGIN_BUNDLE_PARTS = (
+    ".codex-plugin",
+    "codex.mcp.json",
+    "skills-codex",
+    ".cursor-plugin",
+    "cursor.mcp.json",
+)
 
 # The plugin namespace Codex qualifies a plugin skill with (``dekko:x``).
 PLUGIN_NAME = "dekko"
@@ -177,6 +192,8 @@ def test_skill_frontmatter_fits_every_client(path: Path) -> None:
     name = fields.get("name") or path.parent.name
 
     assert fields.get("description"), "description must be non-empty"
+    assert fields.get("name") == path.parent.name
+    assert len(fields["description"]) <= CURSOR_MAX_DESCRIPTION
     assert len(name) <= MAX_NAME
     assert len(f"{PLUGIN_NAME}:{name}") <= MAX_QUALIFIED_NAME
 
@@ -276,16 +293,95 @@ def test_codex_only_skills_are_found() -> None:
     } <= names
 
 
+def _cursor_manifest() -> dict:
+    """The parsed Cursor manifest."""
+    return json.loads(CURSOR_MANIFEST.read_text(encoding="utf-8"))
+
+
+def _cursor_manifest_paths() -> list[str]:
+    """Every bundle path the Cursor manifest names."""
+    if not CURSOR_MANIFEST.is_file():
+        return []
+
+    manifest = _cursor_manifest()
+    paths: list[str] = []
+    for key in ("skills", "commands", "agents", "rules", "hooks"):
+        value = manifest.get(key)
+        if isinstance(value, str):
+            paths.append(value)
+        elif isinstance(value, list):
+            paths.extend(v for v in value if isinstance(v, str))
+
+    if isinstance(manifest.get("mcpServers"), str):
+        paths.append(manifest["mcpServers"])
+
+    return paths
+
+
+def test_cursor_manifest_names_its_skills_and_mcp_server() -> None:
+    manifest = _cursor_manifest()
+
+    assert manifest["name"] == PLUGIN_NAME
+    assert manifest["skills"] == ["./skills/", "./skills-codex/"]
+    # An empty list turns off Cursor's default ``commands/`` discovery:
+    # the Claude command files there use shell pre-execution, which
+    # Cursor doesn't run.
+    assert manifest["commands"] == []
+    assert manifest["mcpServers"] == "./cursor.mcp.json"
+
+
+def test_cursor_manifest_lists_some_paths() -> None:
+    assert len(_cursor_manifest_paths()) >= 3
+
+
+@pytest.mark.parametrize("path", _cursor_manifest_paths())
+def test_cursor_manifest_path_is_dot_relative_and_exists(path: str) -> None:
+    assert path.startswith("./")
+    assert (BUNDLE / path).exists()
+
+
+def test_cursor_manifest_fits_the_published_schema() -> None:
+    schema = json.loads(CURSOR_SCHEMA.read_text(encoding="utf-8"))
+    manifest = _cursor_manifest()
+
+    assert set(manifest) <= set(schema["properties"])
+    assert set(schema["required"]) <= set(manifest)
+    assert re.fullmatch(
+        schema["properties"]["name"]["pattern"],
+        manifest["name"],
+    )
+
+
+def test_cursor_mcp_server_passes_the_workspace_root() -> None:
+    # With no ``cwd`` Cursor starts the server wherever its own process
+    # runs, which in the IDE isn't the project, so the root goes in
+    # ``args``, a field Cursor expands ``${workspaceFolder}`` in.
+    config = json.loads(
+        (BUNDLE / "cursor.mcp.json").read_text(encoding="utf-8")
+    )
+    server = config["mcpServers"]["dekko"]
+
+    assert server["command"] == "dekko"
+    assert server["args"] == [
+        "serve",
+        "--mcp",
+        "--root",
+        "${workspaceFolder}",
+    ]
+    assert "cwd" not in server
+
+
 def test_bundle_has_no_symlinks() -> None:
-    # Codex copies the plugin into its cache and skips symlinks, so a
-    # linked file would be missing from the installed copy.
+    # Codex copies the plugin into its cache and skips symlinks, and
+    # Cursor's local plugin install is a copy too, so a linked file
+    # would be missing from the installed copy.
     links = [p for p in BUNDLE.rglob("*") if p.is_symlink()]
 
     assert links == []
 
 
-@pytest.mark.parametrize("part", CODEX_BUNDLE_PARTS)
-def test_wheel_ships_the_codex_bundle(part: str) -> None:
+@pytest.mark.parametrize("part", PLUGIN_BUNDLE_PARTS)
+def test_wheel_ships_the_plugin_bundle(part: str) -> None:
     pyproject = tomllib.loads(
         (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )

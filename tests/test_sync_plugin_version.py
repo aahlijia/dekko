@@ -22,6 +22,7 @@ SCRIPT = (
 PLUGIN_JSON = "integrations/claude/.claude-plugin/plugin.json"
 MARKETPLACE_JSON = "integrations/claude/.claude-plugin/marketplace.json"
 CODEX_JSON = "integrations/claude/.codex-plugin/plugin.json"
+CURSOR_JSON = "integrations/claude/.cursor-plugin/plugin.json"
 
 
 def _make_repo(tmp_path: Path, *, pyproject: str, manifests: str) -> Path:
@@ -61,15 +62,17 @@ def _make_repo(tmp_path: Path, *, pyproject: str, manifests: str) -> Path:
         )
         + "\n"
     )
-    codex_dir = tmp_path / "integrations" / "claude" / ".codex-plugin"
-    codex_dir.mkdir(parents=True)
-    (codex_dir / "plugin.json").write_text(
-        json.dumps(
-            {"name": "dekko", "version": manifests},
-            indent=2,
+    for client in (".codex-plugin", ".cursor-plugin"):
+        client_dir = tmp_path / "integrations" / "claude" / client
+        client_dir.mkdir(parents=True)
+        (client_dir / "plugin.json").write_text(
+            json.dumps(
+                {"name": "dekko", "version": manifests},
+                indent=2,
+            )
+            + "\n"
         )
-        + "\n"
-    )
+
     return tmp_path
 
 
@@ -156,6 +159,19 @@ def test_sync_keeps_the_codex_manifest_in_step(tmp_path: Path) -> None:
     synced = json.loads((repo / CODEX_JSON).read_text())["version"]
     _run(repo, "0.44.0", "--no-lock")
     bumped = json.loads((repo / CODEX_JSON).read_text())["version"]
+
+    assert synced == "0.43.5"
+    assert bumped == "0.44.0"
+
+
+def test_sync_keeps_the_cursor_manifest_in_step(tmp_path: Path) -> None:
+    """Cursor's manifest is synced and bumped with the others."""
+    repo = _make_repo(tmp_path, pyproject="0.43.5", manifests="0.43.3")
+
+    _run(repo)
+    synced = json.loads((repo / CURSOR_JSON).read_text())["version"]
+    _run(repo, "0.44.0", "--no-lock")
+    bumped = json.loads((repo / CURSOR_JSON).read_text())["version"]
 
     assert synced == "0.43.5"
     assert bumped == "0.44.0"
