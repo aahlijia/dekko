@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko.integrations import claude_md, orient
+from dekko.integrations import orient, policy_md
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "integrations" / "claude"
@@ -180,7 +180,7 @@ def test_skill_text_has_no_client_only_tokens(path: Path) -> None:
 
 @pytest.mark.parametrize(
     "text",
-    [claude_md._POLICY_BODY, orient._PREAMBLE],
+    [policy_md._POLICY_BODY, orient._PREAMBLE],
     ids=["policy", "preamble"],
 )
 def test_standing_guidance_has_no_client_only_tokens(text: str) -> None:

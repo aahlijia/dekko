@@ -18,8 +18,8 @@ _HANDLERS = (
     (cli, "mcp_uninstall"),
     (cli.cline_mod, "install"),
     (cli.cline_mod, "uninstall"),
-    (cli.claude_md_mod, "install"),
-    (cli.claude_md_mod, "uninstall"),
+    (cli.policy_md_mod, "install"),
+    (cli.policy_md_mod, "uninstall"),
 )
 
 
@@ -119,7 +119,7 @@ def test_install_target_and_its_legacy_flag_call_the_same_handler(
 
 
 @pytest.mark.parametrize("verb", ["install", "uninstall"])
-@pytest.mark.parametrize("target", ["cline", "claude-md"])
+@pytest.mark.parametrize("target", ["cline", "claude-md", "agents-md"])
 def test_dry_run_is_refused_on_a_file_editing_target(
     calls: Calls,
     tmp_path: Path,
@@ -128,7 +128,7 @@ def test_dry_run_is_refused_on_a_file_editing_target(
     target: str,
 ) -> None:
     argv = [verb, target, "--dry-run"]
-    if target == "claude-md":
+    if target.endswith("-md"):
         argv += ["--root", str(tmp_path)]
 
     assert cli.main(argv) == 2
@@ -173,7 +173,12 @@ def test_help_lists_every_target(
 
 @pytest.mark.parametrize(
     ("target", "shown"),
-    [("claude", True), ("cline", False), ("claude-md", False)],
+    [
+        ("claude", True),
+        ("cline", False),
+        ("claude-md", False),
+        ("agents-md", False),
+    ],
 )
 def test_target_help_mentions_dry_run_only_when_previewable(
     capsys: pytest.CaptureFixture, target: str, shown: bool
@@ -182,6 +187,18 @@ def test_target_help_mentions_dry_run_only_when_previewable(
         cli.main(["install", target, "--help"])
 
     assert ("--dry-run" in capsys.readouterr().out) is shown
+
+
+@pytest.mark.parametrize(
+    ("target", "file_key"), [("claude-md", "claude"), ("agents-md", "agents")]
+)
+@pytest.mark.parametrize("verb", ["install", "uninstall"])
+def test_policy_targets_pass_their_file_to_the_handler(
+    calls: Calls, tmp_path: Path, verb: str, target: str, file_key: str
+) -> None:
+    assert cli.main([verb, target, "--root", str(tmp_path)]) == 0
+
+    assert calls == [(f"policy_md.{verb}", (tmp_path.resolve(), file_key), {})]
 
 
 def test_install_and_uninstall_never_route_through_the_daemon(

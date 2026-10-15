@@ -24,7 +24,7 @@ from dekko import repo_ops
 from dekko.analysis import affected
 from dekko.analysis import ambiguous
 from dekko.storage import cache as cache_mod
-from dekko.integrations import claude_md as claude_md_mod
+from dekko.integrations import policy_md as policy_md_mod
 from dekko.integrations import cline as cline_mod
 from dekko.analysis import contextpack
 from dekko.daemon import daemon as daemon_mod
@@ -2031,12 +2031,32 @@ def _uninstall_cline(args: argparse.Namespace) -> int:
 
 def _install_claude_md(args: argparse.Namespace) -> int:
     """Handle ``dekko install claude-md``."""
-    return claude_md_mod.install(Path(args.root).resolve())
+    return policy_md_mod.install(Path(args.root).resolve(), "claude")
 
 
 def _uninstall_claude_md(args: argparse.Namespace) -> int:
     """Handle ``dekko uninstall claude-md``."""
-    return claude_md_mod.uninstall(Path(args.root).resolve())
+    return policy_md_mod.uninstall(Path(args.root).resolve(), "claude")
+
+
+def _add_agents_md_target_args(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``agents-md`` target's options."""
+    parser.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose AGENTS.md to edit (default: cwd)",
+    )
+
+
+def _install_agents_md(args: argparse.Namespace) -> int:
+    """Handle ``dekko install agents-md``."""
+    return policy_md_mod.install(Path(args.root).resolve(), "agents")
+
+
+def _uninstall_agents_md(args: argparse.Namespace) -> int:
+    """Handle ``dekko uninstall agents-md``."""
+    return policy_md_mod.uninstall(Path(args.root).resolve(), "agents")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2087,6 +2107,15 @@ INSTALL_TARGETS: tuple[InstallTarget, ...] = (
         add_args=_add_claude_md_target_args,
         install=_install_claude_md,
         uninstall=_uninstall_claude_md,
+        previewable=False,
+    ),
+    InstallTarget(
+        name="agents-md",
+        summary="the dekko usage-policy block in this repo's AGENTS.md "
+        "(read by Codex and other agents)",
+        add_args=_add_agents_md_target_args,
+        install=_install_agents_md,
+        uninstall=_uninstall_agents_md,
         previewable=False,
     ),
 )
@@ -3093,10 +3122,10 @@ def _legacy_main(args_list: list[str]) -> int:
         return claude_uninstall(dry_run=args.dry_run)
 
     if args.claude_md_install:
-        return claude_md_mod.install(Path(args.root).resolve())
+        return policy_md_mod.install(Path(args.root).resolve(), "claude")
 
     if args.claude_md_uninstall:
-        return claude_md_mod.uninstall(Path(args.root).resolve())
+        return policy_md_mod.uninstall(Path(args.root).resolve(), "claude")
 
     if args.mcp_install:
         return mcp_install(dry_run=args.dry_run)

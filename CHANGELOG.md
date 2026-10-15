@@ -39,6 +39,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   since Codex drops a hook's context when its output carries an unknown
   key (refs #38).
 
+- **`dekko install agents-md` writes the usage policy into `AGENTS.md`.**
+  OpenAI Codex (and Cursor, Amp, Jules and others) read `AGENTS.md`
+  the way Claude Code reads `CLAUDE.md`, so the same agent-neutral
+  block now goes in either file, between the same markers, with the
+  same in-place update and byte-identical uninstall
+  (`dekko uninstall agents-md`). Writes go through a symlink instead of
+  replacing it, so a repo whose `CLAUDE.md` links to `AGENTS.md` gets
+  one block whichever target runs. After the install, dekko warns when
+  Codex won't see the block: a root `AGENTS.md` over Codex's default
+  32 KiB `project_doc_max_bytes` (Codex cuts the end of the file, where
+  the block sits), or a root `AGENTS.override.md`, which Codex reads
+  instead. The `claude_md` module is now `policy_md` (refs #38).
+
 ### Changed
 - **The skills, usage policy and session preamble read the same to any
   agent.** They named Claude Code's tool spellings

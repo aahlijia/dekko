@@ -4,7 +4,7 @@ Each check is exercised in isolation (monkeypatching ``shutil.which``/
 ``subprocess.run`` to simulate PATH shadowing, a missing ``claude``
 CLI, and a live/absent ``dekko serve --mcp`` process), then the
 composed report is exercised through ``doctor.collect()`` and the CLI
-entrypoint, mirroring ``test_hooks.py``'s/``test_claude_md.py``'s
+entrypoint, mirroring ``test_hooks.py``'s/``test_policy_md.py``'s
 fixture use.
 """
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko.integrations import claude_md, cli, doctor, hooks
+from dekko.integrations import cli, doctor, hooks, policy_md
 
 from conftest import RepoFactory
 
@@ -400,7 +400,7 @@ def test_claude_md_absent(tmp_path: Path) -> None:
 
 
 def test_claude_md_present(tmp_path: Path) -> None:
-    claude_md.install(tmp_path)
+    policy_md.install(tmp_path)
     finding = doctor._check_claude_md(tmp_path)
     assert finding.status == "ok"
     assert finding.fix is None
