@@ -1,6 +1,6 @@
 ---
 name: dekko-delegate
-description: Brief a subagent with dekko's map before dispatching it into a repo that has a `.dekko/` directory. Trigger before any Agent/Task tool call, Workflow `agent()`, teammate message, or scripted `claude -p` run (or a `spawn_agent` call or scripted `codex exec` run) that will explore, review, implement, or test in such a repo. A subagent starts with an empty context and no session-start orientation, so without a brief it re-explores from scratch with grep and whole-file reads; one budgeted dekko digest in the prompt replaces that, and telling it the tools exist makes it use them.
+description: Brief a subagent with dekko's map before dispatching it into a repo that has a `.dekko/` directory. Trigger before any Agent/Task tool call, Workflow `agent()`, teammate message, or scripted `claude -p` run (or a `spawn_agent` call, or a scripted `codex exec` or `agent -p` run) that will explore, review, implement, or test in such a repo. A subagent starts with an empty context and no session-start orientation, so without a brief it re-explores from scratch with grep and whole-file reads; one budgeted dekko digest in the prompt replaces that, and telling it the tools exist makes it use them.
 ---
 
 # Briefing subagents with dekko
@@ -37,8 +37,10 @@ tell it to use the tools.
 
    ## Tools
    This repo has a .dekko/ map. Use the dekko MCP tools
-   (your client prefixes them, e.g. mcp__dekko__search_code; the
-   dekko-orient skill applies) or `dekko <cmd>` in a shell, before
+   (your client prefixes them, e.g. mcp__dekko__search_code; Cursor
+   calls them through its MCP tool, with server `dekko` and tool name
+   `search_code`; the dekko-orient skill applies) or `dekko <cmd>` in
+   a shell, before
    any grep or whole-file read: search_code to find code by what it does,
    outline for a file's shape, get_callers / impacted_tests for
    impact, get_context_pack with with_source for the lines to edit.

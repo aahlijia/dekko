@@ -10,9 +10,10 @@ dekko **before** grepping for a symbol or reading a whole file.
 
 This skill writes dekko's MCP tools by their bare name
 (`query_symbol`, `outline`, ...). Your client prefixes them, e.g.
-`mcp__dekko__query_symbol`. If none are loaded, they may be deferred:
-search your tools for "dekko" before falling back to grep or a
-whole-file read.
+`mcp__dekko__query_symbol`. (Cursor calls them through its MCP tool,
+with server `dekko` and tool name `query_symbol`.) If none are loaded,
+they may be deferred: search your tools for "dekko" before falling back
+to grep or a whole-file read.
 With no MCP tools at all, use the CLI column below. No `.dekko/` yet?
 Run `dekko map .` (or `/map`) once.
 

@@ -392,3 +392,20 @@ def test_wheel_ships_the_plugin_bundle(part: str) -> None:
 
     assert include.get(source) == f"dekko/_plugin/{part}"
     assert (REPO_ROOT / source).exists()
+
+
+@pytest.mark.parametrize("skill", ["dekko-orient", "dekko-delegate"])
+def test_skill_names_cursors_mcp_route(skill: str) -> None:
+    # Cursor's model reaches MCP tools through one generic tool that
+    # takes a server and a tool name, not a prefixed tool per server.
+    text = (BUNDLE / "skills" / skill / "SKILL.md").read_text("utf-8")
+
+    assert "server `dekko`" in text
+
+
+def test_delegate_description_names_cursor_headless_runs() -> None:
+    description = _frontmatter(
+        BUNDLE / "skills" / "dekko-delegate" / "SKILL.md"
+    )["description"]
+
+    assert "`agent -p`" in description
