@@ -113,12 +113,17 @@ dekko uninstall claude-md     # remove just that block, leave the rest of the fi
 ```
 
 Writes a short block bounded by `<!-- dekko:usage-policy:start -->` /
-`...:end` markers into the project's `CLAUDE.md`, pointing Claude at
+`...:end` markers into the project's `CLAUDE.md`, pointing the agent at
 `search_code`/`outline`/`get_callers`/`workset` before `grep`/`Read`.
 Idempotent: re-running `dekko install claude-md` replaces the block in
 place rather than duplicating it. This is a separate, explicit opt-in
 from everything else on this page — it edits a file you own and read,
 unlike `.claude/settings.json` or the plugin registration.
+
+The block is written for any agent, not just Claude Code: `dekko
+install agents-md` puts the same block into `AGENTS.md` for Codex and
+the other agents that read it (see
+[codex.md](codex.md#a-persistent-usage-policy-in-agentsmd-opt-in)).
 
 ## Push hooks (opt-in)
 
@@ -186,29 +191,11 @@ never blocks a session or a tool call, it just produces no output (for
 ### OpenAI Codex
 
 The same hooks work in Codex with `--agent codex` on `install`,
-`uninstall` and `run`:
-
-```sh
-dekko hooks install --agent codex --enable session-start --enable prompt-submit --enable pre-bash
-dekko hooks uninstall --agent codex
-```
-
-This writes `.codex/hooks.json`, which has the same shape as Claude's
-settings. The differences:
-
-- **No `pre-read`.** Codex has no Read tool; its model reads files
-  through the shell, and `pre-bash` covers those reads.
-- **`pre-bash` is advisory by default.** Codex has no `"ask"`, so a
-  match adds the dekko-equivalent command as context and the command
-  still runs. `--strict` denies it instead.
-- **Trust.** Codex runs project hooks only in a trusted project and
-  asks you to review each new hook ("Hooks need review") the next time
-  it starts. `codex exec` skips untrusted hooks silently. Codex's trust
-  covers the whole hook entry, so reinstalling with or without
-  `--strict` needs another review.
-- **One place for hooks.** If `.codex/config.toml` already defines
-  hooks in a `[hooks]` table, the install stops: Codex warns when one
-  config layer defines hooks in both places.
+`uninstall` and `run`, written to `.codex/hooks.json`. Codex has no
+`pre-read` (it reads files through the shell, which `pre-bash`
+covers), no "ask" (so `pre-bash` advises by default and denies under
+`--strict`), and its own trust review for every hook. See
+[codex.md](codex.md#push-hooks-opt-in).
 
 ## Skills
 
@@ -230,6 +217,12 @@ step:
 
 See each skill's `SKILL.md` under `integrations/claude/skills/` for the
 full guidance.
+
+The same eight skills ship in the Codex plugin, word for word: they
+name dekko's tools by bare name and cover both a Read tool and shell
+reads, so one text serves either agent. Codex also gets four skills in
+place of the slash commands (see
+[codex.md](codex.md#skills)).
 
 ## The MCP server
 

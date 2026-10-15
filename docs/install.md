@@ -43,17 +43,19 @@ back to stdlib `json` automatically when not installed):
 pip install dekko[fastjson]
 ```
 
-Then add the `/map` command + MCP server to Claude Code:
+Then add the `/map` command + MCP server to Claude Code, or the same
+MCP server and skills to OpenAI Codex ([codex.md](codex.md)):
 
 ```sh
 dekko install claude       # restart Claude Code afterward
+dekko install codex        # restart Codex afterward; see codex.md
 ```
 
-Add `--dry-run` to `dekko install claude` or `dekko uninstall claude`
-(with or without `--mcp-only`) to print the `claude` commands it would
-run without running them. The file-editing targets (`cline`,
-`claude-md`) refuse `--dry-run` (exit 2) rather than ignore it and
-write for real. `dekko install --help` lists every target, and the
+Add `--dry-run` to `dekko install claude|codex` or
+`dekko uninstall claude|codex` (with or without `--mcp-only`) to print
+the `claude` / `codex` commands it would run without running them.
+The file-editing targets (`cline`, `claude-md`, `agents-md`) refuse
+`--dry-run` (exit 2) rather than ignore it and write for real. `dekko install --help` lists every target, and the
 [CLI reference](cli.md#wiring-dekko-into-a-client) covers each one.
 
 ## From a local clone
@@ -68,6 +70,7 @@ cd dekko
 
 ```sh
 dekko uninstall claude     # remove the /map plugin (and its MCP server)
+dekko uninstall codex      # remove the Codex plugin
 uv tool uninstall dekko    # or: pip uninstall dekko / pipx uninstall dekko
 ```
 
