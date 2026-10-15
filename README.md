@@ -129,6 +129,8 @@ Java, Kotlin, Rust), `dekko map` will say so per file; install `dekko[all]` for
   excluding files, notes, daemon mode, language support
 - [docs/claude-code.md](docs/claude-code.md) — the `/map` plugin, push
   hooks, Claude Code skills, the MCP server, and Cline
+- [docs/codex.md](docs/codex.md): the OpenAI Codex plugin, skills,
+  `AGENTS.md` policy, and hooks
 
 ## Learn more
 

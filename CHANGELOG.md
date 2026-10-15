@@ -10,6 +10,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 ## [Unreleased]
 
 ### Added
+- **`dekko install <target>` / `dekko uninstall <target>`.** One
+  command family wires dekko into every client it supports, instead
+  of a separate `--<client>-install` flag per client:
+  `dekko install claude` (the Claude Code plugin, or with
+  `--mcp-only` just the MCP server), `dekko install cline`
+  (`--scope`, `--config`, `--force`), and `dekko install claude-md`
+  (`--root`). `dekko install --help` lists every target. `--dry-run`
+  previews the `claude` target and is refused (exit 2) on the
+  file-editing ones; no target or an unknown one exits 2 with the
+  list. The old flags (`--claude-install`, `--mcp-install`,
+  `--cline-install`, `--claude-md-install` and their uninstall forms)
+  keep working as aliases of the same handlers, and `doctor`'s fix-it
+  hints and the docs now name the new commands.
 - **dekko ships as an OpenAI Codex plugin.** `dekko install codex`
   registers the plugin bundled in the wheel with the `codex` CLI
   (`codex plugin marketplace add`, then `codex plugin add
@@ -29,19 +42,18 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   that. `scripts/sync_plugin_version.py` keeps the Codex manifest's
   version in step, which is what makes Codex refresh its cached copy
   on upgrade (refs #38).
-- **`dekko install <target>` / `dekko uninstall <target>`.** One
-  command family wires dekko into every client it supports, instead
-  of a separate `--<client>-install` flag per client:
-  `dekko install claude` (the Claude Code plugin, or with
-  `--mcp-only` just the MCP server), `dekko install cline`
-  (`--scope`, `--config`, `--force`), and `dekko install claude-md`
-  (`--root`). `dekko install --help` lists every target. `--dry-run`
-  previews the `claude` target and is refused (exit 2) on the
-  file-editing ones; no target or an unknown one exits 2 with the
-  list. The old flags (`--claude-install`, `--mcp-install`,
-  `--cline-install`, `--claude-md-install` and their uninstall forms)
-  keep working as aliases of the same handlers, and `doctor`'s fix-it
-  hints and the docs now name the new commands.
+- **`dekko install agents-md` writes the usage policy into `AGENTS.md`.**
+  OpenAI Codex (and Cursor, Amp, Jules and others) read `AGENTS.md`
+  the way Claude Code reads `CLAUDE.md`, so the same agent-neutral
+  block now goes in either file, between the same markers, with the
+  same in-place update and byte-identical uninstall
+  (`dekko uninstall agents-md`). Writes go through a symlink instead of
+  replacing it, so a repo whose `CLAUDE.md` links to `AGENTS.md` gets
+  one block whichever target runs. After the install, dekko warns when
+  Codex won't see the block: a root `AGENTS.md` over Codex's default
+  32 KiB `project_doc_max_bytes` (Codex cuts the end of the file, where
+  the block sits), or a root `AGENTS.override.md`, which Codex reads
+  instead. The `claude_md` module is now `policy_md` (refs #38).
 - **dekko's hooks work in OpenAI Codex.** `dekko hooks install|uninstall|run`
   take `--agent codex`, which writes `.codex/hooks.json` (the same
   `{"hooks": {...}}` shape as Claude's settings) with `session-start`,
@@ -57,19 +69,6 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   Codex's own hook schemas, vendored under `tests/fixtures/codex/`,
   since Codex drops a hook's context when its output carries an unknown
   key (refs #38).
-
-- **`dekko install agents-md` writes the usage policy into `AGENTS.md`.**
-  OpenAI Codex (and Cursor, Amp, Jules and others) read `AGENTS.md`
-  the way Claude Code reads `CLAUDE.md`, so the same agent-neutral
-  block now goes in either file, between the same markers, with the
-  same in-place update and byte-identical uninstall
-  (`dekko uninstall agents-md`). Writes go through a symlink instead of
-  replacing it, so a repo whose `CLAUDE.md` links to `AGENTS.md` gets
-  one block whichever target runs. After the install, dekko warns when
-  Codex won't see the block: a root `AGENTS.md` over Codex's default
-  32 KiB `project_doc_max_bytes` (Codex cuts the end of the file, where
-  the block sits), or a root `AGENTS.override.md`, which Codex reads
-  instead. The `claude_md` module is now `policy_md` (refs #38).
 
 ### Changed
 - **The skills, usage policy and session preamble read the same to any
