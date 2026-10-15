@@ -1,7 +1,7 @@
 [project]
 name = "dekko"
 version = "1.9.35"
-description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
+description = "Static code map for any repo (MAP.md + map.json), plus Claude Code, Codex and Cursor plugins"
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -12,7 +12,8 @@ keywords = [
     "code-map", "tree-sitter", "static-analysis", "claude-code",
     "code-analysis", "call-graph", "mcp-server", "ai-coding",
     "dead-code-detection", "code-navigation", "repository-map",
-    "claude-code-plugin", "developer-tools", "llm-agents",
+    "claude-code-plugin", "codex", "codex-plugin", "cursor",
+    "cursor-plugin", "developer-tools", "llm-agents",
     "codebase-indexing", "model-context-protocol",
 ]
 classifiers = [
