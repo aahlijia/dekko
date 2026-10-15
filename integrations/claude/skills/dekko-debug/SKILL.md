@@ -17,7 +17,7 @@ queries are CLI only.
 | Question | Use |
 |---|---|
 | What is this frame, and does it carry a note? | `query_symbol file.py:func` (line-qualify with `:LINE` when the reply says it's an overload set) |
-| What does the raising function actually do here? | `get_context_pack` with `with_source=true`, budget ~800; a whole-file Read is the last resort |
+| What does the raising function actually do here? | `get_context_pack` with `with_source=true`, budget ~800; a whole-file read is the last resort |
 | Where can this exception come from? | `dekko query throws <sym>`: the function's own raise sites, each `repo-defined` or `external`; `--transitive --depth N` walks callees |
 | Who catches it, or should have? | `dekko query catches <ExcType>`: exact type-name matches plus catch-alls |
 | How did control reach this frame? | `get_callers` one hop up; `dekko trace <entry> <frame>` for the shortest call path(s) when the trace is truncated, async, or via a callback |

@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Changed
+- **The skills, usage policy and session preamble read the same to any
+  agent.** They named Claude Code's tool spellings
+  (`mcp__plugin_dekko_dekko__*`, the Read tool, Bash) and promised that
+  a broad grep "will pause for confirmation", which only Claude Code's
+  `ask` does. They now name dekko's MCP tools by bare name ("your
+  client prefixes them"), point line-ranged reads at either a Read
+  tool or `sed -n` in a shell, and say a broad grep may be flagged,
+  paused or blocked. Skill descriptions only gained wording (the
+  `spawn_agent` / `codex exec` dispatch, shell reads); every phrase
+  they matched on before is still there, so Claude Code picks them as
+  often as it did. The plugin and marketplace listings no longer say
+  "for Claude Code". A new guard test keeps client-only text out of
+  this guidance and holds each description's trigger phrases in place.
+
 ## [1.9.35] — 2026-10-14
 
 ### Fixed

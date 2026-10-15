@@ -1,6 +1,6 @@
 ---
 name: dekko-daemon
-description: Start dekko's background daemon before a session that will run many bare `dekko` CLI commands via Bash (not the MCP tools) against a large or medium repo. Trigger when you're about to run several dekko CLI invocations in a row on the same repo — a long refactor loop, a batch of query/search/outline calls, or a hook/script context — and want to avoid each one reparsing map.json from scratch.
+description: Start dekko's background daemon before a session that will run many bare `dekko` CLI commands via Bash or another shell (not the MCP tools) against a large or medium repo. Trigger when you're about to run several dekko CLI invocations in a row on the same repo — a long refactor loop, a batch of query/search/outline calls, or a hook/script context — and want to avoid each one reparsing map.json from scratch.
 ---
 
 # Warming up repeated `dekko` CLI calls with the daemon
@@ -8,8 +8,8 @@ description: Start dekko's background daemon before a session that will run many
 `dekko daemon start` spawns a small per-repo background process that
 keeps a warm, in-memory map index across CLI invocations, instead of
 each one reloading and re-indexing `map.json` from disk. It only
-matters for the **bare CLI path** (commands run via Bash) — if you're
-calling the MCP tools (`mcp__dekko__*`) instead, skip this: the MCP
+matters for the **bare CLI path** (commands run in a shell) — if you're
+calling the MCP tools instead, skip this: the MCP
 server already keeps its own warm per-process cache
 (`Context.index_cache`) independently, by design, so nothing here
 applies there.
@@ -20,7 +20,7 @@ applies there.
 dekko daemon start        # spawns it, returns immediately
 ```
 
-Worth doing at the start of a Bash-CLI-heavy stretch of work — a
+Worth doing at the start of a CLI-heavy stretch of work — a
 refactor loop running `query`/`affected`/`workset` repeatedly, a batch
 of `outline`/`search` calls while orienting in a large repo, or
 scripted/hook invocations. Skip it for a one-off `dekko map` or a
