@@ -201,14 +201,18 @@ too. The Codex rows appear only when Codex is actually installed: the
 A leftover `~/.codex/` directory on its own doesn't count. The rows
 cover:
 
-- whether the dekko plugin is installed (`codex plugin list`);
+- whether the dekko plugin is installed, enabled, and at this dekko's
+  version (`codex plugin list`). Codex only refreshes its cached copy
+  when the version changes, so an older copy shows as `stale`;
 - whether Codex has a `dekko` MCP server registered, from the plugin
   or `--mcp-only` (`codex mcp list --json`);
 - whether the root `AGENTS.md` has the usage-policy block, and whether
   it's over 32 KiB or shadowed by an `AGENTS.override.md`;
 - one row per hook in `.codex/hooks.json`, flagging an entry that
   differs from what this dekko version writes (Codex will want it
-  reviewed again).
+  reviewed again). On Python 3.11+ the row also says whether Codex has
+  a trust record for the hook yet ("trusted (hash not verified)" or
+  "not yet reviewed"); on 3.10 that part is skipped.
 
 Each missing row names the `dekko install ...` or
 `dekko hooks install --agent codex ...` command that fixes it.
