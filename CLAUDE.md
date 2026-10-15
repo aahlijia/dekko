@@ -20,7 +20,7 @@ rendering), `analysis/` (read-side commands — query, outline, search,
 affected, trace, unused, stats, summary, workset, contextpack, diff,
 relevance, ambiguous, deps, sanity), `daemon/` (the daemon process and
 its transport), `integrations/` (cli, server, hooks, cline, orient,
-claude_md, doctor), `storage/` (on-disk caches/locks/notes/ledger under
+policy_md, doctor), `storage/` (on-disk caches/locks/notes/ledger under
 `.dekko/`), and a handful of modules with no subpackage-specific home
 (`classify.py`, `textutil.py`, `source.py`, `repo_ops.py`) staying
 directly under `src/dekko/`. `dekko outline src/dekko/<subpackage>/<file>.py` or

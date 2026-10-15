@@ -1,6 +1,6 @@
 """Environment + install-state diagnostic: composition only, no new
 extraction. Reuses ``mapfile``'s freshness signal, ``hooks``'s
-``.claude/settings.json`` shape, and ``claude_md``'s marker string.
+``.claude/settings.json`` shape, and ``policy_md``'s marker string.
 
 Three independent opt-in installers exist (``dekko install claude``,
 ``dekko hooks install``, ``dekko install claude-md``, plus a separate
@@ -37,7 +37,7 @@ from pathlib import Path
 
 from dekko import selfcheck
 from dekko.analysis import ambiguous
-from dekko.integrations import claude_md as claude_md_mod
+from dekko.integrations import policy_md as policy_md_mod
 from dekko.integrations import hooks as hooks_mod
 from dekko.render import mapfile
 
@@ -504,9 +504,9 @@ def _check_hooks(root: Path) -> list[Finding]:
 
 def _check_claude_md(root: Path) -> Finding:
     """Whether the usage-policy marker block is present in CLAUDE.md."""
-    path = claude_md_mod._claude_md_path(root)
+    path = policy_md_mod.policy_path(root, "claude")
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    if claude_md_mod._find_block(text) is not None:
+    if policy_md_mod._find_block(text) is not None:
         return Finding(
             "claude-md-policy",
             "ok",
