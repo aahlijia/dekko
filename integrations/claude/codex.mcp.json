@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dekko": {
+      "command": "dekko",
+      "args": [
+        "serve",
+        "--mcp"
+      ]
+    }
+  }
+}

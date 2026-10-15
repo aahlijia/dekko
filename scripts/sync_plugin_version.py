@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Keep plugin.json/marketplace.json version in sync with pyproject.toml.
+"""Keep the plugin manifests' version in sync with pyproject.toml.
 
-Run with no arguments to sync the two Claude Code plugin manifests to
+Run with no arguments to sync the plugin manifests (Claude Code's
+plugin.json and marketplace.json, and Codex's plugin.json) to
 whatever version pyproject.toml already declares -- this is what the
 ``sync-plugin-version`` pre-commit hook runs on every commit that
 touches ``pyproject.toml``. Pass a version string to also bump
@@ -31,6 +32,10 @@ PLUGIN_MANIFESTS: tuple[tuple[Path, tuple[str, ...]], ...] = (
     (
         ROOT / "integrations/claude/.claude-plugin/marketplace.json",
         ("metadata", "version"),
+    ),
+    (
+        ROOT / "integrations/claude/.codex-plugin/plugin.json",
+        ("version",),
     ),
 )
 _VERSION_LINE = re.compile(r'(?m)^version = "([^"]+)"$')
@@ -107,7 +112,7 @@ def run_uv_lock() -> None:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Sync plugin.json/marketplace.json with pyproject.toml's "
+            "Sync the plugin manifests with pyproject.toml's "
             "version, optionally bumping pyproject.toml itself."
         ),
     )

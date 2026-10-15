@@ -93,6 +93,9 @@ packages = ["src/dekko"]
 "integrations/claude/commands" = "dekko/_plugin/commands"
 "integrations/claude/skills" = "dekko/_plugin/skills"
 "integrations/claude/.mcp.json" = "dekko/_plugin/.mcp.json"
+"integrations/claude/.codex-plugin" = "dekko/_plugin/.codex-plugin"
+"integrations/claude/skills-codex" = "dekko/_plugin/skills-codex"
+"integrations/claude/codex.mcp.json" = "dekko/_plugin/codex.mcp.json"
 
 [dependency-groups]
 dev = [

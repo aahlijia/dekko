@@ -339,18 +339,30 @@ lists the targets:
 dekko install claude                 # Claude Code plugin: MCP server, skills, slash commands
 dekko install claude --mcp-only      # just the MCP server (claude mcp add)
 dekko install claude --dry-run       # print the claude commands instead of running them
+dekko install codex                  # OpenAI Codex plugin: MCP server and skills
+dekko install codex --mcp-only       # just the MCP server (codex mcp add)
+dekko install codex --dry-run        # print the codex commands instead of running them
 dekko install cline                  # MCP server in Cline's cline_mcp_settings.json
 dekko install cline --scope global   # ...a standalone cline CLI's config (--config PATH to name the file)
 dekko install claude-md              # usage-policy block in this repo's CLAUDE.md (--root DIR)
 dekko uninstall claude               # the reverse of each, same options
 ```
 
-`--dry-run` works only on the `claude` target, which shells out to the
-`claude` CLI; `cline` and `claude-md` edit a file and refuse it (exit
-2) rather than write for real. No target, or an unknown one, exits 2
+`--dry-run` works only on the `claude` and `codex` targets, which shell
+out to the `claude` / `codex` CLI; `cline` and `claude-md` edit a file
+and refuse it (exit 2) rather than write for real. No target, or an unknown one, exits 2
 with the list. Hooks have their own opt-in per event, under `dekko
 hooks install` (see
 [claude-code.md](claude-code.md#push-hooks-opt-in)).
+
+`dekko install codex` registers the plugin bundled in the dekko wheel
+(`codex plugin marketplace add`, then `codex plugin add dekko@dekko`).
+Codex copies the plugin into its own cache and refreshes that copy
+whenever dekko's version changes. Its skills are invoked as
+`$dekko:<skill>` (for example `$dekko:dekko-orient`); the `/map`,
+`/impact`, `/doctor` and `/sanity` commands become the skills
+`dekko-map`, `dekko-impact`, `dekko-doctor` and `dekko-sanity`, since
+Codex has no plugin slash commands. `codex` has no legacy flag.
 
 The older flags still work and do exactly the same thing:
 

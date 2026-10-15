@@ -1949,6 +1949,188 @@ def mcp_uninstall(dry_run: bool = False) -> int:
     return 0
 
 
+def _codex_exe() -> str | None:
+    """Resolve the ``codex`` CLI to its full path, or warn and None.
+
+    Same reasoning as :func:`_claude_exe`: on Windows ``subprocess.run``
+    will not launch a ``codex.cmd`` shim found only by name, while the
+    full path ``shutil.which`` returns does work.
+    """
+    exe = shutil.which("codex")
+    if exe is None:
+        print(
+            "dekko: 'codex' CLI not found on PATH. Install OpenAI Codex "
+            "first: https://github.com/openai/codex",
+            file=sys.stderr,
+        )
+    return exe
+
+
+def _print_dry_run(cmds: list[list[str]]) -> None:
+    """Print the command lines a ``--dry-run`` would have run."""
+    print("dekko: --dry-run, would run:")
+    for cmd in cmds:
+        print(f"  {' '.join(cmd)}")
+
+
+def _warn_failed_removals(cmds: list[list[str]]) -> None:
+    """Run removal commands, warning (not failing) on each that fails.
+
+    A removal fails when the thing is already gone, which is the state
+    the person asked for, so it's surfaced and the run carries on.
+    """
+    for cmd in cmds:
+        result = _run_subprocess(cmd)
+        if result.returncode != 0:
+            print(
+                f"dekko: '{' '.join(cmd)}' failed (already removed?): "
+                f"{result.stderr.strip()}",
+                file=sys.stderr,
+            )
+
+
+def codex_install(dry_run: bool = False) -> int:
+    """Register the bundled plugin with the OpenAI Codex CLI.
+
+    Codex reads the same bundle Claude Code does, through its own
+    ``.codex-plugin/plugin.json``. It copies the plugin into its cache
+    at install and refreshes the copy whenever the bundle's version
+    changes, so re-running this after an upgrade is enough.
+
+    Args:
+        dry_run: Print the command(s) that would run instead of running
+            them; leaves Codex's config untouched.
+
+    Returns:
+        Process exit code.
+    """
+    exe = _codex_exe()
+    if exe is None:
+        return 1
+
+    plugin_dir = Path(str(_pkg_files("dekko"))) / "_plugin"
+    if not (plugin_dir / ".codex-plugin").is_dir():
+        print(
+            f"dekko: bundled Codex plugin not found at {plugin_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
+    add = [exe, "plugin", "marketplace", "add", str(plugin_dir)]
+    install = [exe, "plugin", "add", "dekko@dekko"]
+    if dry_run:
+        _print_dry_run([add, install])
+        return 0
+
+    added = _run_subprocess(add)
+    if added.returncode != 0:
+        # Likely already registered (a previous install): refresh it.
+        upgraded = _run_subprocess(
+            [exe, "plugin", "marketplace", "upgrade", "dekko"]
+        )
+        if upgraded.returncode != 0:
+            print(added.stderr.strip(), file=sys.stderr)
+            print(upgraded.stderr.strip(), file=sys.stderr)
+            return 1
+
+    installed = _run_subprocess(install)
+    if installed.returncode != 0:
+        print(installed.stderr.strip(), file=sys.stderr)
+        return 1
+
+    print(
+        "dekko: plugin installed. Restart Codex to load the dekko MCP "
+        "tools and skills; invoke a skill as $dekko:<skill> (e.g. "
+        "$dekko:dekko-orient)."
+    )
+    return 0
+
+
+def codex_uninstall(dry_run: bool = False) -> int:
+    """Remove the bundled plugin from the OpenAI Codex CLI.
+
+    Reverses :func:`codex_install`. A step that reports the plugin or
+    marketplace is already absent is a warning, not a failure.
+
+    Args:
+        dry_run: Print the command(s) that would run instead of running
+            them; leaves Codex's config untouched.
+
+    Returns:
+        Process exit code (``1`` only when the ``codex`` CLI is missing).
+    """
+    exe = _codex_exe()
+    if exe is None:
+        return 1
+
+    cmds = [
+        [exe, "plugin", "remove", "dekko@dekko"],
+        [exe, "plugin", "marketplace", "remove", "dekko"],
+    ]
+    if dry_run:
+        _print_dry_run(cmds)
+        return 0
+
+    _warn_failed_removals(cmds)
+    print("dekko: plugin removed. Restart Codex to drop its tools and skills.")
+    return 0
+
+
+def codex_mcp_install(dry_run: bool = False) -> int:
+    """Register the MCP server with Codex via ``codex mcp add``.
+
+    Args:
+        dry_run: Print the command that would run instead of running
+            it; leaves Codex's config untouched.
+
+    Returns:
+        Process exit code.
+    """
+    exe = _codex_exe()
+    if exe is None:
+        return 1
+
+    cmd = [exe, "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
+    if dry_run:
+        _print_dry_run([cmd])
+        return 0
+
+    added = _run_subprocess(cmd)
+    if added.returncode != 0:
+        print(added.stderr.strip(), file=sys.stderr)
+        return 1
+
+    print("dekko: MCP server registered as 'dekko'. Restart Codex.")
+    return 0
+
+
+def codex_mcp_uninstall(dry_run: bool = False) -> int:
+    """Remove the standalone MCP server via ``codex mcp remove``.
+
+    Reverses :func:`codex_mcp_install`; a "not found" report is a
+    warning, not a failure.
+
+    Args:
+        dry_run: Print the command that would run instead of running
+            it; leaves Codex's config untouched.
+
+    Returns:
+        Process exit code (``1`` only when the ``codex`` CLI is missing).
+    """
+    exe = _codex_exe()
+    if exe is None:
+        return 1
+
+    cmd = [exe, "mcp", "remove", "dekko"]
+    if dry_run:
+        _print_dry_run([cmd])
+        return 0
+
+    _warn_failed_removals([cmd])
+    print("dekko: MCP server 'dekko' removed from Codex. Restart Codex.")
+    return 0
+
+
 # --- `dekko install` / `dekko uninstall` targets ----------------------
 
 
@@ -1960,6 +2142,16 @@ def _add_claude_target_args(parser: argparse.ArgumentParser) -> None:
         help="register (or remove) only the MCP server, via 'claude mcp "
         "add'/'claude mcp remove', without the plugin's skills and "
         "slash commands",
+    )
+
+
+def _add_codex_target_args(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``codex`` target's options."""
+    parser.add_argument(
+        "--mcp-only",
+        action="store_true",
+        help="register (or remove) only the MCP server, via 'codex mcp "
+        "add'/'codex mcp remove', without the plugin's skills",
     )
 
 
@@ -2010,6 +2202,22 @@ def _uninstall_claude(args: argparse.Namespace) -> int:
         return mcp_uninstall(dry_run=args.dry_run)
 
     return claude_uninstall(dry_run=args.dry_run)
+
+
+def _install_codex(args: argparse.Namespace) -> int:
+    """Handle ``dekko install codex [--mcp-only]``."""
+    if args.mcp_only:
+        return codex_mcp_install(dry_run=args.dry_run)
+
+    return codex_install(dry_run=args.dry_run)
+
+
+def _uninstall_codex(args: argparse.Namespace) -> int:
+    """Handle ``dekko uninstall codex [--mcp-only]``."""
+    if args.mcp_only:
+        return codex_mcp_uninstall(dry_run=args.dry_run)
+
+    return codex_uninstall(dry_run=args.dry_run)
 
 
 def _cline_config(args: argparse.Namespace) -> Path | None:
@@ -2071,6 +2279,15 @@ INSTALL_TARGETS: tuple[InstallTarget, ...] = (
         add_args=_add_claude_target_args,
         install=_install_claude,
         uninstall=_uninstall_claude,
+        previewable=True,
+    ),
+    InstallTarget(
+        name="codex",
+        summary="the OpenAI Codex plugin (MCP server, skills), or with "
+        "--mcp-only just the MCP server",
+        add_args=_add_codex_target_args,
+        install=_install_codex,
+        uninstall=_uninstall_codex,
         previewable=True,
     ),
     InstallTarget(

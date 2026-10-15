@@ -1007,6 +1007,228 @@ def test_mcp_uninstall_tolerates_missing_server(
     assert "already removed?" in capsys.readouterr().err
 
 
+CODEX = "/usr/bin/codex"
+
+
+def _codex_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the bundled plugin at a temp dir holding a Codex manifest."""
+    plugin_dir = tmp_path / "_plugin"
+    (plugin_dir / ".codex-plugin").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_pkg_files", lambda _pkg: tmp_path)
+    return plugin_dir
+
+
+def _record_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    failing: tuple[tuple[str, ...], ...] = (),
+) -> list[list[str]]:
+    """Record every client command; fail the ones ``failing`` names.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        failing: Argument prefixes after the executable (e.g.
+            ``("plugin", "marketplace", "add")``) whose commands exit 1.
+
+    Returns:
+        The list each run command is appended to.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        fails = any(tuple(cmd[1 : 1 + len(f)]) == f for f in failing)
+        return subprocess.CompletedProcess(cmd, int(fails), "", "boom")
+
+    monkeypatch.setattr(cli, "_run_subprocess", fake_run)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        cli.codex_install,
+        cli.codex_uninstall,
+        cli.codex_mcp_install,
+        cli.codex_mcp_uninstall,
+    ],
+)
+def test_codex_installers_require_codex_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    func: Callable[..., int],
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+
+    assert func() == 1
+    assert "'codex' CLI not found" in capsys.readouterr().err
+
+
+def test_codex_install_adds_marketplace_then_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    plugin_dir = _codex_bundle(monkeypatch, tmp_path)
+    calls = _record_runs(monkeypatch)
+
+    assert cli.codex_install() == 0
+    assert calls == [
+        [CODEX, "plugin", "marketplace", "add", str(plugin_dir)],
+        [CODEX, "plugin", "add", "dekko@dekko"],
+    ]
+    assert "$dekko:dekko-orient" in capsys.readouterr().out
+
+
+def test_codex_install_upgrades_an_already_added_marketplace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    plugin_dir = _codex_bundle(monkeypatch, tmp_path)
+    calls = _record_runs(
+        monkeypatch, failing=(("plugin", "marketplace", "add"),)
+    )
+
+    assert cli.codex_install() == 0
+    assert calls == [
+        [CODEX, "plugin", "marketplace", "add", str(plugin_dir)],
+        [CODEX, "plugin", "marketplace", "upgrade", "dekko"],
+        [CODEX, "plugin", "add", "dekko@dekko"],
+    ]
+
+
+def test_codex_install_fails_when_add_and_upgrade_both_fail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    _codex_bundle(monkeypatch, tmp_path)
+    calls = _record_runs(monkeypatch, failing=(("plugin", "marketplace"),))
+
+    assert cli.codex_install() == 1
+    assert [CODEX, "plugin", "add", "dekko@dekko"] not in calls
+    assert "boom" in capsys.readouterr().err
+
+
+def test_codex_install_refuses_a_bundle_without_a_codex_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    (tmp_path / "_plugin" / ".claude-plugin").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_pkg_files", lambda _pkg: tmp_path)
+    calls = _record_runs(monkeypatch)
+
+    assert cli.codex_install() == 1
+    assert calls == []
+    assert "Codex plugin not found" in capsys.readouterr().err
+
+
+def test_codex_install_dry_run_prints_commands_without_running(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    plugin_dir = _codex_bundle(monkeypatch, tmp_path)
+    calls = _record_runs(monkeypatch)
+
+    assert cli.codex_install(dry_run=True) == 0
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "would run" in out
+    assert f"plugin marketplace add {plugin_dir}" in out
+    assert "plugin add dekko@dekko" in out
+
+
+def test_codex_uninstall_removes_plugin_then_marketplace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    calls = _record_runs(monkeypatch)
+
+    assert cli.codex_uninstall() == 0
+    assert calls == [
+        [CODEX, "plugin", "remove", "dekko@dekko"],
+        [CODEX, "plugin", "marketplace", "remove", "dekko"],
+    ]
+
+
+def test_codex_uninstall_tolerates_an_absent_plugin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    calls = _record_runs(monkeypatch, failing=(("plugin",),))
+
+    assert cli.codex_uninstall() == 0
+    assert len(calls) == 2
+    assert "already removed?" in capsys.readouterr().err
+
+
+def test_codex_uninstall_dry_run_prints_commands_without_running(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    calls = _record_runs(monkeypatch)
+
+    assert cli.codex_uninstall(dry_run=True) == 0
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "plugin remove dekko@dekko" in out
+    assert "plugin marketplace remove dekko" in out
+
+
+def test_codex_mcp_install_registers_the_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    calls = _record_runs(monkeypatch)
+
+    assert cli.codex_mcp_install() == 0
+    assert calls == [
+        [CODEX, "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
+    ]
+
+
+def test_codex_mcp_install_reports_a_failed_add(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    _record_runs(monkeypatch, failing=(("mcp", "add"),))
+
+    assert cli.codex_mcp_install() == 1
+    assert "boom" in capsys.readouterr().err
+
+
+def test_codex_mcp_uninstall_tolerates_a_missing_server(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    calls = _record_runs(monkeypatch, failing=(("mcp", "remove"),))
+
+    assert cli.codex_mcp_uninstall() == 0
+    assert calls == [[CODEX, "mcp", "remove", "dekko"]]
+    assert "already removed?" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "func", [cli.codex_mcp_install, cli.codex_mcp_uninstall]
+)
+def test_codex_mcp_dry_run_prints_without_running(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    func: Callable[..., int],
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: CODEX)
+    calls = _record_runs(monkeypatch)
+
+    assert func(dry_run=True) == 0
+    assert calls == []
+    assert f"{CODEX} mcp " in capsys.readouterr().out
+
+
 def test_cline_install_flag_dispatches_with_defaults(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
