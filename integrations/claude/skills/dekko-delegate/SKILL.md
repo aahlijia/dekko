@@ -1,6 +1,6 @@
 ---
 name: dekko-delegate
-description: Brief a subagent with dekko's map before dispatching it into a repo that has a `.dekko/` directory. Trigger before any Agent/Task tool call, Workflow `agent()`, teammate message, or scripted `claude -p` run that will explore, review, implement, or test in such a repo. A subagent starts with an empty context and no session-start orientation, so without a brief it re-explores from scratch with grep and whole-file reads; one budgeted dekko digest in the prompt replaces that, and telling it the tools exist makes it use them.
+description: Brief a subagent with dekko's map before dispatching it into a repo that has a `.dekko/` directory. Trigger before any Agent/Task tool call, Workflow `agent()`, teammate message, or scripted `claude -p` run (or a `spawn_agent` call or scripted `codex exec` run) that will explore, review, implement, or test in such a repo. A subagent starts with an empty context and no session-start orientation, so without a brief it re-explores from scratch with grep and whole-file reads; one budgeted dekko digest in the prompt replaces that, and telling it the tools exist makes it use them.
 ---
 
 # Briefing subagents with dekko
@@ -13,7 +13,7 @@ tell it to use the tools.
 
 ## Procedure
 
-1. **Compute the digest once, scoped to the task.** Run it in Bash
+1. **Compute the digest once, scoped to the task.** Run it in a shell
    and paste the output verbatim; don't summarize it by hand.
 
    | Agent's job | Paste | Budget |
@@ -23,7 +23,7 @@ tell it to use the tools.
    | Work on one symbol or file | `dekko context <sym> --budget 800` or `dekko outline <path>` | ~800 |
    | Several agents on one subtree each | one `dekko orient` for all, plus `dekko outline <dir>` per agent | orient once, outline ~500 each |
 
-   With no Bash, the MCP `summary` (budget 800) or `workset` tools
+   With no shell, the MCP `summary` (budget 800) or `workset` tools
    give the same digest; add the "Tools" paragraph below yourself,
    since only `dekko orient` prints a steering preamble.
 
@@ -37,9 +37,9 @@ tell it to use the tools.
 
    ## Tools
    This repo has a .dekko/ map. Use the dekko MCP tools
-   (mcp__plugin_dekko_dekko__* or mcp__dekko__*; the dekko-orient
-   skill applies) or `dekko <cmd>` in Bash, before any grep or
-   whole-file Read: search_code to find code by what it does,
+   (your client prefixes them, e.g. mcp__dekko__search_code; the
+   dekko-orient skill applies) or `dekko <cmd>` in a shell, before
+   any grep or whole-file read: search_code to find code by what it does,
    outline for a file's shape, get_callers / impacted_tests for
    impact, get_context_pack with with_source for the lines to edit.
    Every tool regenerates a stale map itself; never run `dekko map`

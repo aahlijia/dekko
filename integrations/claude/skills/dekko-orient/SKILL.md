@@ -1,6 +1,6 @@
 ---
 name: dekko-orient
-description: Use dekko's tools instead of grep/Read whenever a repo has a .dekko/ directory — not just at session start. Trigger before any Grep/Glob/Read of a source file, before a `grep`/`rg`/`find`/`cat` in Bash, and on any "find/locate/understand this symbol," "what does this file/dir contain," "who calls this," "what will this change break," or "which tests should I run" impulse. dekko has already parsed and indexed the repo; grepping or reading whole files re-does work dekko already did, at higher token cost.
+description: Use dekko's tools instead of grep/Read whenever a repo has a .dekko/ directory — not just at session start. Trigger before any Grep/Glob/Read of a source file, before a `grep`/`rg`/`find`/`cat` in Bash (or a `cat`/`sed -n`/`rg` on a source file in any shell), and on any "find/locate/understand this symbol," "what does this file/dir contain," "who calls this," "what will this change break," or "which tests should I run" impulse. dekko has already parsed and indexed the repo; grepping or reading whole files re-does work dekko already did, at higher token cost.
 ---
 
 # Orienting with dekko (read less of the repo)
@@ -8,9 +8,11 @@ description: Use dekko's tools instead of grep/Read whenever a repo has a .dekko
 A repo with a `.dekko/` directory is already parsed and indexed. Call
 dekko **before** grepping for a symbol or reading a whole file.
 
-The MCP tools are `mcp__dekko__*` or `mcp__plugin_dekko_dekko__*`
-(this skill writes the bare name). If neither is in your toolset, they
-may be deferred: search for "dekko" before falling back to Read/Grep.
+This skill writes dekko's MCP tools by their bare name
+(`query_symbol`, `outline`, ...). Your client prefixes them, e.g.
+`mcp__dekko__query_symbol`. If none are loaded, they may be deferred:
+search your tools for "dekko" before falling back to grep or a
+whole-file read.
 With no MCP tools at all, use the CLI column below. No `.dekko/` yet?
 Run `dekko map .` (or `/map`) once.
 
@@ -26,8 +28,9 @@ Each rung is roughly an order of magnitude cheaper than the next:
 4. **Relate**: `get_callers` / `get_callees` / `find_usages` /
    `impacted_tests`, or `workset` for the whole bundle in one call.
 5. **Read**: only the lines you are about to edit, via
-   `get_context_pack` with `with_source` or a line-ranged Read. A
-   whole-file Read is the last resort.
+   `get_context_pack` with `with_source` or a line-ranged read (a
+   Read tool with offset/limit, or `sed -n 'A,Bp'` in a shell). A
+   whole-file read is the last resort.
 
 Your own edits never make dekko wrong: every tool regenerates a stale
 map incrementally before answering. Don't run `dekko map` by hand, and

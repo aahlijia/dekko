@@ -17,9 +17,9 @@ bottom-up.
 
 | Need | Use |
 |---|---|
-| What changed and what calls it | `mcp__dekko__workset [rev]` (or `dekko workset [REV]`) |
-| What tests should run | `mcp__dekko__impacted_tests [rev]` (or `dekko affected [REV]`) |
-| Where the resolver itself is unsure | `mcp__dekko__check_ambiguous` (or `dekko ambiguous`) |
+| What changed and what calls it | MCP `workset [rev]` (or `dekko workset [REV]`) |
+| What tests should run | MCP `impacted_tests [rev]` (or `dekko affected [REV]`) |
+| Where the resolver itself is unsure | MCP `check_ambiguous` (or `dekko ambiguous`) |
 | Just the changed-symbol list with callers, no outlines | `dekko diff [REV]` (CLI only) |
 
 1. **Determine the diff scope.** A git rev range, or the same default
