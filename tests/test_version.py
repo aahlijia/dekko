@@ -48,6 +48,9 @@ def test_declared_versions_agree() -> None:
             "metadata",
             "version",
         ),
+        "codex plugin.json": _json_version(
+            "integrations/claude/.codex-plugin/plugin.json", "version"
+        ),
         "uv.lock": _uvlock_version(),
     }
     assert len(set(versions.values())) == 1, (

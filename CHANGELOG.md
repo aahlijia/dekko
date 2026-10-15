@@ -10,6 +10,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 ## [Unreleased]
 
 ### Added
+- **dekko ships as an OpenAI Codex plugin.** `dekko install codex`
+  registers the plugin bundled in the wheel with the `codex` CLI
+  (`codex plugin marketplace add`, then `codex plugin add
+  dekko@dekko`; an already-added marketplace is upgraded instead), and
+  `dekko uninstall codex` removes it; `--mcp-only` registers just the
+  MCP server through `codex mcp add`, and `--dry-run` prints the
+  commands. The bundle gains a `.codex-plugin/plugin.json` that Codex
+  reads ahead of the Claude manifest, pointing at the shared skills, a
+  `codex.mcp.json` with no `cwd` (Codex expands no `${VAR}` in it, so
+  Claude's `${CLAUDE_PROJECT_DIR}` would start the server in a
+  directory that doesn't exist; with no `cwd` it starts in the
+  session's), and four Codex-only skills, `dekko-map`, `dekko-impact`,
+  `dekko-doctor` and `dekko-sanity`, standing in for the slash
+  commands: Codex skips any plugin command that pre-runs a shell
+  command, which all four do. Every manifest path starts with `./`,
+  since Codex silently ignores one that doesn't, and a test holds
+  that. `scripts/sync_plugin_version.py` keeps the Codex manifest's
+  version in step, which is what makes Codex refresh its cached copy
+  on upgrade (refs #38).
 - **`dekko install <target>` / `dekko uninstall <target>`.** One
   command family wires dekko into every client it supports, instead
   of a separate `--<client>-install` flag per client:

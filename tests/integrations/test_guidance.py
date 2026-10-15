@@ -9,15 +9,26 @@ use a skill from its description, so dropping a phrase can quietly make
 a skill fire less often.
 """
 
+import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from dekko.integrations import orient, policy_md
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "integrations" / "claude"
 SKILL_ROOTS = (BUNDLE / "skills", BUNDLE / "skills-codex")
+CODEX_MANIFEST = BUNDLE / ".codex-plugin" / "plugin.json"
+# What the wheel must carry for Codex to load the bundle: its manifest,
+# its MCP server file (no ``cwd``), and the skills only Codex lists.
+CODEX_BUNDLE_PARTS = (".codex-plugin", "codex.mcp.json", "skills-codex")
 
 # The plugin namespace Codex qualifies a plugin skill with (``dekko:x``).
 PLUGIN_NAME = "dekko"
@@ -206,3 +217,82 @@ def test_description_keeps_its_trigger_phrases(
     ]
 
     assert phrase in description
+
+
+def _codex_manifest_paths() -> list[str]:
+    """Every bundle path the Codex manifest names."""
+    manifest = json.loads(CODEX_MANIFEST.read_text(encoding="utf-8"))
+    paths: list[str] = []
+    for key in ("skills", "mcpServers", "hooks", "apps"):
+        value = manifest.get(key)
+        if isinstance(value, str):
+            paths.append(value)
+        elif isinstance(value, list):
+            paths.extend(v for v in value if isinstance(v, str))
+
+    return paths
+
+
+def test_codex_manifest_names_its_skills_and_mcp_server() -> None:
+    paths = _codex_manifest_paths()
+
+    assert "./skills/" in paths
+    assert "./skills-codex/" in paths
+    assert "./codex.mcp.json" in paths
+
+
+@pytest.mark.parametrize("path", _codex_manifest_paths())
+def test_codex_manifest_path_is_dot_relative_and_exists(path: str) -> None:
+    # Codex silently ignores a manifest path that doesn't start with
+    # ``./``, so a bare ``skills/`` would install cleanly and load
+    # nothing.
+    assert path.startswith("./")
+    assert (BUNDLE / path).exists()
+
+
+def test_codex_mcp_server_has_no_cwd() -> None:
+    # Codex expands no ``${VAR}`` in a plugin's MCP config and resolves
+    # a relative ``cwd`` against the plugin's cache dir; with no
+    # ``cwd`` it starts the server in the session's directory, which is
+    # the repo dekko should serve.
+    config = json.loads(
+        (BUNDLE / "codex.mcp.json").read_text(encoding="utf-8")
+    )
+    server = config["mcpServers"]["dekko"]
+
+    assert server["command"] == "dekko"
+    assert server["args"] == ["serve", "--mcp"]
+    assert "cwd" not in server
+
+
+def test_codex_only_skills_are_found() -> None:
+    names = {path.parent.name for path in _skill_files()}
+
+    assert {
+        "dekko-map",
+        "dekko-impact",
+        "dekko-doctor",
+        "dekko-sanity",
+    } <= names
+
+
+def test_bundle_has_no_symlinks() -> None:
+    # Codex copies the plugin into its cache and skips symlinks, so a
+    # linked file would be missing from the installed copy.
+    links = [p for p in BUNDLE.rglob("*") if p.is_symlink()]
+
+    assert links == []
+
+
+@pytest.mark.parametrize("part", CODEX_BUNDLE_PARTS)
+def test_wheel_ships_the_codex_bundle(part: str) -> None:
+    pyproject = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"][
+        "force-include"
+    ]
+    source = f"integrations/claude/{part}"
+
+    assert include.get(source) == f"dekko/_plugin/{part}"
+    assert (REPO_ROOT / source).exists()

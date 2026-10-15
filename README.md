@@ -44,7 +44,7 @@ questions like "what does this file contain," "who calls this function,"
 and "what do I need to safely change this" — without reading whole files.
 It ships as a **CLI**, a **Claude Code `/map` plugin + MCP server**
 ([Model Context Protocol](https://modelcontextprotocol.io/)), and
-works with **Cline** too.
+works with **OpenAI Codex** and **Cline** too.
 
 **The result: 10x-300x fewer tokens** than a plain Read/Grep workflow
 on the everyday tasks (orientation, outlining a large file, a symbol's
@@ -99,6 +99,7 @@ required.
 ```sh
 uv tool install dekko      # or: pip install dekko / pipx install dekko
 dekko install claude      # add the /map command + MCP server to Claude Code, then restart
+dekko install codex       # or: the same MCP server + skills as an OpenAI Codex plugin
 ```
 
 Extras (`dekko[all]` for 43 more languages, `dekko[search]` for

@@ -16,6 +16,10 @@ _HANDLERS = (
     (cli, "claude_uninstall"),
     (cli, "mcp_install"),
     (cli, "mcp_uninstall"),
+    (cli, "codex_install"),
+    (cli, "codex_uninstall"),
+    (cli, "codex_mcp_install"),
+    (cli, "codex_mcp_uninstall"),
     (cli.cline_mod, "install"),
     (cli.cline_mod, "uninstall"),
     (cli.policy_md_mod, "install"),
@@ -118,6 +122,37 @@ def test_install_target_and_its_legacy_flag_call_the_same_handler(
     assert calls == via_command
 
 
+@pytest.mark.parametrize(
+    ("argv", "handler", "dry_run"),
+    [
+        (["install", "codex"], "codex_install", False),
+        (["uninstall", "codex"], "codex_uninstall", False),
+        (["install", "codex", "--dry-run"], "codex_install", True),
+        (["uninstall", "codex", "--dry-run"], "codex_uninstall", True),
+        (["install", "codex", "--mcp-only"], "codex_mcp_install", False),
+        (
+            ["uninstall", "codex", "--mcp-only"],
+            "codex_mcp_uninstall",
+            False,
+        ),
+        (
+            ["install", "codex", "--mcp-only", "--dry-run"],
+            "codex_mcp_install",
+            True,
+        ),
+    ],
+)
+def test_codex_target_calls_its_handler(
+    calls: Calls,
+    argv: list[str],
+    handler: str,
+    dry_run: bool,
+) -> None:
+    assert cli.main(argv) == 0
+
+    assert calls == [(handler, (), {"dry_run": dry_run})]
+
+
 @pytest.mark.parametrize("verb", ["install", "uninstall"])
 @pytest.mark.parametrize("target", ["cline", "claude-md", "agents-md"])
 def test_dry_run_is_refused_on_a_file_editing_target(
@@ -134,7 +169,7 @@ def test_dry_run_is_refused_on_a_file_editing_target(
     assert cli.main(argv) == 2
     assert calls == []
     err = capsys.readouterr().err
-    assert "--dry-run works with 'claude' only" in err
+    assert "--dry-run works with 'claude', 'codex' only" in err
     assert f"'{target}' edits a file" in err
     assert list(tmp_path.iterdir()) == []
 
@@ -175,6 +210,7 @@ def test_help_lists_every_target(
     ("target", "shown"),
     [
         ("claude", True),
+        ("codex", True),
         ("cline", False),
         ("claude-md", False),
         ("agents-md", False),

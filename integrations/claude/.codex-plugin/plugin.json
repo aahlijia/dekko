@@ -1,0 +1,13 @@
+{
+  "name": "dekko",
+  "version": "1.9.35",
+  "description": "Static code map for LLM agents. dekko parses the repository with tree-sitter into MAP.md and map.json (every file, function, signature, type, and call edge) without spending model tokens; an 18-tool MCP server (search_code, outline, query_symbol, get_callers, workset, impacted_tests, ...) answers structural questions from that map instead of grep and whole-file reads; skills steer the agent toward the map, map the repo, name the tests a change impacts, diagnose the install, and cross-check low call counts.",
+  "author": {
+    "name": "Austin Ahlijian"
+  },
+  "skills": [
+    "./skills/",
+    "./skills-codex/"
+  ],
+  "mcpServers": "./codex.mcp.json"
+}
