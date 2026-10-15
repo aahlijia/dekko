@@ -325,8 +325,9 @@ stdout as JSON when the status is 0 or 1.
 
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
-`ledger`, `orient`, `deps` cover more specialized workflows; hooks are
-documented in [claude-code.md](claude-code.md#push-hooks-opt-in)).
+`ledger`, `orient`, `deps` cover more specialized workflows; hooks,
+including `--agent codex` for OpenAI Codex, are documented in
+[claude-code.md](claude-code.md#push-hooks-opt-in)).
 
 ## Wiring dekko into a client
 
