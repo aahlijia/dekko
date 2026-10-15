@@ -43,14 +43,21 @@ jobs:
       - name: Verify plugin manifests match tag
         run: |
           version="${GITHUB_REF_NAME#v}"
-          plugin_version=$(jq -r .version integrations/claude/.claude-plugin/plugin.json)
-          marketplace_version=$(jq -r .metadata.version integrations/claude/.claude-plugin/marketplace.json)
-          if [ "$plugin_version" != "$version" ] || [ "$marketplace_version" != "$version" ]; then
-            echo "::error::plugin.json ($plugin_version) / marketplace.json" \
-                 "($marketplace_version) do not match release tag ($version)" \
-                 "-- run scripts/sync_plugin_version.py before tagging"
-            exit 1
-          fi
+          status=0
+          while read -r manifest key; do
+            found=$(jq -r "$key" "integrations/claude/$manifest")
+            if [ "$found" != "$version" ]; then
+              echo "::error::$manifest ($found) does not match release tag" \
+                   "($version) -- run scripts/sync_plugin_version.py before tagging"
+              status=1
+            fi
+          done <<'MANIFESTS'
+          .claude-plugin/plugin.json .version
+          .claude-plugin/marketplace.json .metadata.version
+          .codex-plugin/plugin.json .version
+          .cursor-plugin/plugin.json .version
+          MANIFESTS
+          exit $status
       - uses: actions/upload-artifact@v4
         with:
           name: dist
