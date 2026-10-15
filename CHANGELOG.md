@@ -9,6 +9,34 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **dekko's hooks work in OpenAI Codex.** `dekko hooks install|uninstall|run`
+  take `--agent codex`, which writes `.codex/hooks.json` (the same
+  `{"hooks": {...}}` shape as Claude's settings) with `session-start`,
+  `prompt-submit` and `pre-bash`. `pre-read` isn't offered, since Codex
+  reads files through the shell and `pre-bash` covers that. Codex has no
+  `"ask"`, so `pre-bash` there adds the dekko-equivalent command as
+  context and lets the command run; `--strict` denies it. The
+  `session-start` handler raises Codex's `additionalContextLimit` to
+  20,000 tokens so the lean map isn't spilled to a file at Codex's
+  2,500 default. The install stops when `.codex/config.toml` already
+  defines a `[hooks]` table, and says that Codex will ask to review each
+  new or changed hook. Every output Codex receives is checked against
+  Codex's own hook schemas, vendored under `tests/fixtures/codex/`,
+  since Codex drops a hook's context when its output carries an unknown
+  key (refs #38).
+
+### Changed
+- **`pre-bash` leaves line-ranged reads alone.** It judged a
+  `cat`/`head`/`sed` by the whole file's size, so `--strict` denied
+  `sed -n '1,120p' hooks.py` as an ~8,300-token read, while
+  `nl -ba hooks.py | sed -n '600,660p'` went unseen. A read of at most
+  200 lines (`sed -n 'A,Bp'`, `head -n N`, or any read piped into one)
+  now never matches; a longer range is costed by the lines it prints;
+  `nl` counts as a read. Line-ranged reads are what dekko's own skills
+  recommend, and on Codex, which has no Read tool, `sed -n` is how they
+  happen.
+
 ## [1.9.35] — 2026-10-14
 
 ### Fixed

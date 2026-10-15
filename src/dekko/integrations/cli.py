@@ -1203,7 +1203,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
 
     p_hooks = sub.add_parser(
         "hooks",
-        help="manage opt-in Claude Code push hooks (orientation, "
+        help="manage opt-in Claude Code / Codex push hooks (orientation, "
         "task pointers, read advisories)",
     )
     hooks_sub = p_hooks.add_subparsers(
@@ -1211,7 +1211,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_hooks_install = hooks_sub.add_parser(
         "install",
-        help="enable dekko hooks in .claude/settings.json (opt-in)",
+        help="enable dekko hooks in .claude/settings.json, or "
+        ".codex/hooks.json with --agent codex (opt-in)",
     )
     p_hooks_install.add_argument(
         "--enable",
@@ -1219,31 +1220,36 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         choices=list(hooks_mod.EVENTS),
         default=None,
         metavar="EVENT",
-        help="hook event(s) to enable; repeatable (default: session-start)",
+        help="hook event(s) to enable; repeatable (default: "
+        "session-start; pre-read is Claude-only)",
     )
     p_hooks_install.add_argument(
         "--strict",
         action="store_true",
-        help="escalate pre-bash's matches from 'ask' to 'deny' "
-        "(opt-in-on-opt-in; only affects pre-bash, requires "
-        "--enable pre-bash)",
+        help="escalate pre-bash's matches to 'deny' (from 'ask' on "
+        "Claude, from an advisory on Codex; opt-in-on-opt-in; only "
+        "affects pre-bash, requires --enable pre-bash)",
     )
     p_hooks_install.add_argument(
         "--root",
         default=".",
         metavar="DIR",
-        help="repo root whose .claude/settings.json to edit (default: cwd)",
+        help="repo root whose hook file to edit (default: cwd)",
     )
+    _add_hooks_agent_flag(p_hooks_install)
     p_hooks_install.set_defaults(func=run_hooks_install)
     p_hooks_uninstall = hooks_sub.add_parser(
-        "uninstall", help="remove all dekko hooks from .claude/settings.json"
+        "uninstall",
+        help="remove all dekko hooks from .claude/settings.json, or "
+        ".codex/hooks.json with --agent codex",
     )
     p_hooks_uninstall.add_argument(
         "--root",
         default=".",
         metavar="DIR",
-        help="repo root whose .claude/settings.json to edit (default: cwd)",
+        help="repo root whose hook file to edit (default: cwd)",
     )
+    _add_hooks_agent_flag(p_hooks_uninstall)
     p_hooks_uninstall.set_defaults(func=run_hooks_uninstall)
     p_hooks_run = hooks_sub.add_parser(
         "run", help="execute a hook handler (reads event JSON on stdin)"
@@ -1252,8 +1258,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_hooks_run.add_argument(
         "--strict",
         action="store_true",
-        help="pre-bash only: escalate a match from 'ask' to 'deny'",
+        help="pre-bash only: escalate a match to 'deny'",
     )
+    _add_hooks_agent_flag(p_hooks_run)
     p_hooks_run.set_defaults(func=run_hooks_run)
 
     p_daemon = sub.add_parser(
@@ -2411,22 +2418,41 @@ def run_ledger(args: argparse.Namespace) -> int:
     )
 
 
+def _add_hooks_agent_flag(parser: argparse.ArgumentParser) -> None:
+    """Add the ``--agent`` choice shared by every ``hooks`` action."""
+    parser.add_argument(
+        "--agent",
+        choices=hooks_mod.AGENTS,
+        default="claude",
+        help="which agent's hooks: claude (.claude/settings.json) or "
+        "codex (.codex/hooks.json) (default: claude)",
+    )
+
+
 def run_hooks_install(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks install``."""
     events = args.enable or ["session-start"]
     return hooks_mod.install(
-        Path(args.root).resolve(), events, strict=args.strict
+        Path(args.root).resolve(),
+        events,
+        strict=args.strict,
+        agent=args.agent,
     )
 
 
 def run_hooks_uninstall(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks uninstall``."""
-    return hooks_mod.uninstall(Path(args.root).resolve())
+    return hooks_mod.uninstall(Path(args.root).resolve(), args.agent)
 
 
 def run_hooks_run(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks run <event>`` (reads JSON on stdin)."""
-    return hooks_mod.dispatch(args.event, sys.stdin.read(), strict=args.strict)
+    return hooks_mod.dispatch(
+        args.event,
+        sys.stdin.read(),
+        strict=args.strict,
+        agent=args.agent,
+    )
 
 
 def run_daemon_start(args: argparse.Namespace) -> int:

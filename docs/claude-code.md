@@ -159,7 +159,8 @@ dekko hooks uninstall                      # remove all dekko hooks
   first, before a whole-file `Read`.
 - **`pre-bash`** — the enforcement tier, off by default even when other
   hooks are installed. Matches a repo-wide `grep`/`rg`/`ag` search, a
-  `find -name` hunt, or a `cat`/`head`/`sed` on a large mapped file, and
+  `find -name` hunt, or a `cat`/`head`/`sed`/`nl` read of a large
+  stretch of a mapped file, and
   surfaces `permissionDecision: "ask"` with the dekko-equivalent
   command — a real interruption, not ignorable text. `--strict`
   escalates matches to `"deny"` instead. Matching is deliberately
@@ -170,11 +171,44 @@ dekko hooks uninstall                      # remove all dekko hooks
   comments, config/data files, and anything outside dekko's language
   coverage. Recursive short flags are read letter by letter, so
   `-rli`, `-nR`, and `-rnE` all count, not just a bare `-r`.
+  A line-ranged read is a targeted look, so one of at most 200 lines
+  never matches however large the file: `sed -n '1,120p' big.py`,
+  `head -n 50 big.py`, and a read piped into one
+  (`nl -ba big.py | sed -n '600,660p'`). A longer range is costed by
+  the lines it prints, not the whole file, and only matches past the
+  same ~1,000-token threshold.
 
 Installing writes to `.claude/settings.json` (restart Claude Code to
 activate). Every handler is fail-silent — a stale map or hook error
 never blocks a session or a tool call, it just produces no output (for
 `pre-bash`, "no output" means the command runs normally, unmatched).
+
+### OpenAI Codex
+
+The same hooks work in Codex with `--agent codex` on `install`,
+`uninstall` and `run`:
+
+```sh
+dekko hooks install --agent codex --enable session-start --enable prompt-submit --enable pre-bash
+dekko hooks uninstall --agent codex
+```
+
+This writes `.codex/hooks.json`, which has the same shape as Claude's
+settings. The differences:
+
+- **No `pre-read`.** Codex has no Read tool; its model reads files
+  through the shell, and `pre-bash` covers those reads.
+- **`pre-bash` is advisory by default.** Codex has no `"ask"`, so a
+  match adds the dekko-equivalent command as context and the command
+  still runs. `--strict` denies it instead.
+- **Trust.** Codex runs project hooks only in a trusted project and
+  asks you to review each new hook ("Hooks need review") the next time
+  it starts. `codex exec` skips untrusted hooks silently. Codex's trust
+  covers the whole hook entry, so reinstalling with or without
+  `--strict` needs another review.
+- **One place for hooks.** If `.codex/config.toml` already defines
+  hooks in a `[hooks]` table, the install stops: Codex warns when one
+  config layer defines hooks in both places.
 
 ## Skills
 
