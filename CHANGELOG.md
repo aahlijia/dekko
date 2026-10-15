@@ -81,6 +81,49 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   what this dekko writes is `stale`, because Codex reads a changed hook
   as modified and stops running it; on Python 3.11+ doctor also reports
   whether Codex has a trust record for each hook yet (refs #38).
+- **dekko ships as a Cursor plugin.** `dekko install cursor` copies
+  the plugin bundled in the wheel into `~/.cursor/plugins/local/dekko/`
+  (Cursor has no command that installs one plugin from disk), pins the
+  copy's MCP server to the resolved `dekko` executable so an IDE
+  started from the Dock still finds it, and never replaces a symlink or
+  another plugin there; the copy is staged beside the old one and
+  swapped in at the end. `dekko uninstall cursor` removes it.
+  `--mcp-only` merges just the MCP server into a project's
+  `.cursor/mcp.json` (`--root`, `--force`), keeping other servers. The
+  bundle gains a `.cursor-plugin/plugin.json`, which Cursor reads ahead
+  of the Claude manifest, naming the shared skills and the four
+  command-skills, turning off Cursor's command discovery (the Claude
+  commands pre-run a shell command, which Cursor doesn't do), and
+  pointing at a `cursor.mcp.json` that passes
+  `--root ${workspaceFolder}`. Every skill's `name` now matches its
+  folder and its description stays within Cursor's 1,024 characters;
+  the manifest is checked against Cursor's published schema, vendored
+  under `tests/fixtures/cursor/` (refs #39).
+- **Hooks answer Cursor in Cursor's format.** A hook payload carrying
+  Cursor's `cursor_version` key, or `--agent cursor`, gets Cursor's
+  flat per-event answer instead of Claude's `hookSpecificOutput`.
+  Cursor runs the hooks in `.claude/settings.json` on its own and
+  blocks a permission hook whose output it can't read, so this keeps a
+  Claude Code install harmless inside Cursor; the environment never
+  decides it, so Claude Code started from Cursor's terminal still gets
+  Claude's format. A miss prints nothing, as before. `dekko hooks
+  install --agent cursor` writes flat entries with a 60-second timeout
+  to `.cursor/hooks.json`, keeps the user's entries and `version`, and
+  warns when `.claude/settings.json` already has dekko hooks (Cursor
+  would run both). Native `pre-bash` asks (denies under `--strict`);
+  an imported one, which arrives on Cursor's general tool hook, advises.
+  Cursor's session-start context stays under 9,500 characters (Cursor
+  drops it past 10,000), with a "run `dekko lean --budget N`" note when
+  even the narrowest map won't fit (refs #39).
+- **`dekko doctor` checks the Cursor install.** When Cursor is
+  installed (`cursor-agent` or `cursor` on `$PATH`, an `agent` that
+  resolves into Cursor's install, `/Applications/Cursor.app`, or
+  dekko's own plugin copy; a leftover `~/.cursor/` alone doesn't
+  count), doctor adds rows for the plugin copy (dekko's, current, with
+  a resolvable MCP command), the MCP server, the usage-policy block in
+  `AGENTS.md` or `CLAUDE.md`, each hook in `.cursor/hooks.json`, and an
+  advisory when Cursor's import of Claude Code setups loads dekko twice
+  (refs #39).
 
 ### Changed
 - **The skills, usage policy and session preamble read the same to any
@@ -96,6 +139,9 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   often as it did. The plugin and marketplace listings no longer say
   "for Claude Code". A new guard test keeps client-only text out of
   this guidance and holds each description's trigger phrases in place.
+  `dekko-orient` and `dekko-delegate` also say how Cursor calls the MCP
+  tools (one generic tool, server `dekko`), and `dekko-delegate`'s
+  description names scripted `agent -p` runs.
 - **`pre-bash` leaves line-ranged reads alone.** It judged a
   `cat`/`head`/`sed` by the whole file's size, so `--strict` denied
   `sed -n '1,120p' hooks.py` as an ~8,300-token read, while

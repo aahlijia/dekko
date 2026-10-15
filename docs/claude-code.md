@@ -197,6 +197,12 @@ covers), no "ask" (so `pre-bash` advises by default and denies under
 `--strict`), and its own trust review for every hook. See
 [codex.md](codex.md#push-hooks-opt-in).
 
+They work in Cursor with `--agent cursor`, written to
+`.cursor/hooks.json`. Cursor also runs the hooks in
+`.claude/settings.json` on its own, and a dekko hook answers in the
+format of whichever tool called it, so the Claude Code install stays
+harmless there. See [cursor.md](cursor.md#push-hooks-opt-in).
+
 ## Skills
 
 `dekko install claude` also ships eight Claude Code skills alongside

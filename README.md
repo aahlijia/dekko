@@ -44,7 +44,7 @@ questions like "what does this file contain," "who calls this function,"
 and "what do I need to safely change this" — without reading whole files.
 It ships as a **CLI**, a **Claude Code `/map` plugin + MCP server**
 ([Model Context Protocol](https://modelcontextprotocol.io/)), and
-works with **OpenAI Codex** and **Cline** too.
+works with **OpenAI Codex**, **Cursor** and **Cline** too.
 
 **The result: 10x-300x fewer tokens** than a plain Read/Grep workflow
 on the everyday tasks (orientation, outlining a large file, a symbol's
@@ -100,6 +100,7 @@ required.
 uv tool install dekko      # or: pip install dekko / pipx install dekko
 dekko install claude      # add the /map command + MCP server to Claude Code, then restart
 dekko install codex       # or: the same MCP server + skills as an OpenAI Codex plugin
+dekko install cursor      # or: as a Cursor plugin, then reload the Cursor window
 ```
 
 Extras (`dekko[all]` for 43 more languages, `dekko[search]` for
@@ -131,6 +132,8 @@ Java, Kotlin, Rust), `dekko map` will say so per file; install `dekko[all]` for
   hooks, Claude Code skills, the MCP server, and Cline
 - [docs/codex.md](docs/codex.md): the OpenAI Codex plugin, skills,
   `AGENTS.md` policy, and hooks
+- [docs/cursor.md](docs/cursor.md): the Cursor plugin, skills, hooks,
+  and what Cursor imports from a Claude Code install
 
 ## Learn more
 

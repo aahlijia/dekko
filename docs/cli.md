@@ -326,8 +326,11 @@ stdout as JSON when the status is 0 or 1.
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
 `ledger`, `orient`, `deps` cover more specialized workflows; hooks,
-including `--agent codex` for OpenAI Codex, are documented in
-[claude-code.md](claude-code.md#push-hooks-opt-in)).
+including `--agent codex` for OpenAI Codex and `--agent cursor` for
+Cursor, are documented in
+[claude-code.md](claude-code.md#push-hooks-opt-in),
+[codex.md](codex.md#push-hooks-opt-in) and
+[cursor.md](cursor.md#push-hooks-opt-in)).
 
 ## Wiring dekko into a client
 
@@ -342,16 +345,18 @@ dekko install claude --dry-run       # print the claude commands instead of runn
 dekko install codex                  # OpenAI Codex plugin: MCP server and skills
 dekko install codex --mcp-only       # just the MCP server (codex mcp add)
 dekko install codex --dry-run        # print the codex commands instead of running them
+dekko install cursor                 # Cursor plugin: MCP server and skills, copied into ~/.cursor/plugins/local
+dekko install cursor --mcp-only      # just the MCP server, in this repo's .cursor/mcp.json (--root DIR, --force)
 dekko install cline                  # MCP server in Cline's cline_mcp_settings.json
 dekko install cline --scope global   # ...a standalone cline CLI's config (--config PATH to name the file)
 dekko install claude-md              # usage-policy block in this repo's CLAUDE.md (--root DIR)
-dekko install agents-md              # the same block in this repo's AGENTS.md, for Codex and other agents (--root DIR)
+dekko install agents-md              # the same block in this repo's AGENTS.md, for Codex, Cursor and other agents (--root DIR)
 dekko uninstall claude               # the reverse of each, same options
 ```
 
 `--dry-run` works only on the `claude` and `codex` targets, which shell
-out to the `claude` / `codex` CLI; `cline`, `claude-md` and `agents-md`
-edit a file and refuse it (exit 2) rather than write for real. No
+out to the `claude` / `codex` CLI; `cursor`, `cline`, `claude-md` and
+`agents-md` edit files and refuse it (exit 2) rather than write for real. No
 target, or an unknown one, exits 2 with the list.
 
 `claude-md` and `agents-md` write the same agent-neutral block between
@@ -375,6 +380,16 @@ whenever dekko's version changes. Its skills are invoked as
 `/impact`, `/doctor` and `/sanity` commands become the skills
 `dekko-map`, `dekko-impact`, `dekko-doctor` and `dekko-sanity`, since
 Codex has no plugin slash commands. `codex` has no legacy flag.
+
+`dekko install cursor` copies the same bundle into
+`~/.cursor/plugins/local/dekko/`, pointing its MCP server at the
+resolved `dekko` executable; reload the Cursor window afterward. It
+only replaces its own earlier copy, and refuses (exit 2) a symlink or
+another plugin there. `--mcp-only` merges just the MCP server into
+`<root>/.cursor/mcp.json` instead (`--root`, default the cwd; `--force`
+replaces a malformed file); `--root` and `--force` without `--mcp-only`
+exit 2. The skills are called as `/dekko-orient`, `/dekko-impact` and
+so on. See [cursor.md](cursor.md). `cursor` has no legacy flag.
 
 The older flags still work and do exactly the same thing:
 
@@ -413,6 +428,20 @@ doesn't count.
 
 The `agents-md-policy` row also shows without Codex when the block is
 already in `AGENTS.md`, since other agents read that file too.
+
+When Cursor is installed (`cursor-agent` or `cursor` on `$PATH`, an
+`agent` on `$PATH` that resolves into Cursor's install,
+`/Applications/Cursor.app`, or dekko's own
+`~/.cursor/plugins/local/dekko`), doctor adds Cursor rows. A leftover
+`~/.cursor/` alone doesn't count.
+
+| Row | Checks | Fix it names |
+|---|---|---|
+| `cursor-plugin` | The copy in `~/.cursor/plugins/local/dekko` is dekko's, at this dekko's version (a copy doesn't follow upgrades, so a mismatch is `stale`), and its MCP command resolves | `dekko install cursor` |
+| `cursor-mcp` | A `dekko` server in `<root>/.cursor/mcp.json` or `~/.cursor/mcp.json` whose command resolves, or the `cursor-plugin` row is `ok` | `dekko install cursor --mcp-only` |
+| `cursor-policy` | The policy block is in the root `AGENTS.md` or `CLAUDE.md` (Cursor applies both) | `dekko install agents-md` |
+| `cursor-hook:<event>` | One row each for `session-start`, `prompt-submit`, `pre-read`, `pre-bash` in `.cursor/hooks.json`; `stale` when an entry differs from what this dekko writes | `dekko hooks install --agent cursor --enable <event>` |
+| `cursor-claude-overlap` | `advisory` when Cursor's import of Claude Code setups loads dekko twice: the Claude Code plugin and the Cursor plugin, or dekko hooks in both `.claude/settings.json` and `.cursor/hooks.json` | remove one, or turn off Cursor's Settings > Agents > Third-Party Imports |
 
 ## Sanity-checking a low/zero call-graph result
 
