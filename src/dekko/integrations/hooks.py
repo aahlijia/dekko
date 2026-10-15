@@ -1097,17 +1097,27 @@ def settings_path(root: Path, agent: str = "claude") -> Path:
     """The project-local file ``agent``'s hooks live in, for ``root``.
 
     Claude Code keeps them in ``.claude/settings.json``; Codex in
-    ``.codex/hooks.json``, which has the same ``{"hooks": {...}}`` shape.
+    ``.codex/hooks.json``, which has the same ``{"hooks": {...}}`` shape;
+    Cursor in ``.cursor/hooks.json``, with flat entries.
     """
     if agent == "codex":
         return root / ".codex" / "hooks.json"
+
+    if agent == "cursor":
+        return root / ".cursor" / "hooks.json"
 
     return root / ".claude" / "settings.json"
 
 
 def events_for(agent: str) -> dict[str, tuple[str, str | None]]:
     """The dekko events ``agent`` supports: name -> (event, matcher)."""
-    return CODEX_EVENTS if agent == "codex" else EVENTS
+    if agent == "codex":
+        return CODEX_EVENTS
+
+    if agent == "cursor":
+        return hooks_cursor.CURSOR_EVENTS
+
+    return EVENTS
 
 
 def _load_settings(path: Path) -> dict:
@@ -1176,12 +1186,20 @@ def _entry(
     whole handler, so any change to what this writes for Codex makes
     every existing install read as modified and stop running until the
     user reviews it again: treat the Codex shape as fixed.
+
+    A Cursor entry is flat: the command and a timeout sit on the entry
+    itself, with no nested ``hooks`` list.
     """
     command = f"{_HOOK_COMMAND_PREFIX}{event}"
     if event == "pre-bash" and strict:
         command += " --strict"
-    if agent == "codex":
-        command += " --agent codex"
+    if agent in ("codex", "cursor"):
+        command += f" --agent {agent}"
+    if agent == "cursor":
+        flat: dict = {"command": command}
+        if matcher is not None:
+            flat = {"matcher": matcher, **flat}
+        return {**flat, "timeout": hooks_cursor.CURSOR_HOOK_TIMEOUT}
     handler: dict = {"type": "command", "command": command}
     if agent == "codex" and event == "session-start":
         handler["additionalContextLimit"] = CODEX_SESSION_CONTEXT_LIMIT
@@ -1191,13 +1209,50 @@ def _entry(
     return block
 
 
+def _entry_commands(entry: dict) -> list[str]:
+    """The commands a hooks entry runs, in either entry shape.
+
+    Claude Code and Codex nest them (``{"hooks": [{"command": ...}]}``);
+    Cursor puts one on the entry itself (``{"command": ...}``).
+    """
+    commands = []
+    nested = entry.get("hooks")
+    if isinstance(nested, list):
+        commands = [
+            hook["command"]
+            for hook in nested
+            if isinstance(hook, dict) and isinstance(hook.get("command"), str)
+        ]
+
+    if isinstance(entry.get("command"), str):
+        commands.append(entry["command"])
+
+    return commands
+
+
 def _is_dekko_entry(entry: dict) -> bool:
     """Whether a settings hooks entry is one of ours."""
-    for hook in entry.get("hooks", []):
-        cmd = hook.get("command", "") if isinstance(hook, dict) else ""
-        if isinstance(cmd, str) and cmd.startswith(_HOOK_COMMAND_PREFIX):
-            return True
-    return False
+    return any(
+        cmd.startswith(_HOOK_COMMAND_PREFIX) for cmd in _entry_commands(entry)
+    )
+
+
+def _claude_hooks_installed(root: Path) -> bool:
+    """Whether ``.claude/settings.json`` under ``root`` has dekko hooks.
+
+    Cursor runs those too, so with Cursor's own dekko hooks installed
+    each one fires twice.
+    """
+    config = _load_settings(settings_path(root, "claude")).get("hooks")
+    if not isinstance(config, dict):
+        return False
+
+    return any(
+        isinstance(entry, dict) and _is_dekko_entry(entry)
+        for bucket in config.values()
+        if isinstance(bucket, list)
+        for entry in bucket
+    )
 
 
 def install(
@@ -1218,7 +1273,8 @@ def install(
             unless ``"pre-bash"`` is in ``events``; changing it on an
             already-installed ``pre-bash`` requires ``hooks uninstall``
             first (install only merges).
-        agent: Which agent's hooks to write: ``claude`` or ``codex``.
+        agent: Which agent's hooks to write: ``claude``, ``codex`` or
+            ``cursor``.
 
     Returns:
         Process exit code (``0`` ok, ``2`` on an unknown event or a
@@ -1230,6 +1286,8 @@ def install(
 
     path = settings_path(root, agent)
     settings = _load_settings(path)
+    if agent == "cursor" and "version" not in settings:
+        settings = {"version": 1, **settings}
     hooks = settings.setdefault("hooks", {})
     table = events_for(agent)
     for event in events:
@@ -1241,6 +1299,13 @@ def install(
     if agent == "codex":
         print(f"dekko: enabled hooks [{', '.join(events)}] in {path}.")
         print(_CODEX_TRUST_NOTE)
+        return 0
+
+    if agent == "cursor":
+        print(f"dekko: enabled hooks [{', '.join(events)}] in {path}.")
+        print(_CURSOR_TRUST_NOTE)
+        if _claude_hooks_installed(root):
+            print(_CURSOR_OVERLAP_NOTE)
         return 0
 
     print(
@@ -1263,6 +1328,19 @@ _CODEX_TRUST_NOTE = (
     'review"). `codex exec` skips untrusted hooks silently. Changing a '
     "hook later (for example reinstalling with or without --strict) "
     "needs another review."
+)
+
+
+_CURSOR_TRUST_NOTE = (
+    "Cursor reloads hook files live, and runs project hooks only in a "
+    "trusted workspace (the headless `agent` CLI needs --trust)."
+)
+
+_CURSOR_OVERLAP_NOTE = (
+    "Note: .claude/settings.json also has dekko hooks, and Cursor runs "
+    "those too, so each fires twice and the context arrives twice. "
+    "Remove one set (`dekko hooks uninstall`), or turn off Cursor's "
+    "Settings > Agents > Third-Party Imports."
 )
 
 
@@ -1327,16 +1405,12 @@ def _already_installed(bucket: list, event: str) -> bool:
     never adds a duplicate entry.
     """
     command = f"{_HOOK_COMMAND_PREFIX}{event}"
-    for entry in bucket:
-        if not isinstance(entry, dict):
-            continue
-        for hook in entry.get("hooks", []):
-            cmd = hook.get("command") if isinstance(hook, dict) else None
-            if isinstance(cmd, str) and (
-                cmd == command or cmd.startswith(f"{command} ")
-            ):
-                return True
-    return False
+    return any(
+        cmd == command or cmd.startswith(f"{command} ")
+        for entry in bucket
+        if isinstance(entry, dict)
+        for cmd in _entry_commands(entry)
+    )
 
 
 def uninstall(root: Path, agent: str = "claude") -> int:
@@ -1344,7 +1418,8 @@ def uninstall(root: Path, agent: str = "claude") -> int:
 
     Args:
         root: Repository root whose settings to clean.
-        agent: Which agent's hook file to clean: ``claude`` or ``codex``.
+        agent: Which agent's hook file to clean: ``claude``, ``codex``
+            or ``cursor``.
 
     Returns:
         Process exit code (always ``0``).
@@ -1369,6 +1444,10 @@ def uninstall(root: Path, agent: str = "claude") -> int:
             del hooks[claude_event]
     if not hooks:
         settings.pop("hooks", None)
+    if agent == "cursor" and set(settings) <= {"version"}:
+        # A Cursor file needs a ``version``; one with nothing else is
+        # dekko's own and goes too.
+        settings = {}
     if not settings and path.exists():
         # Nothing left to keep -- remove the file (and the now-empty
         # .claude/ or .codex/ dir it lived in, if nothing else uses it)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko.integrations import hooks
+from dekko.integrations import cli, hooks
 from dekko.integrations import hooks_cursor as hc
 from dekko.render.mapfile import load_map
 from dekko.storage import ledger
@@ -554,3 +554,221 @@ def test_a_cursor_transcript_folds_reads_and_estimates_usage(
     assert view.consumed_tokens > 0
     assert view.turns == 0
     assert view.has_file("src/auth.py")
+
+
+# --- install / uninstall ---------------------------------------------
+
+
+def _cursor_hooks(root: Path) -> dict:
+    """The project's parsed ``.cursor/hooks.json``."""
+    return json.loads(
+        (root / ".cursor" / "hooks.json").read_text(encoding="utf-8"),
+    )
+
+
+def test_cursor_hooks_live_in_the_project_cursor_dir(tmp_path: Path) -> None:
+    assert hooks.settings_path(tmp_path, "cursor") == (
+        tmp_path / ".cursor" / "hooks.json"
+    )
+    assert hooks.events_for("cursor") == hc.CURSOR_EVENTS
+
+
+def test_install_cursor_writes_flat_entries(tmp_path: Path) -> None:
+    assert hooks.install(tmp_path, ["session-start"], agent="cursor") == 0
+
+    text = (tmp_path / ".cursor" / "hooks.json").read_text(encoding="utf-8")
+    assert json.loads(text) == {
+        "version": 1,
+        "hooks": {
+            "sessionStart": [
+                {
+                    "command": "dekko hooks run session-start --agent cursor",
+                    "timeout": hc.CURSOR_HOOK_TIMEOUT,
+                },
+            ],
+        },
+    }
+    assert list(json.loads(text)) == ["version", "hooks"]
+
+
+def test_install_cursor_pre_read_and_strict_pre_bash(tmp_path: Path) -> None:
+    hooks.install(
+        tmp_path,
+        ["pre-read", "pre-bash"],
+        strict=True,
+        agent="cursor",
+    )
+    config = _cursor_hooks(tmp_path)["hooks"]
+
+    assert config["preToolUse"] == [
+        {
+            "matcher": "Read",
+            "command": "dekko hooks run pre-read --agent cursor",
+            "timeout": 60,
+        },
+    ]
+    assert config["beforeShellExecution"] == [
+        {
+            "command": "dekko hooks run pre-bash --strict --agent cursor",
+            "timeout": 60,
+        },
+    ]
+
+
+def test_install_cursor_appends_after_user_entries_and_keeps_version(
+    tmp_path: Path,
+) -> None:
+    mine = {"command": "./mine.sh"}
+    path = tmp_path / ".cursor" / "hooks.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {"version": 2, "hooks": {"beforeShellExecution": [mine]}},
+        ),
+        encoding="utf-8",
+    )
+
+    hooks.install(tmp_path, ["pre-bash"], agent="cursor")
+    config = _cursor_hooks(tmp_path)
+
+    assert config["version"] == 2
+    bucket = config["hooks"]["beforeShellExecution"]
+    assert bucket[0] == mine
+    assert bucket[1]["command"] == "dekko hooks run pre-bash --agent cursor"
+
+
+def test_install_cursor_adds_a_version_to_a_versionless_file(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / ".cursor" / "hooks.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+
+    hooks.install(tmp_path, ["session-start"], agent="cursor")
+
+    assert next(iter(_cursor_hooks(tmp_path))) == "version"
+    assert _cursor_hooks(tmp_path)["version"] == 1
+
+
+def test_install_cursor_is_idempotent(tmp_path: Path) -> None:
+    events = ["session-start", "prompt-submit", "pre-read", "pre-bash"]
+    hooks.install(tmp_path, events, agent="cursor")
+    first = (tmp_path / ".cursor" / "hooks.json").read_bytes()
+
+    hooks.install(tmp_path, events, strict=True, agent="cursor")
+
+    assert (tmp_path / ".cursor" / "hooks.json").read_bytes() == first
+
+
+def test_install_cursor_accepts_every_event(tmp_path: Path) -> None:
+    events = ["session-start", "prompt-submit", "pre-read", "pre-bash"]
+
+    assert hooks.install(tmp_path, events, agent="cursor") == 0
+    assert set(_cursor_hooks(tmp_path)["hooks"]) == {
+        "sessionStart",
+        "beforeSubmitPrompt",
+        "preToolUse",
+        "beforeShellExecution",
+    }
+
+
+def test_uninstall_cursor_keeps_user_entries(tmp_path: Path) -> None:
+    mine = {"command": "./mine.sh"}
+    path = tmp_path / ".cursor" / "hooks.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps({"version": 1, "hooks": {"beforeShellExecution": [mine]}}),
+        encoding="utf-8",
+    )
+    hooks.install(tmp_path, ["pre-bash", "session-start"], agent="cursor")
+    assert "sessionStart" in _cursor_hooks(tmp_path)["hooks"]
+
+    assert hooks.uninstall(tmp_path, agent="cursor") == 0
+
+    assert _cursor_hooks(tmp_path) == {
+        "version": 1,
+        "hooks": {"beforeShellExecution": [mine]},
+    }
+
+
+def test_uninstall_cursor_deletes_a_version_only_file(tmp_path: Path) -> None:
+    hooks.install(tmp_path, ["session-start"], agent="cursor")
+    assert (tmp_path / ".cursor" / "hooks.json").is_file()
+
+    hooks.uninstall(tmp_path, agent="cursor")
+
+    assert not (tmp_path / ".cursor").exists()
+
+
+def test_uninstall_cursor_leaves_claude_hooks_alone(tmp_path: Path) -> None:
+    hooks.install(tmp_path, ["session-start"])
+    hooks.install(tmp_path, ["session-start"], agent="cursor")
+
+    hooks.uninstall(tmp_path, agent="cursor")
+
+    assert hooks._claude_hooks_installed(tmp_path)
+
+
+def test_entry_commands_reads_both_shapes() -> None:
+    nested = {"hooks": [{"type": "command", "command": "a"}, "junk"]}
+    flat = {"command": "b"}
+
+    assert hooks._entry_commands(nested) == ["a"]
+    assert hooks._entry_commands(flat) == ["b"]
+    assert hooks._entry_commands({"hooks": "x", "command": 3}) == []
+
+
+def test_install_cursor_warns_about_imported_claude_hooks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hooks.install(tmp_path, ["session-start"])
+    capsys.readouterr()
+
+    hooks.install(tmp_path, ["session-start"], agent="cursor")
+    captured = capsys.readouterr()
+
+    assert ".claude/settings.json" in captured.out + captured.err
+    assert "twice" in captured.out + captured.err
+
+
+def test_install_cursor_without_claude_hooks_has_no_overlap_warning(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hooks.install(tmp_path, ["session-start"], agent="cursor")
+    captured = capsys.readouterr()
+
+    assert "twice" not in captured.out + captured.err
+    assert "trusted" in captured.out
+
+
+def test_cli_hooks_install_agent_cursor_writes_the_cursor_file(
+    tmp_path: Path,
+) -> None:
+    argv = ["hooks", "install", "--agent", "cursor", "--root", str(tmp_path)]
+
+    assert cli.main(argv) == 0
+    assert "sessionStart" in _cursor_hooks(tmp_path)["hooks"]
+
+
+@pytest.mark.parametrize("action", ["install", "uninstall"])
+def test_cli_hooks_help_names_the_cursor_file(
+    capsys: pytest.CaptureFixture[str],
+    action: str,
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["hooks", action, "--help"])
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert ".cursor/hooks.json" in out
+
+
+def test_cli_hooks_help_lists_the_cursor_agent(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["hooks", "--help"])
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert ".cursor/hooks.json with --agent cursor" in out

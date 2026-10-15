@@ -1220,8 +1220,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_hooks_install = hooks_sub.add_parser(
         "install",
-        help="enable dekko hooks in .claude/settings.json, or "
-        ".codex/hooks.json with --agent codex (opt-in)",
+        help="enable dekko hooks in .claude/settings.json, "
+        ".codex/hooks.json with --agent codex, or .cursor/hooks.json "
+        "with --agent cursor (opt-in)",
     )
     p_hooks_install.add_argument(
         "--enable",
@@ -1230,14 +1231,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="EVENT",
         help="hook event(s) to enable; repeatable (default: "
-        "session-start; pre-read is Claude-only)",
+        "session-start; pre-read is not available for Codex)",
     )
     p_hooks_install.add_argument(
         "--strict",
         action="store_true",
         help="escalate pre-bash's matches to 'deny' (from 'ask' on "
-        "Claude, from an advisory on Codex; opt-in-on-opt-in; only "
-        "affects pre-bash, requires --enable pre-bash)",
+        "Claude and Cursor, from an advisory on Codex; opt-in-on-opt-in; "
+        "only affects pre-bash, requires --enable pre-bash)",
     )
     p_hooks_install.add_argument(
         "--root",
@@ -1249,8 +1250,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_hooks_install.set_defaults(func=run_hooks_install)
     p_hooks_uninstall = hooks_sub.add_parser(
         "uninstall",
-        help="remove all dekko hooks from .claude/settings.json, or "
-        ".codex/hooks.json with --agent codex",
+        help="remove all dekko hooks from .claude/settings.json, "
+        ".codex/hooks.json with --agent codex, or .cursor/hooks.json "
+        "with --agent cursor",
     )
     p_hooks_uninstall.add_argument(
         "--root",
@@ -2965,8 +2967,9 @@ def _add_hooks_agent_flag(parser: argparse.ArgumentParser) -> None:
         "--agent",
         choices=hooks_mod.AGENTS,
         default="claude",
-        help="which agent's hooks: claude (.claude/settings.json) or "
-        "codex (.codex/hooks.json) (default: claude)",
+        help="which agent's hooks: claude (.claude/settings.json), "
+        "codex (.codex/hooks.json) or cursor (.cursor/hooks.json) "
+        "(default: claude)",
     )
 
 
