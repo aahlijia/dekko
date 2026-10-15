@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **`dekko install <target>` / `dekko uninstall <target>`.** One
+  command family wires dekko into every client it supports, instead
+  of a separate `--<client>-install` flag per client:
+  `dekko install claude` (the Claude Code plugin, or with
+  `--mcp-only` just the MCP server), `dekko install cline`
+  (`--scope`, `--config`, `--force`), and `dekko install claude-md`
+  (`--root`). `dekko install --help` lists every target. `--dry-run`
+  previews the `claude` target and is refused (exit 2) on the
+  file-editing ones; no target or an unknown one exits 2 with the
+  list. The old flags (`--claude-install`, `--mcp-install`,
+  `--cline-install`, `--claude-md-install` and their uninstall forms)
+  keep working as aliases of the same handlers, and `doctor`'s fix-it
+  hints and the docs now name the new commands.
+
 ## [1.9.35] — 2026-10-14
 
 ### Fixed

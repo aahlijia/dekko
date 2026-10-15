@@ -6,6 +6,7 @@ writes a human-readable MAP.md plus a machine-readable map.json.
 """
 
 import argparse
+import dataclasses
 import difflib
 import errno
 import json
@@ -13,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
 from pathlib import Path
@@ -69,6 +71,8 @@ SUBCOMMANDS = (
     "doctor",
     "sanity",
     "ledger",
+    "install",
+    "uninstall",
     "hooks",
     "daemon",
     "serve",
@@ -163,81 +167,74 @@ def build_legacy_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--claude-install",
         action="store_true",
-        help="install the dekko plugin into Claude Code",
+        help="alias of 'dekko install claude'",
     )
     parser.add_argument(
         "--claude-uninstall",
         action="store_true",
-        help="remove the dekko plugin from Claude Code",
+        help="alias of 'dekko uninstall claude'",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="with --claude-install/--claude-uninstall/--mcp-install/"
         "--mcp-uninstall, print the command(s) that would run instead "
-        "of running them",
+        "of running them (alias of 'dekko install claude --dry-run')",
     )
     parser.add_argument(
         "--claude-md-install",
         action="store_true",
-        help="write/update an idempotent dekko usage-policy block in "
-        "this repo's CLAUDE.md, so Claude reaches for dekko's tools "
-        "over grep/Read as a standing instruction, not just per-turn "
-        "context (separate opt-in from --claude-install/hooks — edits "
-        "a file you own and read)",
+        help="alias of 'dekko install claude-md'",
     )
     parser.add_argument(
         "--claude-md-uninstall",
         action="store_true",
-        help="remove the dekko usage-policy block from CLAUDE.md, "
-        "leaving the rest of the file untouched",
+        help="alias of 'dekko uninstall claude-md'",
     )
     parser.add_argument(
         "--root",
         default=".",
         metavar="DIR",
         help="repo root whose CLAUDE.md to edit, with "
-        "--claude-md-install/--claude-md-uninstall (default: cwd)",
+        "--claude-md-install/--claude-md-uninstall (default: cwd; "
+        "alias of 'dekko install claude-md --root')",
     )
     parser.add_argument(
         "--mcp-install",
         action="store_true",
-        help="register the MCP server with Claude Code (claude mcp add)",
+        help="alias of 'dekko install claude --mcp-only'",
     )
     parser.add_argument(
         "--mcp-uninstall",
         action="store_true",
-        help="remove the MCP server from Claude Code (claude mcp remove)",
+        help="alias of 'dekko uninstall claude --mcp-only'",
     )
     parser.add_argument(
         "--cline-install",
         action="store_true",
-        help="register the MCP server in Cline's cline_mcp_settings.json",
+        help="alias of 'dekko install cline'",
     )
     parser.add_argument(
         "--cline-uninstall",
         action="store_true",
-        help="remove the MCP server from Cline's cline_mcp_settings.json",
+        help="alias of 'dekko uninstall cline'",
     )
     parser.add_argument(
         "--cline-scope",
         choices=cline_mod.SCOPES,
         default="vscode",
-        help="Cline install to target: the VS Code extension "
-        "(default) or a standalone cline CLI's global config",
+        help="alias of 'dekko install cline --scope'",
     )
     parser.add_argument(
         "--cline-config",
         default=None,
         metavar="PATH",
-        help="explicit cline_mcp_settings.json path, overriding "
-        "--cline-scope auto-detection",
+        help="alias of 'dekko install cline --config'",
     )
     parser.add_argument(
         "--cline-force",
         action="store_true",
-        help="reset a malformed cline_mcp_settings.json instead of "
-        "aborting (--cline-install/--cline-uninstall)",
+        help="alias of 'dekko install cline --force'",
     )
     parser.add_argument(
         "--version",
@@ -466,10 +463,19 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         epilog=(
             "note: 'map' takes DIR positionally; every other command "
             "uses --root DIR\n"
-            "legacy aliases: dekko --map [DIR] [SUBPATH], "
-            "dekko --claude-install, dekko --claude-md-install, "
-            "dekko --version"
+            "\n"
+            "legacy aliases:\n"
+            "  dekko --map [DIR] [SUBPATH]    dekko map [DIR] [SUBPATH]\n"
+            "  dekko --claude-install         dekko install claude\n"
+            "  dekko --mcp-install            "
+            "dekko install claude --mcp-only\n"
+            "  dekko --cline-install          dekko install cline\n"
+            "  dekko --claude-md-install      dekko install claude-md\n"
+            "  (each --*-install has a --*-uninstall twin: "
+            "dekko uninstall TARGET)\n"
+            "  dekko --version"
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(
         dest="command", required=True, metavar="COMMAND"
@@ -1043,6 +1049,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="emit structured JSON",
     )
     p_doctor.set_defaults(func=run_doctor)
+
+    _add_install_parsers(sub)
 
     p_sanity = sub.add_parser(
         "sanity",
@@ -1932,6 +1940,214 @@ def mcp_uninstall(dry_run: bool = False) -> int:
 
     print("dekko: MCP server 'dekko' removed. Restart Claude Code.")
     return 0
+
+
+# --- `dekko install` / `dekko uninstall` targets ----------------------
+
+
+def _add_claude_target_args(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``claude`` target's options."""
+    parser.add_argument(
+        "--mcp-only",
+        action="store_true",
+        help="register (or remove) only the MCP server, via 'claude mcp "
+        "add'/'claude mcp remove', without the plugin's skills and "
+        "slash commands",
+    )
+
+
+def _add_cline_target_args(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``cline`` target's options."""
+    parser.add_argument(
+        "--scope",
+        choices=cline_mod.SCOPES,
+        default="vscode",
+        help="Cline install to target: the VS Code extension "
+        "(default) or a standalone cline CLI's global config",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="explicit cline_mcp_settings.json path, overriding "
+        "--scope auto-detection",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="reset a malformed cline_mcp_settings.json instead of aborting",
+    )
+
+
+def _add_claude_md_target_args(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``claude-md`` target's options."""
+    parser.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose CLAUDE.md to edit (default: cwd)",
+    )
+
+
+def _install_claude(args: argparse.Namespace) -> int:
+    """Handle ``dekko install claude [--mcp-only]``."""
+    if args.mcp_only:
+        return mcp_install(dry_run=args.dry_run)
+
+    return claude_install(dry_run=args.dry_run)
+
+
+def _uninstall_claude(args: argparse.Namespace) -> int:
+    """Handle ``dekko uninstall claude [--mcp-only]``."""
+    if args.mcp_only:
+        return mcp_uninstall(dry_run=args.dry_run)
+
+    return claude_uninstall(dry_run=args.dry_run)
+
+
+def _cline_config(args: argparse.Namespace) -> Path | None:
+    """The explicit ``--config`` path of a ``cline`` target, or None."""
+    return Path(args.config) if args.config else None
+
+
+def _install_cline(args: argparse.Namespace) -> int:
+    """Handle ``dekko install cline``."""
+    return cline_mod.install(_cline_config(args), args.scope, force=args.force)
+
+
+def _uninstall_cline(args: argparse.Namespace) -> int:
+    """Handle ``dekko uninstall cline``."""
+    return cline_mod.uninstall(
+        _cline_config(args), args.scope, force=args.force
+    )
+
+
+def _install_claude_md(args: argparse.Namespace) -> int:
+    """Handle ``dekko install claude-md``."""
+    return claude_md_mod.install(Path(args.root).resolve())
+
+
+def _uninstall_claude_md(args: argparse.Namespace) -> int:
+    """Handle ``dekko uninstall claude-md``."""
+    return claude_md_mod.uninstall(Path(args.root).resolve())
+
+
+@dataclasses.dataclass(frozen=True)
+class InstallTarget:
+    """One thing ``dekko install`` / ``dekko uninstall`` can wire up.
+
+    Attributes:
+        name: The target word, as in ``dekko install <name>``.
+        summary: What the target is, as a noun phrase; the parsers
+            prefix it with "install" or "remove" for ``--help``.
+        add_args: Attaches the target's own options to its parser.
+        install: Handler for ``dekko install <name>``.
+        uninstall: Handler for ``dekko uninstall <name>``.
+        previewable: Whether ``--dry-run`` is honored. True only for a
+            target that shells out to a client CLI, where the preview
+            is the command line; a file-editing target has none.
+    """
+
+    name: str
+    summary: str
+    add_args: Callable[[argparse.ArgumentParser], None]
+    install: Callable[[argparse.Namespace], int]
+    uninstall: Callable[[argparse.Namespace], int]
+    previewable: bool
+
+
+INSTALL_TARGETS: tuple[InstallTarget, ...] = (
+    InstallTarget(
+        name="claude",
+        summary="the Claude Code plugin (MCP server, skills, slash "
+        "commands), or with --mcp-only just the MCP server",
+        add_args=_add_claude_target_args,
+        install=_install_claude,
+        uninstall=_uninstall_claude,
+        previewable=True,
+    ),
+    InstallTarget(
+        name="cline",
+        summary="the MCP server entry in Cline's cline_mcp_settings.json",
+        add_args=_add_cline_target_args,
+        install=_install_cline,
+        uninstall=_uninstall_cline,
+        previewable=False,
+    ),
+    InstallTarget(
+        name="claude-md",
+        summary="the dekko usage-policy block in this repo's CLAUDE.md",
+        add_args=_add_claude_md_target_args,
+        install=_install_claude_md,
+        uninstall=_uninstall_claude_md,
+        previewable=False,
+    ),
+)
+
+_INSTALL_VERBS = (
+    ("install", "install", "wire dekko into a client or file"),
+    ("uninstall", "remove", "remove what 'dekko install' wired up"),
+)
+
+
+def _add_install_parsers(sub: argparse._SubParsersAction) -> None:
+    """Attach ``install`` and ``uninstall``, one sub-parser per target.
+
+    Every target gets ``--dry-run``. A target that can't preview hides
+    it from ``--help`` but still parses it, so ``run_install_target``
+    can refuse it by name instead of argparse's bare "unrecognized
+    arguments".
+    """
+    for verb, action, about in _INSTALL_VERBS:
+        p_verb = sub.add_parser(verb, help=about, description=about)
+        targets = p_verb.add_subparsers(
+            dest="target", required=True, title="targets"
+        )
+        for target in INSTALL_TARGETS:
+            text = f"{action} {target.summary}"
+            p_target = targets.add_parser(
+                target.name, help=text, description=text
+            )
+            target.add_args(p_target)
+            p_target.add_argument(
+                "--dry-run",
+                action="store_true",
+                help=(
+                    "print the command(s) that would run instead of "
+                    "running them"
+                    if target.previewable
+                    else argparse.SUPPRESS
+                ),
+            )
+            p_target.set_defaults(func=run_install_target, verb=verb)
+
+
+def run_install_target(args: argparse.Namespace) -> int:
+    """Handle ``dekko install <target>`` and ``dekko uninstall <target>``.
+
+    Args:
+        args: Parsed arguments; ``verb`` and ``target`` name the action.
+
+    Returns:
+        The handler's exit code, or ``2`` for ``--dry-run`` on a target
+        with no preview.
+    """
+    target = next(t for t in INSTALL_TARGETS if t.name == args.target)
+    if args.dry_run and not target.previewable:
+        names = ", ".join(
+            f"'{t.name}'" for t in INSTALL_TARGETS if t.previewable
+        )
+        print(
+            f"dekko: --dry-run works with {names} only; "
+            f"'{target.name}' edits a file and has no preview",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.verb == "install":
+        return target.install(args)
+
+    return target.uninstall(args)
 
 
 def _find_ancestor_map_root(path: Path) -> Path | None:
@@ -2896,7 +3112,8 @@ def _reject_stray_dry_run(
     if args.dry_run and not previewable:
         parser.error(
             "--dry-run works with --claude-install, --claude-uninstall, "
-            "--mcp-install and --mcp-uninstall only"
+            "--mcp-install and --mcp-uninstall only (or 'dekko install "
+            "claude --dry-run')"
         )
 
 

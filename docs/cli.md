@@ -46,6 +46,7 @@ dekko deps --cycles                  # every detected circular-import cluster
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
 dekko doctor                         # diagnose install/environment issues (PATH shadowing, hooks, MCP, ...)
+dekko install claude                 # wire dekko into a client (claude, cline) or file (claude-md); see below
 dekko sanity resolve                 # cross-check `callers resolve` against a targeted grep sweep
 dekko sanity Path --usages           # cross-check `uses Path` instead of `callers`
 dekko sanity --all                   # repo-wide sweep: every fan-in symbol, not just one target
@@ -326,6 +327,38 @@ Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
 `ledger`, `orient`, `deps` cover more specialized workflows; hooks are
 documented in [claude-code.md](claude-code.md#push-hooks-opt-in)).
+
+## Wiring dekko into a client
+
+`dekko install <target>` wires dekko into one client or file, and
+`dekko uninstall <target>` takes it back out. `dekko install --help`
+lists the targets:
+
+```sh
+dekko install claude                 # Claude Code plugin: MCP server, skills, slash commands
+dekko install claude --mcp-only      # just the MCP server (claude mcp add)
+dekko install claude --dry-run       # print the claude commands instead of running them
+dekko install cline                  # MCP server in Cline's cline_mcp_settings.json
+dekko install cline --scope global   # ...a standalone cline CLI's config (--config PATH to name the file)
+dekko install claude-md              # usage-policy block in this repo's CLAUDE.md (--root DIR)
+dekko uninstall claude               # the reverse of each, same options
+```
+
+`--dry-run` works only on the `claude` target, which shells out to the
+`claude` CLI; `cline` and `claude-md` edit a file and refuse it (exit
+2) rather than write for real. No target, or an unknown one, exits 2
+with the list. Hooks have their own opt-in per event, under `dekko
+hooks install` (see
+[claude-code.md](claude-code.md#push-hooks-opt-in)).
+
+The older flags still work and do exactly the same thing:
+
+| Flag | Same as |
+|---|---|
+| `--claude-install` / `--claude-uninstall` | `dekko install claude` / `dekko uninstall claude` |
+| `--mcp-install` / `--mcp-uninstall` | `dekko install claude --mcp-only` / `dekko uninstall claude --mcp-only` |
+| `--cline-install` / `--cline-uninstall` (`--cline-scope`, `--cline-config`, `--cline-force`) | `dekko install cline` / `dekko uninstall cline` (`--scope`, `--config`, `--force`) |
+| `--claude-md-install` / `--claude-md-uninstall` (`--root`) | `dekko install claude-md` / `dekko uninstall claude-md` (`--root`) |
 
 ## Diagnosing environment issues
 
