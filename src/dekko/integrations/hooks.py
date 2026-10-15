@@ -1261,9 +1261,9 @@ def uninstall(root: Path, agent: str = "claude") -> int:
         settings.pop("hooks", None)
     if not settings and path.exists():
         # Nothing left to keep -- remove the file (and the now-empty
-        # .claude/ dir it lived in, if nothing else uses it) rather
-        # than leaving a stray `{}` behind, matching --claude-md-
-        # install/uninstall's own byte-identical restoration.
+        # .claude/ or .codex/ dir it lived in, if nothing else uses it)
+        # rather than leaving a stray `{}` behind, matching `dekko
+        # uninstall claude-md`'s own byte-identical restoration.
         path.unlink()
         try:
             path.parent.rmdir()
