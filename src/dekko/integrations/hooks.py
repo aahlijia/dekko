@@ -41,6 +41,16 @@ covers them) and no ``"ask"`` decision, so ``pre-bash`` is advisory
 there by default and denies under ``--strict``. Its hooks live in
 ``<root>/.codex/hooks.json``.
 
+Cursor (``--agent cursor``) sends a different payload and wants a flat
+answer per event, and it blocks a permission hook whose output it
+can't read. It also runs the hooks in ``.claude/settings.json`` by
+default, so the answer's flavor comes from the payload: one carrying
+Cursor's ``cursor_version`` key gets a Cursor answer whatever
+``--agent`` says. :mod:`dekko.integrations.hooks_cursor` does the
+translation; the handlers don't change. Cursor drops a session context
+past 10,000 chars, so its session-start map is sized to fit. Its hooks
+live in ``<root>/.cursor/hooks.json``.
+
 Every handler is **fail-silent**: any error, missing map, or empty signal
 yields no output and a clean exit, so a hook can never break or hijack a
 session. State is read from the transcript Claude Code
@@ -61,7 +71,7 @@ from dekko.storage import ledger
 from dekko.analysis import ambiguous, outline, relevance, search, summary
 from dekko.render import mapfile, render_lean
 from dekko.render.mapfile import MapIndex
-from dekko.integrations import orient
+from dekko.integrations import hooks_cursor, orient
 
 EXIT_OK = 0
 
@@ -98,7 +108,7 @@ _CAMEL_RE = re.compile(r"[a-z0-9][A-Z]")
 _QUALIFIER_RE = re.compile(r"::|#|\.")
 
 # The agents whose hook files dekko can write, and their hook flavors.
-AGENTS = ("claude", "codex")
+AGENTS = ("claude", "codex", "cursor")
 
 # install-time map: our event name -> (Claude event, PreToolUse matcher).
 EVENTS: dict[str, tuple[str, str | None]] = {
@@ -157,24 +167,11 @@ def _additional_context(event_name: str, text: str) -> dict:
 # --- SessionStart ----------------------------------------------------
 
 
-def session_start(payload: dict) -> dict | None:
-    """Inject a steering preamble + budget-capped lean map."""
-    root = _root_from(payload)
-    index = _load_index(root, allow_regen=True)
-    if index is None:
-        return None
-    lines, report = render_lean.generate(
-        index, root, render_lean.CapConfig(override=SESSION_MAP_BUDGET)
-    )
-    if report.total_symbols == 0 and not index.languages_by_path:
-        return None
-    # ``orient._preamble()``, not the raw constant: it drops the
-    # ``search`` line when that subcommand isn't usable in this install,
-    # and the hook should never steer toward a command that then fails.
-    parts = [orient._preamble()]
-    note = ambiguous.high_rate_note(index)
-    if note:
-        parts.append(note)
+def _session_parts(
+    lines: list[str],
+    report: render_lean.LeanReport,
+) -> list[str]:
+    """The map body and its floor notes, under Claude's budget rules."""
     if report.cap > SESSION_MAP_HARD_CEILING:
         # On a repo whose path-only floor exceeds even this hard ceiling
         # (spring-boot: ~113K tok, ~56x SESSION_MAP_BUDGET), rendering the
@@ -184,37 +181,116 @@ def session_start(payload: dict) -> dict | None:
         # currently no rung between the full path-only floor and "nothing" for
         # `render_lean` to fall back to, so this drops the map body entirely
         # rather than inject an unboundedly large payload.
-        parts.append(
+        return [
             f"note: this repo's path-only floor (~{report.cap} tok) is "
             f"far larger than dekko's {SESSION_MAP_BUDGET}-token "
             "session-start budget -- even the narrowest available map "
             "rendering would cost more than this hook should inject "
             "automatically. Run `dekko lean --budget N` or `dekko "
             "summary` directly for a repo map at a budget you choose."
+        ]
+
+    parts = []
+    if report.cap > SESSION_MAP_BUDGET:
+        # On a repo whose path-only floor alone exceeds
+        # SESSION_MAP_BUDGET (a large monorepo can
+        # need ~80K tokens just to list every file), `effective_cap`
+        # bends the cap upward the same way `render_lean.run()`'s
+        # `--budget` floor already does for the `lean` CLI command
+        # -- but this hook called `generate()` directly and never
+        # surfaced that, so the injected map silently cost up to
+        # ~40x its documented budget with no visible signal
+        # anywhere. Mirror the CLI wrapper's disclosure so an agent
+        # (and anyone reading the transcript) can see why the map
+        # below is larger than SESSION_MAP_BUDGET. Only applies
+        # below SESSION_MAP_HARD_CEILING -- above it, the branch
+        # above takes over and no map body is rendered at all.
+        parts.append(
+            f"note: this repo's path-only floor (~{report.cap} tok) "
+            f"exceeds dekko's {SESSION_MAP_BUDGET}-token "
+            "session-start budget; the map below uses the floor "
+            "instead."
         )
+    parts.append("\n".join(lines))
+    return parts
+
+
+def _limited_session_parts(
+    prefix: list[str],
+    lines: list[str],
+    report: render_lean.LeanReport,
+    budget: int,
+    char_limit: int,
+) -> list[str]:
+    """The map body if it fits ``char_limit``, else a note saying why not.
+
+    A client that throws away an oversized context gets the note, which
+    still points at a command for a wider map, rather than nothing.
+    """
+    body = "\n".join(lines)
+    text = "\n\n".join([*prefix, body])
+    if report.cap <= budget and len(text) <= char_limit:
+        return [body]
+
+    return [
+        f"note: this repo's path-only floor (~{report.cap} tok) doesn't "
+        f"fit the {budget}-token map budget left under this client's "
+        "session-start size limit, so no map is included. Run `dekko "
+        "lean --budget N` or `dekko summary` directly for a repo map "
+        "at a budget you choose."
+    ]
+
+
+def session_start(
+    payload: dict,
+    *,
+    char_limit: int | None = None,
+) -> dict | None:
+    """Inject a steering preamble + budget-capped lean map.
+
+    Args:
+        payload: The session-start hook JSON.
+        char_limit: The most characters the whole context may take, for
+            a client that drops a larger one; ``None`` for no limit.
+            The map's budget then shrinks to what's left after the
+            preamble, and a map that still doesn't fit is replaced by a
+            note.
+
+    Returns:
+        A ``hookSpecificOutput`` dict, or ``None`` with no map.
+    """
+    root = _root_from(payload)
+    index = _load_index(root, allow_regen=True)
+    if index is None:
+        return None
+
+    # ``orient._preamble()``, not the raw constant: it drops the
+    # ``search`` line when that subcommand isn't usable in this install,
+    # and the hook should never steer toward a command that then fails.
+    prefix = [orient._preamble()]
+    note = ambiguous.high_rate_note(index)
+    if note:
+        prefix.append(note)
+
+    budget = SESSION_MAP_BUDGET
+    if char_limit is not None:
+        left = char_limit - len("\n\n".join(prefix)) - 2
+        budget = max(1, min(budget, left // 4))
+
+    lines, report = render_lean.generate(
+        index, root, render_lean.CapConfig(override=budget)
+    )
+    if report.total_symbols == 0 and not index.languages_by_path:
+        return None
+
+    if char_limit is None:
+        parts = _session_parts(lines, report)
     else:
-        if report.cap > SESSION_MAP_BUDGET:
-            # On a repo whose path-only floor alone exceeds
-            # SESSION_MAP_BUDGET (a large monorepo can
-            # need ~80K tokens just to list every file), `effective_cap`
-            # bends the cap upward the same way `render_lean.run()`'s
-            # `--budget` floor already does for the `lean` CLI command
-            # -- but this hook called `generate()` directly and never
-            # surfaced that, so the injected map silently cost up to
-            # ~40x its documented budget with no visible signal
-            # anywhere. Mirror the CLI wrapper's disclosure so an agent
-            # (and anyone reading the transcript) can see why the map
-            # below is larger than SESSION_MAP_BUDGET. Only applies
-            # below SESSION_MAP_HARD_CEILING -- above it, the branch
-            # above takes over and no map body is rendered at all.
-            parts.append(
-                f"note: this repo's path-only floor (~{report.cap} tok) "
-                f"exceeds dekko's {SESSION_MAP_BUDGET}-token "
-                "session-start budget; the map below uses the floor "
-                "instead."
-            )
-        parts.append("\n".join(lines))
-    text = "\n\n".join(parts)
+        parts = _limited_session_parts(
+            prefix, lines, report, budget, char_limit
+        )
+
+    text = "\n\n".join([*prefix, *parts])
     return _additional_context("SessionStart", text)
 
 
@@ -929,6 +1005,36 @@ def _pre_bash_output(reason: str, *, strict: bool, agent: str) -> dict:
 
 # --- dispatch (the `dekko hooks run <event>` entrypoint) -------------
 
+
+def _cursor_dispatch(
+    event: str, payload: dict, *, strict: bool
+) -> dict | None:
+    """Run ``event``'s handler on a Cursor payload; answer Cursor's way.
+
+    The payload is reshaped into the Claude form the handlers read, and
+    their Claude-shaped answer is converted for the Cursor event that
+    fired. ``pre-bash`` answers in Claude's flavor (``ask``), which the
+    converter keeps for a shell event and softens to an advisory on
+    ``preToolUse``, where Cursor doesn't enforce ``ask``.
+    """
+    normalized = hooks_cursor.normalize_payload(payload)
+    if event == "pre-bash":
+        output = pre_bash(normalized, strict=strict, agent="claude")
+    elif event == "session-start":
+        output = session_start(
+            normalized,
+            char_limit=hooks_cursor.CURSOR_CONTEXT_CHAR_LIMIT,
+        )
+    else:
+        output = _HANDLERS[event](normalized)
+
+    event_name = payload.get("hook_event_name")
+    if not isinstance(event_name, str) or not event_name:
+        event_name = hooks_cursor.CURSOR_EVENTS[event][0]
+
+    return hooks_cursor.cursor_output(event_name, output)
+
+
 _HANDLERS = {
     "session-start": session_start,
     "prompt-submit": prompt_submit,
@@ -957,7 +1063,9 @@ def dispatch(
         strict: Forwarded to ``pre_bash``; ignored by every other
             handler.
         agent: Forwarded to ``pre_bash``, which answers in that agent's
-            hook flavor; ignored by every other handler.
+            hook flavor; ignored by every other handler. ``cursor``, or
+            a payload carrying Cursor's ``cursor_version`` key, makes
+            every handler answer in Cursor's format.
 
     Returns:
         Always ``0``.
@@ -969,7 +1077,9 @@ def dispatch(
         payload = json.loads(payload_text) if payload_text.strip() else {}
         if not isinstance(payload, dict):
             return EXIT_OK
-        if event == "pre-bash":
+        if agent == "cursor" or hooks_cursor.is_cursor_payload(payload):
+            output = _cursor_dispatch(event, payload, strict=strict)
+        elif event == "pre-bash":
             output = handler(payload, strict=strict, agent=agent)
         else:
             output = handler(payload)

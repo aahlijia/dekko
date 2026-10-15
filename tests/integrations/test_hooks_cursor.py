@@ -1,10 +1,16 @@
 """Cursor hooks: payload detection, normalization and output format."""
 
 import json
+from pathlib import Path
 
 import pytest
 
+from dekko.integrations import hooks
 from dekko.integrations import hooks_cursor as hc
+from dekko.render.mapfile import load_map
+from dekko.storage import ledger
+
+from conftest import RepoFactory
 
 # The output keys Cursor documents for each event dekko answers. Cursor
 # publishes no hook schemas, and it blocks a permission hook whose
@@ -255,3 +261,296 @@ def test_oversized_context_is_dropped() -> None:
 
 def test_context_limit_leaves_headroom_under_cursors_cap() -> None:
     assert hc.CURSOR_CONTEXT_CHAR_LIMIT < hc.CURSOR_CONTEXT_HARD_LIMIT
+
+
+# --- dispatch --------------------------------------------------------
+
+_FILES = {
+    "src/auth.py": (
+        '"""User login and authentication."""\n'
+        "def login() -> None:\n    pass\n"
+    ),
+    "src/db.py": (
+        '"""Database connection pool."""\ndef connect() -> None:\n    pass\n'
+    ),
+}
+
+
+def _dispatch(
+    capsys: pytest.CaptureFixture[str],
+    event: str,
+    payload: dict,
+    **kwargs: object,
+) -> str:
+    """Run ``dispatch`` on ``payload`` and return what it printed."""
+    assert hooks.dispatch(event, json.dumps(payload), **kwargs) == 0
+    return capsys.readouterr().out
+
+
+def _session_payload(root: Path) -> dict:
+    """A Cursor ``sessionStart`` payload for a workspace at ``root``."""
+    return {
+        "cursor_version": "3.15.19",
+        "hook_event_name": "sessionStart",
+        "workspace_roots": [str(root)],
+        "session_id": "s1",
+    }
+
+
+def _shell_payload(root: Path, command: str) -> dict:
+    """A native Cursor ``beforeShellExecution`` payload."""
+    return {
+        "cursor_version": "3.15.19",
+        "hook_event_name": "beforeShellExecution",
+        "command": command,
+        "cwd": str(root),
+    }
+
+
+def test_cursor_session_start_answers_in_cursor_format(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = make_mapped_repo(_FILES)
+
+    out = _dispatch(
+        capsys,
+        "session-start",
+        _session_payload(root),
+        agent="cursor",
+    )
+    doc = json.loads(out)
+
+    assert set(doc) == {"additional_context"}
+    assert "dekko orientation" in doc["additional_context"]
+
+
+def test_a_cursor_payload_under_agent_claude_answers_in_cursor_format(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # What a hook from .claude/settings.json gets when Cursor imports it.
+    root = make_mapped_repo(_FILES)
+    payload = {
+        "cursor_version": "3.15.19",
+        "hook_event_name": "preToolUse",
+        "tool_name": "Shell",
+        "tool_input": {"command": 'grep -rn "login" .'},
+        "cwd": str(root),
+    }
+
+    doc = json.loads(_dispatch(capsys, "pre-bash", payload, agent="claude"))
+
+    assert doc["permission"] == "allow"
+    assert "search_code" in doc["agent_message"]
+    assert set(doc) == {"permission", "agent_message"}
+
+
+def test_an_imported_pre_bash_with_a_string_tool_input_matches(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = make_mapped_repo(_FILES)
+    payload = {
+        "cursor_version": "3.15.19",
+        "hook_event_name": "preToolUse",
+        "tool_name": "Shell",
+        "tool_input": json.dumps({"command": "rg login"}),
+        "cwd": str(root),
+    }
+
+    doc = json.loads(_dispatch(capsys, "pre-bash", payload))
+
+    assert doc["permission"] == "allow"
+
+
+@pytest.mark.parametrize(
+    ("strict", "permission"),
+    [(False, "ask"), (True, "deny")],
+)
+def test_native_shell_hook_asks_and_strict_denies(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+    strict: bool,
+    permission: str,
+) -> None:
+    root = make_mapped_repo(_FILES)
+
+    out = _dispatch(
+        capsys,
+        "pre-bash",
+        _shell_payload(root, "rg login"),
+        strict=strict,
+        agent="cursor",
+    )
+    doc = json.loads(out)
+
+    assert doc["permission"] == permission
+    assert "search_code" in doc["agent_message"]
+    assert set(doc) <= ALLOWED_KEYS["beforeShellExecution"]
+
+
+def test_a_cursor_read_advisory_reaches_the_model(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    body = "".join(f"def f{i}() -> None:\n    pass\n" for i in range(400))
+    root = make_mapped_repo({"src/big.py": body})
+    payload = {
+        "cursor_version": "3.15.19",
+        "hook_event_name": "preToolUse",
+        "tool_name": "Read",
+        "tool_input": {"target_file": str(root / "src" / "big.py")},
+        "cwd": str(root),
+    }
+
+    doc = json.loads(_dispatch(capsys, "pre-read", payload, agent="cursor"))
+
+    assert doc["permission"] == "allow"
+    assert "dekko outline src/big.py" in doc["agent_message"]
+
+
+@pytest.mark.parametrize("agent", ["claude", "cursor"])
+def test_a_cursor_miss_prints_nothing(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+    agent: str,
+) -> None:
+    root = make_mapped_repo(_FILES)
+
+    out = _dispatch(
+        capsys,
+        "pre-bash",
+        _shell_payload(root, "ls"),
+        agent=agent,
+    )
+
+    assert out == ""
+
+
+def test_agent_cursor_without_a_map_prints_nothing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    out = _dispatch(
+        capsys,
+        "session-start",
+        _session_payload(tmp_path),
+        agent="cursor",
+    )
+
+    assert out == ""
+
+
+def test_claude_output_is_unchanged_under_cursor_env(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Claude started from Cursor's integrated terminal.
+    root = make_mapped_repo(_FILES)
+    monkeypatch.setenv("CURSOR_VERSION", "3.15.19")
+    monkeypatch.setenv("CURSOR_PROJECT_DIR", str(root))
+    payload = {"cwd": str(root), "tool_input": {"command": "rg login"}}
+    expected = hooks.pre_bash(payload)
+
+    out = _dispatch(capsys, "pre-bash", payload)
+
+    assert expected is not None
+    assert json.loads(out) == expected
+    assert expected["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+def _many_files() -> dict[str, str]:
+    """~600 small files: a path-only floor too big for Cursor's cap."""
+    return {
+        f"pkg_{d:02d}/a_fairly_long_module_name_{f:03d}.py": (
+            f"def fn_{f}() -> None:\n    pass\n"
+        )
+        for d in range(30)
+        for f in range(20)
+    }
+
+
+def test_cursor_session_start_fits_the_char_limit(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = make_mapped_repo(_many_files())
+
+    out = _dispatch(
+        capsys,
+        "session-start",
+        _session_payload(root),
+        agent="cursor",
+    )
+    context = json.loads(out)["additional_context"]
+
+    assert len(context) <= hc.CURSOR_CONTEXT_CHAR_LIMIT
+    assert "dekko lean --budget" in context
+    assert "a_fairly_long_module_name_000.py" not in context
+
+
+def test_cursor_session_start_on_a_small_repo_includes_the_map(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = make_mapped_repo(_FILES)
+
+    out = _dispatch(
+        capsys,
+        "session-start",
+        _session_payload(root),
+        agent="cursor",
+    )
+    context = json.loads(out)["additional_context"]
+
+    assert len(context) <= hc.CURSOR_CONTEXT_CHAR_LIMIT
+    assert "auth.py" in context
+    assert "dekko lean --budget" not in context
+
+
+def test_claude_session_start_has_no_char_limit(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_many_files())
+
+    out = hooks.session_start({"cwd": str(root)})
+
+    assert out is not None
+    context = out["hookSpecificOutput"]["additionalContext"]
+    assert "a_fairly_long_module_name_000.py" in context
+
+
+def test_a_cursor_transcript_folds_reads_and_estimates_usage(
+    make_mapped_repo: RepoFactory,
+    tmp_path: Path,
+) -> None:
+    # Cursor's transcript rows use ``role`` rather than ``type`` and
+    # carry no usage counts. A ``Read`` block with a ``file_path`` is
+    # still folded in like Claude's, and the budget falls back to an
+    # estimate from the text blocks.
+    root = make_mapped_repo(_FILES)
+    index = load_map(root)
+    assert index is not None
+    transcript = tmp_path / "cursor-transcript.jsonl"
+    row = {
+        "role": "assistant",
+        "message": {
+            "content": [
+                {"type": "text", "text": "Reading auth.py"},
+                {
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {"file_path": str(root / "src" / "auth.py")},
+                },
+            ],
+        },
+    }
+    transcript.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    view = ledger.build_view(transcript, index, root)
+
+    assert view.consumed_tokens > 0
+    assert view.turns == 0
+    assert view.has_file("src/auth.py")
