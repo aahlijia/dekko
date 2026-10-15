@@ -1,6 +1,7 @@
 """Environment + install-state diagnostic: composition only, no new
 extraction. Reuses ``mapfile``'s freshness signal, ``hooks``'s
-``.claude/settings.json`` / ``.codex/hooks.json`` shape, and
+``.claude/settings.json`` / ``.codex/hooks.json`` /
+``.cursor/hooks.json`` shapes, and
 ``policy_md``'s marker string.
 
 Three independent opt-in installers exist (``dekko install claude``,
@@ -39,8 +40,10 @@ from pathlib import Path
 
 from dekko import selfcheck
 from dekko.analysis import ambiguous
+from dekko.integrations import cursor as cursor_mod
 from dekko.integrations import policy_md as policy_md_mod
 from dekko.integrations import hooks as hooks_mod
+from dekko.integrations import hooks_cursor
 from dekko.render import mapfile
 
 EXIT_OK = 0
@@ -947,6 +950,268 @@ def _collect_codex(root: Path) -> list[Finding]:
     return findings
 
 
+# --- Cursor ------------------------------------------------------------
+
+_CURSOR_APP = Path("/Applications/Cursor.app")
+_CURSOR_PLUGIN_FIX = "dekko install cursor"
+_CURSOR_MCP_FIX = "dekko install cursor --mcp-only"
+_CURSOR_OVERLAP_FIX = (
+    "remove one of the two, or turn off Cursor's Settings > Agents > "
+    "Third-Party Imports"
+)
+
+
+def _cursor_present() -> bool:
+    """Whether Cursor looks installed, so its rows are worth showing.
+
+    ``agent`` is too generic a name on its own, so it only counts when
+    it resolves into Cursor's install. A bare ``~/.cursor/`` outlives
+    an uninstalled Cursor and doesn't count either.
+    """
+    if shutil.which("cursor-agent") or shutil.which("cursor"):
+        return True
+
+    agent = shutil.which("agent")
+    if agent and "cursor-agent" in str(Path(agent).resolve()):
+        return True
+
+    if sys.platform == "darwin" and _CURSOR_APP.is_dir():
+        return True
+
+    return cursor_mod.local_plugin_dir().is_dir()
+
+
+def _command_resolves(command: object) -> bool:
+    """Whether an MCP ``command`` names an executable that exists."""
+    if not isinstance(command, str) or not command:
+        return False
+
+    if os.path.isabs(command):
+        return os.path.isfile(command) and os.access(command, os.X_OK)
+
+    return shutil.which(command) is not None
+
+
+def _mcp_command(path: Path) -> tuple[bool, object]:
+    """Whether ``path`` has a dekko MCP server, and its ``command``."""
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, None
+
+    servers = config.get("mcpServers") if isinstance(config, dict) else None
+    server = servers.get("dekko") if isinstance(servers, dict) else None
+    if not isinstance(server, dict):
+        return False, None
+
+    return True, server.get("command")
+
+
+def _check_cursor_plugin() -> Finding:
+    """Whether dekko's local Cursor plugin copy is there and current."""
+    name = "cursor-plugin"
+    dest = cursor_mod.local_plugin_dir()
+    if not dest.exists():
+        return Finding(
+            name,
+            "missing",
+            f"no dekko Cursor plugin in {dest}",
+            _CURSOR_PLUGIN_FIX,
+        )
+    manifest = cursor_mod.read_plugin_manifest(dest)
+    if manifest is None or manifest.get("name") != cursor_mod.PLUGIN_NAME:
+        return Finding(
+            name, "unknown", f"{dest} holds a plugin dekko didn't install"
+        )
+    version = manifest.get("version")
+    if version != _running_version():
+        return Finding(
+            name,
+            "stale",
+            f"plugin copy in {dest} is version {version}, but this dekko "
+            f"is {_running_version()}",
+            _CURSOR_PLUGIN_FIX,
+        )
+    _found, command = _mcp_command(dest / "cursor.mcp.json")
+    if not _command_resolves(command):
+        return Finding(
+            name,
+            "stale",
+            f"the plugin's MCP command {command!r} doesn't resolve to an "
+            "executable",
+            _CURSOR_PLUGIN_FIX,
+        )
+
+    return Finding(name, "ok", f"plugin {version} installed in {dest}")
+
+
+def _check_cursor_mcp(root: Path, plugin: Finding) -> Finding:
+    """Whether Cursor can start dekko's MCP server in this project."""
+    name = "cursor-mcp"
+    for path in (
+        cursor_mod.mcp_config_path(root),
+        cursor_mod.cursor_home() / "mcp.json",
+    ):
+        found, command = _mcp_command(path)
+        if not found:
+            continue
+        if _command_resolves(command):
+            return Finding(name, "ok", f"dekko MCP server in {path}")
+        return Finding(
+            name,
+            "stale",
+            f"dekko's MCP command {command!r} in {path} doesn't resolve "
+            "to an executable",
+            _CURSOR_MCP_FIX,
+        )
+
+    if plugin.status == "ok":
+        return Finding(name, "ok", "dekko MCP server comes with the plugin")
+
+    return Finding(
+        name,
+        "missing",
+        "no dekko MCP server in the project or global Cursor mcp.json",
+        _CURSOR_MCP_FIX,
+    )
+
+
+def _check_cursor_policy(root: Path) -> Finding:
+    """Whether a policy file Cursor always reads has the dekko block."""
+    name = "cursor-policy"
+    for file_key in ("agents", "claude"):
+        path = policy_md_mod.policy_path(root, file_key)
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if policy_md_mod._find_block(text) is not None:
+            return Finding(name, "ok", f"usage-policy block present in {path}")
+
+    return Finding(
+        name,
+        "missing",
+        "no dekko usage-policy block in AGENTS.md or CLAUDE.md",
+        "dekko install agents-md",
+    )
+
+
+def _cursor_hook_entry(bucket: object, event: str) -> dict | None:
+    """dekko's entry for ``event`` in a Cursor hooks bucket, if any."""
+    if not isinstance(bucket, list):
+        return None
+    command = f"{hooks_mod._HOOK_COMMAND_PREFIX}{event}"
+    for entry in bucket:
+        if not isinstance(entry, dict):
+            continue
+        for cmd in hooks_mod._entry_commands(entry):
+            if cmd == command or cmd.startswith(f"{command} "):
+                return entry
+
+    return None
+
+
+def _check_cursor_hooks(root: Path) -> list[Finding]:
+    """One row per Cursor hook event, read from ``.cursor/hooks.json``."""
+    path = hooks_mod.settings_path(root, "cursor")
+    hooks_by_event = hooks_mod._load_settings(path).get("hooks", {})
+    if not isinstance(hooks_by_event, dict):
+        hooks_by_event = {}
+    findings = []
+    events = hooks_cursor.CURSOR_EVENTS.items()
+    for event, (cursor_event, matcher) in events:
+        name = f"cursor-hook:{event}"
+        entry = _cursor_hook_entry(hooks_by_event.get(cursor_event), event)
+        if entry is None:
+            findings.append(
+                Finding(
+                    name,
+                    "missing",
+                    f"{event} hook not installed for Cursor",
+                    f"dekko hooks install --agent cursor --enable {event}",
+                )
+            )
+            continue
+        strict = "--strict" in str(entry.get("command", "")).split()
+        expected = hooks_mod._entry(
+            event, matcher, strict=strict, agent="cursor"
+        )
+        if entry != expected:
+            findings.append(
+                Finding(
+                    name,
+                    "stale",
+                    f"{event} entry in {path} differs from what this "
+                    "dekko writes",
+                    "dekko hooks uninstall --agent cursor, then dekko hooks "
+                    f"install --agent cursor --enable {event}",
+                )
+            )
+            continue
+        findings.append(Finding(name, "ok", f"{event} hook wired"))
+
+    return findings
+
+
+def _cursor_hooks_installed(root: Path) -> bool:
+    """Whether ``.cursor/hooks.json`` under ``root`` has dekko hooks."""
+    path = hooks_mod.settings_path(root, "cursor")
+    hooks_by_event = hooks_mod._load_settings(path).get("hooks", {})
+    if not isinstance(hooks_by_event, dict):
+        return False
+
+    return any(
+        isinstance(entry, dict) and hooks_mod._is_dekko_entry(entry)
+        for bucket in hooks_by_event.values()
+        if isinstance(bucket, list)
+        for entry in bucket
+    )
+
+
+def _check_cursor_overlap(root: Path, plugin: Finding) -> Finding:
+    """Whether Cursor loads dekko twice through its Claude Code import."""
+    name = "cursor-claude-overlap"
+    doubles = []
+    if (
+        plugin.status in ("ok", "stale")
+        and cursor_mod.claude_plugin_installed()
+    ):
+        doubles.append(
+            "the dekko Claude Code plugin and the Cursor plugin are both "
+            "installed (skills and MCP server load twice)"
+        )
+    if hooks_mod._claude_hooks_installed(root) and _cursor_hooks_installed(
+        root
+    ):
+        doubles.append(
+            "dekko hooks are in both .claude/settings.json and "
+            ".cursor/hooks.json (context arrives twice)"
+        )
+    if doubles:
+        return Finding(
+            name,
+            "advisory",
+            "Cursor imports Claude Code setups: " + "; ".join(doubles),
+            _CURSOR_OVERLAP_FIX,
+        )
+
+    return Finding(name, "ok", "no doubled dekko setup from Claude Code")
+
+
+def _collect_cursor(root: Path) -> list[Finding]:
+    """Cursor rows, shown only when Cursor looks installed."""
+    if not _cursor_present():
+        return []
+    plugin = _safe("cursor-plugin", _check_cursor_plugin)[0]
+    findings = [plugin]
+    findings += _safe("cursor-mcp", lambda: _check_cursor_mcp(root, plugin))
+    findings += _safe("cursor-policy", lambda: _check_cursor_policy(root))
+    findings += _safe("cursor-hooks", lambda: _check_cursor_hooks(root))
+    findings += _safe(
+        "cursor-claude-overlap",
+        lambda: _check_cursor_overlap(root, plugin),
+    )
+
+    return findings
+
+
 def _safe(
     name: str, check: Callable[[], "Finding | list[Finding]"]
 ) -> list[Finding]:
@@ -998,6 +1263,7 @@ def collect(root: Path) -> list[Finding]:
     findings += _safe("hooks", lambda: _check_hooks(root))
     findings += _safe("claude-md-policy", lambda: _check_claude_md(root))
     findings += _safe("codex", lambda: _collect_codex(root))
+    findings += _safe("cursor", lambda: _collect_cursor(root))
     findings += _safe("json-backend", _check_json_backend)
     return findings
 
