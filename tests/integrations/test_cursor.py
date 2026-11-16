@@ -354,8 +354,10 @@ def test_install_mcp_is_idempotent(tmp_path: Path, on_path: None) -> None:
 
     cursor.install_mcp(tmp_path, force=False)
 
-    assert cursor.mcp_config_path(tmp_path).read_bytes() == first
-    assert first.endswith(b"}\n")
+    path = cursor.mcp_config_path(tmp_path)
+    assert path.read_bytes() == first
+    # Text mode writes the platform's line ending (CRLF on Windows).
+    assert path.read_text(encoding="utf-8").endswith("}\n")
 
 
 def test_install_mcp_tells_the_user_to_approve_it(
