@@ -9,6 +9,13 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.10.0b1] - 2026-11-16
+
+A test build of the new `dekko install` command and the Codex and Cursor
+support below, so they can be tried before 1.10.0 ships. pip and uv skip
+pre-releases unless asked, so install it with `pip install --pre dekko`
+or pin `dekko==1.10.0b1`. It isn't listed on the MCP Registry.
+
 ### Added
 - **`dekko install <target>` / `dekko uninstall <target>`.** One
   command family wires dekko into every client it supports, instead
