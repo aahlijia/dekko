@@ -90,8 +90,10 @@ def test_an_extra_constructor_is_picked_by_its_count(tmp_path: Path) -> None:
     )
     use = f"{_PKG}/Use.java::Use"
     host = f"{_PKG}/Host.java::Host"
-    assert _callees(graph, f"{use}.one") == {host, f"{host}.Host#2"}
-    assert _callees(graph, f"{use}.two") == {host, f"{host}.Host"}
+    # The declared constructor keeps ``Host.Host``, the id it had
+    # before the header was a symbol; the canonical one is ``#2``.
+    assert _callees(graph, f"{use}.one") == {host, f"{host}.Host"}
+    assert _callees(graph, f"{use}.two") == {host, f"{host}.Host#2"}
 
 
 def test_two_constructors_of_one_count_are_a_tie(tmp_path: Path) -> None:

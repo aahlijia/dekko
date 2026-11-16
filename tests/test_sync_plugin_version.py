@@ -1,7 +1,7 @@
 """Tests for scripts/sync_plugin_version.py.
 
-The script runs against a temp copy of pyproject.toml + the two
-Claude Code plugin manifests (never the real repo files) so it's
+The script runs against a temp copy of pyproject.toml + the plugin
+manifests (never the real repo files) so it's
 tested the same way the ``sync-plugin-version`` pre-commit hook and a
 deliberate version bump would exercise it: as a standalone process
 with its own ``ROOT`` resolved from its own location on disk.
@@ -21,6 +21,8 @@ SCRIPT = (
 
 PLUGIN_JSON = "integrations/claude/.claude-plugin/plugin.json"
 MARKETPLACE_JSON = "integrations/claude/.claude-plugin/marketplace.json"
+CODEX_JSON = "integrations/claude/.codex-plugin/plugin.json"
+CURSOR_JSON = "integrations/claude/.cursor-plugin/plugin.json"
 
 
 def _make_repo(tmp_path: Path, *, pyproject: str, manifests: str) -> Path:
@@ -29,7 +31,7 @@ def _make_repo(tmp_path: Path, *, pyproject: str, manifests: str) -> Path:
     Args:
         tmp_path: Pytest's per-test temp directory.
         pyproject: Version to write into pyproject.toml.
-        manifests: Version to write into both plugin manifests.
+        manifests: Version to write into every plugin manifest.
 
     Returns:
         The temp repo root (same directory as ``tmp_path``).
@@ -60,6 +62,17 @@ def _make_repo(tmp_path: Path, *, pyproject: str, manifests: str) -> Path:
         )
         + "\n"
     )
+    for client in (".codex-plugin", ".cursor-plugin"):
+        client_dir = tmp_path / "integrations" / "claude" / client
+        client_dir.mkdir(parents=True)
+        (client_dir / "plugin.json").write_text(
+            json.dumps(
+                {"name": "dekko", "version": manifests},
+                indent=2,
+            )
+            + "\n"
+        )
+
     return tmp_path
 
 
@@ -136,3 +149,29 @@ def test_bump_preserves_manifest_formatting(tmp_path: Path) -> None:
     plugin_text = (repo / PLUGIN_JSON).read_text()
     assert plugin_text.startswith('{\n  "name": "dekko"')
     assert plugin_text.endswith("}\n")
+
+
+def test_sync_keeps_the_codex_manifest_in_step(tmp_path: Path) -> None:
+    """Codex's manifest is synced and bumped with the Claude ones."""
+    repo = _make_repo(tmp_path, pyproject="0.43.5", manifests="0.43.3")
+
+    _run(repo)
+    synced = json.loads((repo / CODEX_JSON).read_text())["version"]
+    _run(repo, "0.44.0", "--no-lock")
+    bumped = json.loads((repo / CODEX_JSON).read_text())["version"]
+
+    assert synced == "0.43.5"
+    assert bumped == "0.44.0"
+
+
+def test_sync_keeps_the_cursor_manifest_in_step(tmp_path: Path) -> None:
+    """Cursor's manifest is synced and bumped with the others."""
+    repo = _make_repo(tmp_path, pyproject="0.43.5", manifests="0.43.3")
+
+    _run(repo)
+    synced = json.loads((repo / CURSOR_JSON).read_text())["version"]
+    _run(repo, "0.44.0", "--no-lock")
+    bumped = json.loads((repo / CURSOR_JSON).read_text())["version"]
+
+    assert synced == "0.43.5"
+    assert bumped == "0.44.0"

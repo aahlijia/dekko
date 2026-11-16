@@ -9,6 +9,943 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.10.0b1] - 2026-11-16
+
+A test build of the new `dekko install` command and the Codex and Cursor
+support below, so they can be tried before 1.10.0 ships. pip and uv skip
+pre-releases unless asked, so install it with `pip install --pre dekko`
+or pin `dekko==1.10.0b1`. It isn't listed on the MCP Registry.
+
+### Added
+- **`dekko install <target>` / `dekko uninstall <target>`.** One
+  command family wires dekko into every client it supports, instead
+  of a separate `--<client>-install` flag per client:
+  `dekko install claude` (the Claude Code plugin, or with
+  `--mcp-only` just the MCP server), `dekko install cline`
+  (`--scope`, `--config`, `--force`), and `dekko install claude-md`
+  (`--root`). `dekko install --help` lists every target. `--dry-run`
+  previews the `claude` target and is refused (exit 2) on the
+  file-editing ones; no target or an unknown one exits 2 with the
+  list. The old flags (`--claude-install`, `--mcp-install`,
+  `--cline-install`, `--claude-md-install` and their uninstall forms)
+  keep working as aliases of the same handlers, and `doctor`'s fix-it
+  hints and the docs now name the new commands.
+- **dekko ships as an OpenAI Codex plugin.** `dekko install codex`
+  registers the plugin bundled in the wheel with the `codex` CLI
+  (`codex plugin marketplace add`, then `codex plugin add
+  dekko@dekko`; an already-added marketplace is upgraded instead), and
+  `dekko uninstall codex` removes it; `--mcp-only` registers just the
+  MCP server through `codex mcp add`, and `--dry-run` prints the
+  commands. The bundle gains a `.codex-plugin/plugin.json` that Codex
+  reads ahead of the Claude manifest, pointing at the shared skills, a
+  `codex.mcp.json` with no `cwd` (Codex expands no `${VAR}` in it, so
+  Claude's `${CLAUDE_PROJECT_DIR}` would start the server in a
+  directory that doesn't exist; with no `cwd` it starts in the
+  session's), and four Codex-only skills, `dekko-map`, `dekko-impact`,
+  `dekko-doctor` and `dekko-sanity`, standing in for the slash
+  commands: Codex skips any plugin command that pre-runs a shell
+  command, which all four do. Every manifest path starts with `./`,
+  since Codex silently ignores one that doesn't, and a test holds
+  that. `scripts/sync_plugin_version.py` keeps the Codex manifest's
+  version in step, which is what makes Codex refresh its cached copy
+  on upgrade (refs #38).
+- **`dekko install agents-md` writes the usage policy into `AGENTS.md`.**
+  OpenAI Codex (and Cursor, Amp, Jules and others) read `AGENTS.md`
+  the way Claude Code reads `CLAUDE.md`, so the same agent-neutral
+  block now goes in either file, between the same markers, with the
+  same in-place update and byte-identical uninstall
+  (`dekko uninstall agents-md`). Writes go through a symlink instead of
+  replacing it, so a repo whose `CLAUDE.md` links to `AGENTS.md` gets
+  one block whichever target runs. After the install, dekko warns when
+  Codex won't see the block: a root `AGENTS.md` over Codex's default
+  32 KiB `project_doc_max_bytes` (Codex cuts the end of the file, where
+  the block sits), or a root `AGENTS.override.md`, which Codex reads
+  instead. The `claude_md` module is now `policy_md` (refs #38).
+- **dekko's hooks work in OpenAI Codex.** `dekko hooks install|uninstall|run`
+  take `--agent codex`, which writes `.codex/hooks.json` (the same
+  `{"hooks": {...}}` shape as Claude's settings) with `session-start`,
+  `prompt-submit` and `pre-bash`. `pre-read` isn't offered, since Codex
+  reads files through the shell and `pre-bash` covers that. Codex has no
+  `"ask"`, so `pre-bash` there adds the dekko-equivalent command as
+  context and lets the command run; `--strict` denies it. The
+  `session-start` handler raises Codex's `additionalContextLimit` to
+  20,000 tokens so the lean map isn't spilled to a file at Codex's
+  2,500 default. The install stops when `.codex/config.toml` already
+  defines a `[hooks]` table, and says that Codex will ask to review each
+  new or changed hook. Every output Codex receives is checked against
+  Codex's own hook schemas, vendored under `tests/fixtures/codex/`,
+  since Codex drops a hook's context when its output carries an unknown
+  key (refs #38).
+- **`dekko doctor` checks the Codex install.** When Codex is installed
+  (`codex` on `$PATH`, or `$CODEX_HOME/plugins/cache/`; a leftover
+  `~/.codex/` alone doesn't count), doctor adds rows for the plugin
+  (installed, enabled, and at this dekko's version, since Codex only
+  refreshes its cached copy on a version change), the `dekko` MCP
+  server (read from `codex mcp list --json`, which includes
+  plugin-provided servers), the `AGENTS.md` policy block (flagged when
+  a root `AGENTS.override.md` shadows it or the file is past Codex's
+  32 KiB default), and each Codex hook. A hook entry that differs from
+  what this dekko writes is `stale`, because Codex reads a changed hook
+  as modified and stops running it; on Python 3.11+ doctor also reports
+  whether Codex has a trust record for each hook yet (refs #38).
+- **dekko ships as a Cursor plugin.** `dekko install cursor` copies
+  the plugin bundled in the wheel into `~/.cursor/plugins/local/dekko/`
+  (Cursor has no command that installs one plugin from disk), pins the
+  copy's MCP server to the resolved `dekko` executable so an IDE
+  started from the Dock still finds it, and never replaces a symlink or
+  another plugin there; the copy is staged beside the old one and
+  swapped in at the end. `dekko uninstall cursor` removes it.
+  `--mcp-only` merges just the MCP server into a project's
+  `.cursor/mcp.json` (`--root`, `--force`), keeping other servers. The
+  bundle gains a `.cursor-plugin/plugin.json`, which Cursor reads ahead
+  of the Claude manifest, naming the shared skills and the four
+  command-skills, turning off Cursor's command discovery (the Claude
+  commands pre-run a shell command, which Cursor doesn't do), and
+  pointing at a `cursor.mcp.json` that passes
+  `--root ${workspaceFolder}`. Every skill's `name` now matches its
+  folder and its description stays within Cursor's 1,024 characters;
+  the manifest is checked against Cursor's published schema, vendored
+  under `tests/fixtures/cursor/` (refs #39).
+- **Hooks answer Cursor in Cursor's format.** A hook payload carrying
+  Cursor's `cursor_version` key, or `--agent cursor`, gets Cursor's
+  flat per-event answer instead of Claude's `hookSpecificOutput`.
+  Cursor runs the hooks in `.claude/settings.json` on its own and
+  blocks a permission hook whose output it can't read, so this keeps a
+  Claude Code install harmless inside Cursor; the environment never
+  decides it, so Claude Code started from Cursor's terminal still gets
+  Claude's format. A miss prints nothing, as before. `dekko hooks
+  install --agent cursor` writes flat entries with a 60-second timeout
+  to `.cursor/hooks.json`, keeps the user's entries and `version`, and
+  warns when `.claude/settings.json` already has dekko hooks (Cursor
+  would run both). Native `pre-bash` asks (denies under `--strict`);
+  an imported one, which arrives on Cursor's general tool hook, stays
+  silent unless `--strict` denies, since that hook can't ask and an
+  `allow` could approve a whole compound command. A hook fired by an
+  event it doesn't belong to says nothing.
+  Cursor's session-start context stays under 9,500 characters (Cursor
+  drops it past 10,000), with a "run `dekko lean --budget N`" note when
+  even the narrowest map won't fit (refs #39).
+- **`dekko doctor` checks the Cursor install.** When Cursor is
+  installed (`cursor-agent` or `cursor` on `$PATH`, an `agent` that
+  resolves into Cursor's install, `/Applications/Cursor.app`, or
+  dekko's own plugin copy; a leftover `~/.cursor/` alone doesn't
+  count), doctor adds rows for the plugin copy (dekko's, current, with
+  a resolvable MCP command), the MCP server, the usage-policy block in
+  `AGENTS.md` or `CLAUDE.md`, each hook in `.cursor/hooks.json`, and an
+  advisory when Cursor's import of Claude Code setups loads dekko twice
+  (refs #39).
+
+### Changed
+- **The skills, usage policy and session preamble read the same to any
+  agent.** They named Claude Code's tool spellings
+  (`mcp__plugin_dekko_dekko__*`, the Read tool, Bash) and promised that
+  a broad grep "will pause for confirmation", which only Claude Code's
+  `ask` does. They now name dekko's MCP tools by bare name ("your
+  client prefixes them"), point line-ranged reads at either a Read
+  tool or `sed -n` in a shell, and say a broad grep may be flagged,
+  paused or blocked. Skill descriptions only gained wording (the
+  `spawn_agent` / `codex exec` dispatch, shell reads); every phrase
+  they matched on before is still there, so Claude Code picks them as
+  often as it did. The plugin and marketplace listings no longer say
+  "for Claude Code". A new guard test keeps client-only text out of
+  this guidance and holds each description's trigger phrases in place.
+  `dekko-orient` and `dekko-delegate` also say how Cursor calls the MCP
+  tools (one generic tool, server `dekko`), and `dekko-delegate`'s
+  description names scripted `agent -p` runs.
+- **`pre-bash` leaves line-ranged reads alone.** It judged a
+  `cat`/`head`/`sed` by the whole file's size, so `--strict` denied
+  `sed -n '1,120p' hooks.py` as an ~8,300-token read, while
+  `nl -ba hooks.py | sed -n '600,660p'` went unseen. A read of at most
+  200 lines (`sed -n 'A,Bp'`, `head -n N`, or any read piped into one)
+  now never matches; a longer range is costed by the lines it prints;
+  `nl` counts as a read. Line-ranged reads are what dekko's own skills
+  recommend, and on Codex, which has no Read tool, `sed -n` is how they
+  happen.
+
+## [1.9.35] — 2026-10-14
+
+### Fixed
+- **JS/TS `#private` fields type the calls made through them.** A
+  `#x` field was never recorded as a field, and the receiver walk
+  couldn't split `this.#disk` into segments, so `this.#disk.append(..)`
+  fell back to the name ladder: a tie with every other `append` in
+  the repo, or a call nobody owned. A `#x` field (`#disk:
+  DiskTaskOutput | null`, `#bus = new Bus()`) is now a field named
+  `#x`, and `this.#x.m(..)` / `this.#x?.m(..)` walk through its type
+  like any other field. claude-code: +7 edges at 11 sites, none lost,
+  ambiguous rows 2,125 -> 2,112 (`Map`/`Set` fields now go external);
+  `StreamWrapper.cleanup` gets its two callers and leaves `unused`
+  (1,287 -> 1,286, none new). cline: no change.
+
+## [1.9.34] — 2026-10-14
+
+### Fixed
+- **JS/TS `#private` methods are symbols now.** tree-sitter names a
+  `#x` member with its own node type, which no definition query
+  asked for, so `static #output(..)` in cline's `Logger` was never a
+  symbol: `Logger.error` and the other five log methods showed no
+  callees, the calls inside `#output` were credited to the class, and
+  `query symbol` found nothing. A `#x` method is now a symbol named
+  `#x` (the `#` kept, since `#x` and `x` are different members), is
+  never part of an exported class's public surface, and `this.#x(..)`
+  / `C.#x(..)` resolve to it. A `#x` read in its own file
+  (`this.#onExit.bind(this)`) counts as a use in `unused`, since a
+  private name is reachable only inside its class. The resolve cache
+  reads `#x` as the name of an id like `C.#x` (it used to read an
+  empty name, so a cached edge into one never went stale), and
+  `sanity` quotes the grep command it prints, so a pasted `#x`
+  pattern isn't read as a shell comment. claude-code: 26 new symbols,
+  +50 / -18 edges (the 24 lost sites moved into the `#method` that
+  makes them), `unused` 1,288 -> 1,287 with none new; cline:
+  `Logger.#output` has its 6 callers.
+
+## [1.9.33] — 2026-10-14
+
+### Fixed
+- **A JS/TS call on a parameter typed outside the repo no longer lands
+  on the repo's one method of that name.** Nothing read a plain
+  parameter's declared type, so `signal.throwIfAborted()` on `signal:
+  AbortSignal` reached cline's `AgentRuntime.throwIfAborted`, and a
+  pino `logger.debug(..)` reached the extension's `Logger.debug`. A
+  parameter whose type is outside the repo now sends its calls
+  external; one typed in the repo, untyped or generic is read as
+  before. The walk can't tell a script file's global repo type from
+  an outside one, so a type that names a repo type the file doesn't
+  import, or a path off an in-repo import, keeps today's reading.
+  A call chained off a bare call the file imports (`getSeg().segment(
+  x)`) is read by the imported function's declared return type, in
+  that function's own file, so `getGraphemeSegmenter().segment(..)`
+  (an `Intl.Segmenter`) no longer reaches claude-code's
+  `HighlightSegmenter.segment`, and `getProviderSettingsManager()
+  .getProviderSettings(..)` reaches its method. Two test doubles the
+  old edges reached by name now go external too (a vscode `Uri` stub
+  and a mocked `getStyle`). claude-code: -22 caller -> callee pairs
+  (-23 sites; `HighlightSegmenter.segment` 15 -> 0), ambiguous rows
+  2,152 -> 2,124; cline: -13 / +11 pairs (-25 / +13 sites), ambiguous
+  rows 3,132 -> 3,079; `unused` unchanged on both.
+
+## [1.9.32] — 2026-10-14
+
+### Fixed
+- **A TS field typed with a utility type, a union or a type query no
+  longer reads as a type outside the repo.** The receiver walk took
+  `Pick<Svc, "run">`, `Partial<Svc>` and `Readonly<Svc>` by their
+  outer name, which no repo type has, so calls through such a field
+  went external: cline's `this.options.rebuilds.request(..)` on a
+  `Pick<SdkSessionRebuildScheduler, "request">` reached nothing. Those
+  utility types (and `Required`, `NonNullable`, `Omit`, `NoInfer`) are
+  now read as their first argument. A union drops its
+  `null`/`undefined` members and is outside only when every member is
+  (`string | Buffer`), so `Error | ClineError` no longer is. A type the
+  walk can't compute (`typeof x`, `typeof import('..')`, `keyof`, an
+  indexed access, `ReturnType<..>`) is unknown rather than outside, and
+  the name ladder takes the call as it does for an untyped receiver.
+  claude-code: +4 caller -> callee pairs (+5 sites, the lazy
+  `typeof import(..)` thunks); cline: +6 pairs (+6 sites); nothing
+  lost on either.
+
+## [1.9.31] — 2026-10-14
+
+### Fixed
+- **A JS/TS call on a literal or a standard global no longer lands on
+  a repo method.** `Math.max(..)`, `Promise.all(..)`, `Date.now()`,
+  `console.log(..)`, `process.stdout.write(..)`, `'a'.split(..)` and
+  `/re/.exec(..)` call the language's or the host's own objects, but
+  the noise guard that knew some of them ran after the same-file rung
+  and missed the rest, so the repo's one method of the name took them:
+  claude-code's `FileStateCache.max` had 22 callers, all `Math.max`,
+  and `Date.now()` in `ClockContext.tsx` landed on that file's own
+  `now`. Such a call is now external before any lookup, unless the
+  file binds the name itself (a parameter, a local, an import, a
+  same-file symbol) or the repo declares a JS/TS type of that name.
+  claude-code: -31 caller -> callee pairs (-31 sites), every lost one
+  wrong; cline: -30 pairs (-41 sites), ambiguous rows 3,464 -> 3,132
+  (`Object.keys(..)` and `/re/.test(..)` no longer tie repo methods).
+
+## [1.9.30] — 2026-10-14
+
+### Fixed
+- **A bare JS/TS call no longer lands on a class method.** In
+  JavaScript and TypeScript a method (a class member, an object-literal
+  method, an interface member) is only reachable through a receiver; a
+  bare `f()` names a local, a parameter, an import or a module-level
+  function. The ladder didn't know that, so a `useState` setter called
+  `setError` took claude-code's one `AwsAuthStatusManager.setError`
+  (60 sites in 21 files), a `useContext` binding `writeRaw` took
+  `Ink.writeRaw`, and `getSessionId()` inside `QueryEngine` took the
+  class's own `getSessionId` method instead of the function the file
+  imports. A bare JS/TS call's candidates now leave methods out; a
+  renamed import still resolves through its alias, and Java/Kotlin
+  bare calls, which do name the enclosing class's members, are
+  unchanged. claude-code: -43 / +2 caller -> callee pairs (-106 / +17
+  sites), the 15 `getSessionId()` calls now on `bootstrap/state.ts`;
+  cline: -18 pairs (-22 sites), ambiguous rows 3,484 -> 3,464 (local
+  `unsubscribe()` calls no longer tie two adapters' methods).
+
+## [1.9.29] — 2026-10-14
+
+### Fixed
+- **A Rust std method call on an untyped value no longer lands on the
+  repo's one method of that name.** `get_mut`, `contains_key`,
+  `to_path_buf`, `len_utf8`, `random_range`, `random_bool` and
+  `saturating_add` each have exactly one in-repo owner in zed, so a
+  call on an untyped `let`, a closure parameter or a call result took
+  it by name: `HashMap`/`serde_json` maps on `WatchPaths.get_mut` and
+  sum_tree's `TreeMap.contains_key`, `Path` values on
+  `SanitizedPath.to_path_buf`, `char`s on `WrapBoundaryCandidate.
+  len_utf8`, rand RNGs on the scheduler's `SharedRng`. These names now
+  join the Rust std list the noise guard reads, for `.rs` calls only
+  (they are ordinary method names elsewhere); a typed receiver, an
+  exact `self` and a same-file pick still resolve. zed: -608 caller ->
+  callee pairs (-866 sites), none gained; `WatchPaths.get_mut` 206 ->
+  5 sites, `TreeMap.contains_key` 214 -> 2, `SanitizedPath.
+  to_path_buf` 243 -> 3; `unused` unchanged. `abs` stays off the list:
+  gpui's `Pixels.abs` has real callers through untyped values, so its
+  86 sites, mostly float arithmetic, remain.
+
+## [1.9.28] — 2026-10-14
+
+### Fixed
+- **A Rust method call can't land in a crate its own crate doesn't
+  depend on.** A value of a type only exists in a crate whose
+  dependency graph contains the type's crate, but a dot-call was
+  matched by name repo-wide, so the `http` crate's
+  `Request::builder().header(..)` chains landed on `extension_api`'s
+  `HttpRequestBuilder.header/body/method` (222 sites) from crates that
+  never depend on it, and `ExitStatus::code()` on `anthropic`'s
+  `ApiError.code`. A dot-call's pick, and each candidate an ambiguous
+  row keeps, now has to live in the caller's crate or one it reaches
+  through its `Cargo.toml` dependencies, dev and build ones included;
+  a pick ruled out is retried like a call that can't take the
+  argument count. A file's crate is its nearest manifest, two
+  manifests declaring one name are both reached, and a file under no
+  crate isn't judged. Adding a dependency now changes the resolve
+  cache's Cargo digest, so the next map re-resolves. zed: -452 caller
+  -> callee pairs (-549 sites), +3, ambiguous rows 73,448 -> 73,587
+  (picks ruled out that now tie among reachable candidates); `unused`
+  gains only the agent eval fixture's copy of
+  `Entity.resolve_inlay_hint`, whose caller now reaches the real
+  `LspStore`. Two `stdio_transport.rs` channel sends still land on the
+  same file's `StdioTransport.send`.
+
+## [1.9.27] — 2026-10-14
+
+### Fixed
+- **A Rust method call on a parameter typed outside the repo is
+  external.** `rng.random_range(0..9)` on `mut rng: StdRng` can only be
+  rand's, but nothing read a parameter's type that named no repo type,
+  so the ladder handed the call to the repo's one `random_range`
+  (zed's test scheduler `SharedRng`). A dot-call on a typed parameter
+  is now walked from the parameter's type, and an outside type sends
+  it external; an in-repo type still leaves it to the usual rungs. It
+  holds back where the outside reading may be wrong: a `Self` type, a
+  method a repo trait can bring to an outside value (`impl HiLoWord
+  for LPARAM`), and an outside import that shares its name with a repo
+  type (a `use` inside `mod tests` is still recorded for the whole
+  file). A `module::f(..)` path call whose head shares a parameter's
+  name is not judged. zed: -251 caller -> callee pairs (-574 sites),
+  external +1,951 sites, ambiguous rows 74,350 -> 73,448;
+  `SharedRng.random_range` loses 359 wrong callers and `random_bool`
+  68. `unused` 9,851 -> 9,853: `MultiBufferOffsetUniformSampler.sample`
+  and `RsaRngCompat.next_u32` lost only `rng` calls on rand values.
+  Rust records no local bindings, so a local that shadows a parameter
+  (`let primitive = primitive.into()` on `primitive: impl
+  Into<Primitive>`) is still read as the parameter: about 8 right
+  sites on zed go external with the wrong ones.
+
+## [1.9.26] — 2026-10-14
+
+### Fixed
+- **A Rust field typed by a `type` alias is read through to what the
+  alias names.** zed's `collections` crate is `pub type HashMap<K, V> =
+  FxHashMap<K, V>;`, and almost every crate imports that `HashMap`, so
+  `self.terminals.get_mut(&id)` on a `HashMap` field asked the walk
+  about a name it couldn't see into, and the ladder handed the call to
+  the repo's one `get_mut` (`WatchPaths.get_mut`). The walk now reads
+  an alias's target in the alias's own file: an alias of an outside
+  type is outside (the call goes external), an alias of a repo type is
+  that type (`type WrapPatch = Patch<u32>` reaches `Patch.compose`),
+  and aliases of one name in different crates count only when they
+  agree. `RwLock` and `RefCell` are now transparent like `Mutex`, so
+  `self.state.read().glyph_for_char(..)` and `self.keymap.borrow_mut()
+  .add_bindings(..)` reach the type inside. zed: +95 / -181 caller ->
+  callee pairs (+104 / -249 sites), external +1,114 / -64, ambiguous
+  rows 75,053 -> 74,350; `WatchPaths.get_mut` loses 139 wrong callers
+  and `TreeMap.contains_key` 53, every lost site read a `HashMap`,
+  `HashSet` or `IndexMap` field. `unused` 9,879 -> 9,851. A
+  `.clone()` on an `Option`/`Rc` around a `RefCell<T>` now reads as
+  `T`'s `clone` (3 sites), as one on `Rc<T>` already did.
+
+## [1.9.25] — 2026-10-14
+
+### Fixed
+- **A Java call chain that starts at a receiver declared outside the
+  repo stays outside.** `ds.getConnection().getMetaData().getURL()` on
+  a `DataSource ds` asks JDBC for a connection and then its metadata,
+  but past the first hop the walk only knew "outside, something", so
+  the ladder handed the last call to the repo's one `getURL`
+  (`OriginTrackedResource.getURL`), and `context.getEnvironment()
+  .getProperty(..)` to a test class's own `getProperty`. Java's types
+  are nominal, so a chain off a local, parameter, field or `this.x`
+  declared with an outside type is now external, when every call
+  before the last takes no arguments (a generic `template.findOne(q,
+  Entry.class)` can hand back a repo type) and the type names no
+  in-repo type argument (`Optional<Repo>.get()` does). Kotlin chains
+  are unchanged. spring-boot: -131 caller -> callee pairs at 158
+  sites, every one read wrong before (Flyway's `Configuration`,
+  Spring's `Environment`, `Stream.map`, Tomcat's `ProtocolHandler
+  .stop`); ambiguous rows 24,535 -> 22,967 (`webTestClient.get().uri
+  (..)` alone was 518), all now external; `unused` 1,740 -> 1,742
+  (`JavaConventions.apply`/`KotlinConventions.apply`, which Gradle
+  calls, lost their only callers, `project.getPlugins().apply(..)`),
+  `sanity --all` unchanged, map 26 s -> 27 s.
+
+## [1.9.24] — 2026-10-14
+
+### Fixed
+- **A Java or Kotlin call on a parameter takes the method of the type
+  the parameter is declared with, own or inherited.** The typed-
+  parameter rung read only the type's own name, so `server.setPort
+  (9000)` on a `ConfigurableReactiveWebServerFactory server` missed the
+  `setPort` its in-repo superinterface declares, and `context.getBean
+  (..)` on an in-repo test interface extending Spring's
+  `ApplicationContext` never read as external; the ladder then tied
+  every `setPort` or `getBean` in the repo. A parameter is now walked
+  from its declared type ahead of that rung, as a field or a local is:
+  one member is the edge, same-count overloads stay an ambiguous row
+  among that type's methods, and a method only an outside supertype can
+  declare is external. A parameter whose type the walk can't read keeps
+  the rung. spring-boot: +718 caller -> callee pairs at 820 sites, -30
+  (every lost pair read moved to the declared type's method, a tie
+  among its overloads, or external for a type parameter bounded by an
+  outside type), ambiguous rows 25,207 -> 24,535, `unused` 1,778 ->
+  1,740 with none new, `sanity --all` unchanged, map 26.8 s -> 26.7 s.
+
+## [1.9.23] — 2026-10-14
+
+### Fixed
+- **A Java call on a local takes the method of the type the local is
+  declared with.** `Health health = lookup(); health.getStatus()`
+  can only call `Health`'s `getStatus` (or one `Health` inherits), but
+  nothing read a local's declared type: the ladder saw every
+  `getStatus` in the repo and left an ambiguous row, or picked the
+  caller's own same-named method. The type's own and inherited members
+  now decide, as they do for a field: one is the edge, same-count
+  overloads stay an ambiguous row among that type's methods only, and
+  a method only an outside supertype can declare (`environment.
+  getProperty(..)` on a class extending Spring's
+  `StandardEnvironment`) is external. A local declared with an outside
+  interface but built right there by an in-repo class (`Resource res =
+  new OriginTrackedResource(..)`) is walked as that class. spring-boot:
+  +8,083 caller -> callee pairs, -131 (every lost edge read was the
+  caller's own or a test double's same-named method, or a method from
+  an outside supertype), ambiguous rows 32,676 -> 25,207, `unused`
+  2,050 -> 1,778 with one new (its only caller now reaches the type it
+  meant), `sanity --all` unchanged, map 26.8 s -> 26.1 s.
+
+## [1.9.22] — 2026-10-14
+
+### Fixed
+- **The receiver walk reads a Java or Kotlin type name the way the
+  file does.** A type name used to mean the same-file type, else the
+  in-repo type of that name nearest by path, so `this.gradleBuild.
+  build()` in a file importing the test kit's `GradleBuild` tied with a
+  private nested `GradleBuild` in another file, and `Status status`
+  in a grpc file importing the health contributor `Status` read as the
+  module's own nested `GrpcServerHealthProperties.Status`. After the same-file types, which still
+  shadow an import of the same name, a single-type import now names
+  its type by fully qualified name (the nearest copy when one name is
+  in several modules), else a top-level type of the file's own
+  package. And `JsonWriter.Members<LogEvent>`, a nested path with type
+  arguments, is read as that nested type instead of `JsonWriter`.
+  spring-boot: +463 caller -> callee pairs at 544 call sites, 4 sites
+  in 2 callers moved to the type the file imports or shares a package
+  with, ambiguous rows 33,189 -> 32,676 (296 of the 298 `GradleBuild`
+  ties settled), `unused` 2,052 -> 2,050 with none new, `sanity --all`
+  unchanged.
+
+## [1.9.21] — 2026-10-14
+
+### Fixed
+- **A Java or Kotlin call the receiver walk typed keeps a common
+  method name.** `this.gradleBuild.build("x")` on a `GradleBuild`
+  field went external: the walk had read the field's type and handed
+  the ladder only `GradleBuild`'s own `build` overloads, but the
+  guard that sends `build`, `parse`, `resolve`, `write` and other
+  common names external still fired. That guard is for picks made on
+  the name alone, so it no longer overrules a typed narrowing in a
+  JVM file; an untyped receiver still meets it. spring-boot: +196
+  caller -> callee pairs at 212 call sites, all read right
+  (`RestTemplateBuilder.build`, `StandardConfigDataLocationResolver.
+  resolve`, `DurationStyle.parse`), and 204 calls that were external
+  are now ambiguous rows among in-repo candidates: 164 of them
+  between the imported test-kit `GradleBuild.build` and a private
+  nested `GradleBuild` in another file, the rest overload ties within
+  one type. `unused` 2,054 -> 2,052 with none new; `sanity --all`
+  unchanged.
+
+## [1.9.20] — 2026-10-14
+
+### Fixed
+- **A Java call on a parameter or local declared with an outside type
+  is external.** `config.getMaxRequestSize()` on a local
+  `MultipartConfigElement config` can only call the servlet API's
+  method, but nothing read a local's or a parameter's declared type,
+  so the ladder handed the call to the repo's lone
+  `getMaxRequestSize`, or left an ambiguous row when the repo had two
+  (`beanFactory.getBean(..)` on a Spring `BeanFactory`, `list.add(x)`,
+  `map.put(..)`, `sb.append(..)`). The extractor now records the type
+  a Java receiver's declaration writes when the receiver is a
+  parameter or a local, and a type that reads outside the repo sends
+  the call external, as a field of that type already did. That holds
+  for an outside interface an in-repo class implements: the declared
+  type is all the call site says. Kotlin parameters are read the same
+  way. An untyped declaration (`var`, a lambda parameter) and an
+  in-repo type leave the call as before. spring-boot: -1,109 caller
+  -> callee pairs at 1,217 call sites (`Object o; o.hashCode()` was
+  `ItemMetadata.hashCode`, `Thread t; t.start()` was
+  `NettyRSocketServer.start`), ambiguous rows 42,349 -> 32,985,
+  external call sites +14,579, `unused` 2,051 -> 2,054 (three methods
+  whose only callers were `List.size`, `HttpServletRequest` and Gradle
+  calls). About a dozen right edges go too, on a local declared with
+  an outside interface and built by an in-repo class (`provider =
+  new PropertiesChannelCredentialsProvider(..)`); the declared type
+  is what this reads.
+
+## [1.9.19] — 2026-10-14
+
+### Fixed
+- **A C++ member followed by a thread-safety annotation keeps its
+  name.** tree-sitter doesn't know `TF_LOCKS_EXCLUDED(mu_)` or
+  `ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_)` after a parameter list, so it
+  read the macro as the member's name: tensorflow had 644 symbols
+  called `X.TF_LOCKS_EXCLUDED`, `X.ABSL_EXCLUSIVE_LOCKS_REQUIRED#2`,
+  and the real `Lookup`, `ReportProcessingTime` or `add_input` never
+  existed, so every call to them went external or to a lone
+  same-named method elsewhere. The lock and guard annotations
+  (`*LOCK*`, `*GUARDED_BY*`, `*ACQUIRE*`, `*RELEASE*`, `*CAPABILITY*`,
+  `*THREAD_SAFETY*` under `TF_`/`ABSL_`) after a member's parameter
+  list, and the guards on a field (`size_t n_ TF_GUARDED_BY(mu_)`),
+  are blanked out before the parse, byte for byte, so lines and
+  offsets don't move. A `#define` body is left as written, and so are
+  other trailing macros (`TF_MUST_USE_RESULT`). C/C++ files
+  re-extract once. tensorflow: lock-named symbols 644 -> 0, call
+  sites +1,801 / -351 (the gains are the hidden methods' own callers,
+  `CrossTrainerCache.Get`, `AutoScaler.ReportProcessingTime`,
+  `model::Node.record_element`; the losses are moves to the right
+  method, std `.end()` calls now external, and new ties among
+  overloads the mask uncovered), ambiguous rows 131,851 -> 131,575,
+  `unused` 36,476 -> 35,973. `model::Node.add_input` now has 87 call
+  sites: 42 right, and 45 are protobuf `NodeDef` calls on an untyped
+  local or a chain (`auto n = graph.add_node(); n->add_input(..)`),
+  which no type rule can read yet.
+
+## [1.9.18] — 2026-10-14
+
+### Fixed
+- **A bare C++ type name no longer reads a type nested in some other
+  class.** protobuf's `NodeDef` isn't in the map, and the repo's only
+  `NodeDef` is tflite's `GraphFloat32::NodeDef`, so every `NodeDef*`
+  and `NodeDef` local read as that struct; it has no `set_op` or
+  `name`, so the call fell through to the repo's lone method of that
+  name (`node->set_op("Const")` on a test matcher's `set_op`,
+  `node->name()` on a grappler optimizer's `name()`). A type nested in
+  a class is now read by its bare name only where C++ can see it:
+  inside the class (a file defining it or its members), in a class
+  derived from it, or in a file holding a class defined out of line
+  (`class Op::Dataset : public Base`), whose bases the map can't read.
+  A name that then matches nothing reads as outside the repo, unless
+  the repo has members of an out-of-line member class of that name
+  (`ClientSession::Impl`), which stays open. tensorflow: -2,009 / +64
+  call sites (every lost site read was a protobuf call, wrong before;
+  about 45 of the gains are known by-name misreads such as tflite's
+  flatbuffer `Tensor` and `table::Iterator`), ambiguous rows 135,360
+  -> 131,851, `NodeMatcherProperties.set_op` 741 -> 79 sites,
+  `ConstantFolding.name` 369 -> 128, `unused` 36,471 -> 36,476 (10
+  new, each an optimizer `name()` or similar that lost only protobuf
+  callers).
+
+## [1.9.17] — 2026-10-14
+
+### Fixed
+- **An unqualified C++ type name is looked up from where it's
+  written.** `Status s;` in a `tensorflow::data` file read `Status` as
+  the nearest type of that name by file path, which was
+  `tensorflow::experimental::cc::Status`, so every `s.ok()` on an
+  `absl::Status` local landed on that class. A type name written
+  without a scope in front of it is now looked up in C++ order: a
+  `using ns::Name;` in the file, then a type of that name in the same
+  file, then the one in the innermost scope the file's own
+  definitions sit in. `Status` there is `tensorflow`'s alias of
+  `absl::Status`, so the call goes external; `node->name()` on a
+  `Node*` in a `tensorflow::` file reaches the graph's
+  `tensorflow::Node`, not `tensorflow::data::model::Node`. A name with
+  a scope in front of it (`model::Node`) keeps its by-path reading,
+  and when no visible scope declares the name (a `using namespace`
+  directive, which isn't read) the old pick stands. tensorflow: +592 /
+  -422 call sites (every lost site read was wrong before), ambiguous
+  rows 136,021 -> 135,360, `experimental.cc.Status.ok` 157 -> 19
+  callers, `unused` unchanged at 36,471.
+
+## [1.9.16] — 2026-10-14
+
+### Fixed
+- **A C++ `using`/`typedef` alias is read through to the type it
+  names.** dekko made no symbol for `using SumOpConstModel =
+  BaseConstOpModel<..>;` or `typedef Impl Handle;`, so a local or
+  parameter declared with an alias read as a type from outside the
+  repo, and its calls went external: tflite's op-model tests lost
+  `m.Invoke()`, `m.GetOutputShape()` and the rest. Aliases are symbols
+  now (kind `type_alias`, shown by `outline`, `search` and `query
+  symbol`), and the type walk reads one through to its target in the
+  alias's own file. An alias template's arguments replace its
+  parameters, so `AutoReleasePtr<TensorHandle>` (`std::unique_ptr<T,
+  AutoReleaser<T>>`) is a `TensorHandle`, and an alias of an outside
+  template (`using EdgeShapes = absl::flat_hash_map<..>`) is read as
+  that template. Only the type walk sees an alias: no call, reference,
+  heritage clause or member lookup lands on one, so a class's `typedef
+  X Ref;` doesn't catch `h->Ref()`. An alias in a source file is
+  visible only from that file, and one read by bare name only from a
+  file inside its scope, so a kernel's `typedef GPUDevice Device;`
+  doesn't retype `Device*` everywhere. `unused` never lists a C/C++
+  alias (the map records no C/C++ type use by name). Every C++ file
+  re-extracts once after the upgrade. tensorflow: 3,426 aliases, +981 /
+  -156 call sites (every lost site read was wrong before), ambiguous
+  rows 136,144 -> 136,021, `SingleOpModel.Invoke` 1,872 -> 1,999
+  callers, `unused` 36,581 -> 36,471.
+
+## [1.9.15] — 2026-10-14
+
+### Fixed
+- **A C++ class with a macro between `class` and its name is a class
+  again, and a deprecated alias parses as an alias.** tree-sitter took
+  `TF_LOCKABLE` in `class TF_LOCKABLE Sqlite : public RefCounted {`
+  for the class name and read the rest as a function, so there was no
+  `Sqlite` class and its methods hung off nothing. And
+  `using Status ABSL_DEPRECATE_AND_INLINE() = ::absl::Status;` read
+  as an assignment, not an alias. Both macros only expand to an
+  attribute, so they're now blanked out before the parse, byte for
+  byte, like the `*_DEPRECATED("..")` family: an ALL-CAPS name with
+  an underscore between `class`/`struct`/`union` and a name followed
+  by `final`, `:` or `{` (`TF_LOCKABLE`, `TF_SCOPED_LOCKABLE`,
+  `TF_PACKED`, `TF_CAPABILITY("mutex")`), and any empty
+  `*_DEPRECATE_AND_INLINE()`. `class RNG {` and `struct STAT_T x =
+  {..}` are left alone. Every C/C++ file re-extracts once after the
+  upgrade. tensorflow: 8 classes come back (`Sqlite`, `SqliteLock`,
+  `SqliteTransaction`, `ScopedUnlockUnrefVar`, the `wav` chunk
+  structs, ...), +56 / -4 call sites (the 4 lost were declarations
+  the bad parse read as calls), `Sqlite.Prepare` 8 -> 18 callers.
+
+## [1.9.14] — 2026-10-14
+
+### Fixed
+- **A Python `self`/`cls` call is decided by the method's class.**
+  `self.skipTest()` in a test class found no `skipTest` on the class,
+  so the ladder handed it to the repo's one `skipTest`, on an
+  unrelated class: tensorflow's `DTensorBaseTest.skipTest` had 788
+  callers it doesn't have, and `assertLess`, `assertRegex` and
+  `assertListEqual` sat on other test classes that override them.
+  The class is now walked: its own and inherited members decide,
+  then a subclass's at any depth (a template hook such as
+  `Layer.add_loss` calling `self._graph_network_add_loss()`, which
+  only `Functional` defines, and a mixin's `self.assertX()` reaching
+  what its host class inherits), and a method none of them has is
+  external. A nested class built through `self` (`self._Creator(..)`)
+  and a class whose supertype the map can't place keep the old
+  reading.
+- **A Python supertype written `mod.Name` is read in that module.**
+  tensorflow's `class OpsTest(test.TestCase)` names
+  `platform/test.py`'s import of `TensorFlowTestCase`; read by the
+  bare name `TestCase`, it found nothing or the wrong class. The
+  module's own class, its import of the name (followed through
+  re-exporting modules) and its star imports are followed now, so
+  `self.evaluate()` and `self.assertAllEqual()` in 453 test classes
+  reach `TensorFlowTestCase`, and a `TestCase` from
+  `from absl.testing.absltest import *` is outside the repo.
+  tensorflow: +30,761 / -1,753 call sites, ambiguous rows 162,369 ->
+  136,145, `DTensorBaseTest.skipTest` callers 788 -> 60, `unused`
+  36,645 -> 36,576 with none new. dekko's own map is unchanged. Map
+  time unchanged.
+
+## [1.9.13] — 2026-10-14
+
+### Fixed
+- **A C++ call on a typed local is walked from the local's type.**
+  Nothing read the type a local was declared with, so
+  `mlir::ShapedType t = ..; t.getElementType()`, `const Tensor& t =
+  ..; t.dims()` and `for (const Edge* e : n->in_edges())
+  e->IsControlEdge()` all went to the ladder by name, landing on the
+  repo's one method of that name or tying across every one. The
+  extractor now records a local receiver's declared type
+  (`RawCall.receiver_type`): the type as written, the target of a
+  cast it was initialized from (`auto t = llvm::cast<T>(v)`), or
+  nothing for a plain `auto x = f()`, which also shadows an outer
+  typed declaration. The walk takes it like a typed parameter's: an
+  outside type sends the call external, an in-repo type narrows it
+  to that type's members. tensorflow: +21,783 / -9,993 call sites
+  (7,870 of the lost are external now, 1,697 moved to the right
+  member), ambiguous rows 177,602 -> 162,369;
+  `MlirTensor.getElementType` callers 651 -> 140,
+  `DataTypeSet.size` 408 -> 217. Map time unchanged.
+- **Known gap:** a type written through a C++ `using`/`typedef` alias
+  is still read by name. `Status s; s.ok()` (an alias of
+  `absl::Status`) lands on the repo's `experimental::cc::Status.ok`
+  again (callers 20 -> 173), and a local typed by an in-repo alias
+  (tflite's `SumOpConstModel m; m.Invoke()`, ~490 sites) or by a
+  class tree-sitter mis-parses (`class TF_LOCKABLE Sqlite`) now goes
+  external instead of reaching the method.
+
+## [1.9.12] — 2026-10-14
+
+### Fixed
+- **A C/C++ chain of calls off an outside value stays outside.** The
+  receiver walk gave up after a hop typed outside the repo whenever
+  more segments followed, so `v.getType().getElementType()` on an
+  `mlir::Value` and proto chains like `fdef().signature().name()` went
+  back to the ladder and landed on the repo's one method of that
+  name. In C and C++, when every later segment is a call and the
+  outside type has no template arguments, the call is now external. A
+  template (`std::vector<Foo>`, `absl::StatusOr<Foo>`) can hand back
+  its argument and a field of an outside value can be anything, so
+  those chains still go to the ladder. tensorflow: -410 wrong call
+  sites (all 30 read were MLIR, proto, flatbuffer or XLA chains),
+  +1,802 external sites, ambiguous rows 178,352 -> 177,602;
+  `MlirTensor.getElementType` loses 25 more, `Node.name` 20,
+  `DataTypeSet.begin`/`end`/`size` 54. Map time unchanged.
+
+## [1.9.11] — 2026-10-14
+
+### Fixed
+- **A C/C++ call on a typed parameter or a cast is walked from its
+  type.** A one-segment receiver never entered the receiver walk, and
+  the typed-parameter rung compares `Type.name` with qualnames, which
+  a namespaced C++ member (`tensorflow.Tensor.dtype`) never matches,
+  so `result_type.getElementType()` on an `mlir::ShapedType`
+  parameter and `v.size()` on a `std::vector<int>&` landed on the
+  repo's one `getElementType` and `size`, and `t.dtype()` on a
+  `Tensor&` tied across every `dtype`. A receiver that is one of the
+  caller's typed parameters is now read from the declared type: an
+  outside type sends the call external, an in-repo one narrows it to
+  that type's members. A cast receiver (`llvm::cast<T>(v)`,
+  `static_cast<const T*>(p)`, `reinterpret_cast`, `down_cast`, ...)
+  is typed by its template argument the same way. tensorflow: +8,318
+  / -4,242 call sites, ambiguous rows 185,740 -> 178,352; gained
+  `OpKernelConstruction.GetAttr` 479, `Tensor.dtype`/`shape`/
+  `dim_size`/`NumElements` ~1,100, `OpKernelContext.device` 235;
+  `MlirTensor.getElementType` loses 301 wrong sites and
+  `DataTypeSet.size` 195. Calls on classes the extractor can't see
+  (flatbuffers accessors, `RuntimeShape`, a nested class defined out
+  of line as `class A::B`) or on a type behind a `using` alias now go
+  external instead of to a same-named stand-in. Map time unchanged.
+
+## [1.9.10] — 2026-10-14
+
+### Fixed
+- **A C/C++ type written with a scope is read by that whole path.**
+  The receiver walk read a declared type by its last token, so a field
+  or return typed `absl::Status` found the repo's unrelated
+  `tensorflow::experimental::cc::Status`, and every `status_.ok()`,
+  `Finish().ok()` and `.code()` on it landed there; `absl::Span<int>`
+  likewise found `mlrt::bc::Span`. A type text with scopes
+  (`absl::Status`, `const ::tflite::Interpreter&`,
+  `internal::GraphView*`) now finds only the in-repo C/C++ types on
+  that path, the innermost one when the writing file's own namespaces
+  reach several (C++ looks `internal::X` up from the enclosing
+  namespace first). A path through an in-repo class (a member alias
+  like `Analysis::Info`) is left to the ladder, a type under the head
+  namespace answers for a namespace-level alias
+  (`tflite::Interpreter` for `tflite::impl::Interpreter`), and
+  anything else, `std::` always, is outside the repo. A template is
+  judged by its outer path, unless that is a wrapper such as
+  `std::unique_ptr<Foo>`, which still reads as `Foo`. An unqualified
+  name reads as before. tensorflow: `experimental.cc.Status.ok` callers
+  270 -> 17, -592 / +50 call sites (the lost ones on `absl::Status`,
+  std containers, `xla::Shape` and MLIR types; `grappler::utils`
+  callers move to their own `utils::internal::GraphViewInternal`),
+  ambiguous rows 185,800 -> 185,740. Map time unchanged.
+
+## [1.9.9] — 2026-10-14
+
+### Fixed
+- **A C/C++ class with a deprecated member is no longer dropped from
+  the map, namespace and all.** tree-sitter doesn't know
+  `ABSL_DEPRECATED("...")`; with a long enough message it gave up on
+  the whole enclosing class. The class symbol was lost, its inline
+  methods became free functions, and every later class in the file
+  lost a namespace level. tensorflow's `DatasetBase` (the base of
+  every dataset op) was a function with no subtypes, and a header
+  with no namespace could even be read as C. A deprecation macro
+  called with string literals only (`ABSL_DEPRECATED`,
+  `TFLITE_DEPRECATED`, any `*_DEPRECATED`) is now blanked out before
+  the parse, byte for byte, so spans and line numbers don't move. A
+  `#define` of the macro, or a call with a non-string argument, is
+  left alone. Every C/C++ file re-extracts once after the upgrade.
+  tensorflow: 10 core classes come back (`DatasetBase` with its 28
+  direct subtypes, `DeviceBase` 13, `DeviceFactory` 10,
+  `FunctionLibraryDefinition`, `XlaOpKernelContext`, `SparseTensor`,
+  ...), 183 symbols move to their right ids and 12 are new, heritage
+  rows +58, +713 / -284 call sites. Most lost sites were wrong
+  before (bare `indices(i)` calls had landed on `SparseTensor.indices`
+  once it was a free function, and are ambiguous now); 22
+  `flr->Instantiate(..)` sites on a typed parameter go ambiguous
+  until typed C++ parameters are walked. Map time unchanged.
+
+## [1.9.8] — 2026-10-14
+
+### Fixed
+- **A C++ `Type::name(..)` call reaches the type's own member when the
+  type lives in a namespace.** The explicit-type step matched the
+  candidate whose qualname is exactly `Type.name`, but C++ qualnames
+  carry their namespaces (`tensorflow.OpRegistry.Global`), so the
+  step only worked for types in the global namespace. Everything else
+  fell to the name-only rungs: `OpRegistry::Global()` stayed ambiguous
+  with every other `Global` in the repo, and `Padding::Serialize(..)`
+  landed on an unrelated `TensorFlowUnsupported.Serialize`. A call
+  written through exactly one in-repo type now keeps the C/C++
+  candidates whose qualname ends with `Type.name`; one is the target,
+  two or more stay a tie. A chain that only starts with a type
+  (`F::Make()->Run()`) is unchanged. tensorflow: +1,757 / -88 edges
+  (+2,399 / -106 sites, the lost ones wrong before), ambiguous rows
+  187,113 -> 185,773; `OpRegistry::Global()` resolves at 652 sites.
+  Map time unchanged.
+
+## [1.9.7] — 2026-10-12
+
+### Fixed
+- **A Rust method call no longer ties with a same-file free function
+  of its name.** `recv.name(..)` can't call a function without `self`,
+  but that was only checked on a pick: when the calling file also
+  defined a free `name`, the call stayed ambiguous between the two
+  and nothing was picked (zed's `picker.delegate.delete_recent_project
+  (..)` beside the file's `async fn delete_recent_project`, and
+  `rpc.rs`'s handlers calling the `Database` methods they're named
+  after). Such a call now resolves to the repo's one `name` that takes
+  `self`, when there is exactly one and the receiver isn't one of the
+  caller's typed parameters, and the argument count is still checked.
+  zed: +85 edges at 199 sites, none lost, ambiguous rows 75,137 ->
+  75,053; `RecentProjectsDelegate.delete_recent_project` has its 2
+  callers.
+
+## [1.9.6] — 2026-10-12
+
+### Fixed
+- **A bare Java call no enclosing class can name is external.** A bare
+  `m(..)` in Java reaches a method of an enclosing class (declared or
+  inherited) or a static import, nothing else; the name-only rungs
+  took any one same-named method in the repo. So `getProject()` in a
+  Gradle task extending `DefaultTask` landed on an unrelated build
+  class's `getProject`, a record's own accessor `minor()` on another
+  type's `minor`, and `withCommand(..)` in a Testcontainers subclass
+  on a docker-API builder. Such a pick is now external when no level
+  of the enclosing classes has it and no import in the file names it
+  or a type it sits in. A class whose supertype clause names an
+  in-repo type dekko couldn't read (a Kotlin class) keeps the pick,
+  since the method may be inherited through it. spring-boot: 21
+  wrong edges (32 call sites) now external, nothing else changed.
+
+## [1.9.5] — 2026-10-12
+
+### Fixed
+- **A bare Java call names its enclosing classes' methods.** Java
+  looks a method name up in the enclosing classes, innermost out, and
+  stops at the first one with a method of that name, declared or
+  inherited; dekko settled a bare call only when its file held one
+  symbol of the name. So `test(value)` in a class whose nested class
+  also declares `test` went external (`test` is a JS test global), a
+  test's call to a helper its base class declares tied with every
+  same-named method in the repo, and an overload calling its sibling
+  overload stayed ambiguous. A bare `m(..)` now takes the methods
+  called `m` of the nearest enclosing class that has any (its own and
+  those its in-repo supertypes declare, less a private one in another
+  file), narrowed by argument count: one fit is the target, several
+  make the ambiguous row list only them. A class with a supertype
+  outside the repo stops the search when it has no `m`, as do
+  `Object`'s and an enum's implicit methods and a record's
+  zero-argument accessor; on such a class a lone fit that is the
+  caller itself isn't taken (`write(buf)` inside `write(int)` of an
+  `OutputStream` means the outside `write(byte[])`). spring-boot:
+  +2,770 edges, 6 lost (picks a bare call can't name), 10 calls no
+  longer external, ambiguous rows 45,076 -> 42,349.
+
+## [1.9.4] — 2026-10-12
+
+### Fixed
+- **A Java `new X(..)` names the member type of its enclosing classes
+  first.** Java looks a simple type name up in the enclosing classes,
+  innermost out, before imports and the package; dekko didn't, so
+  `new Node(host, port)` in a class implementing an interface that
+  declares a nested `Node` record stayed ambiguous among every `Node`
+  in the repo, and a record's own name in its field initializer
+  (`static final GitHub OPEN = new GitHub(..)`) tied with other
+  `GitHub` types. A `new X(..)` or `X::new` with a simple name now
+  takes a member type the enclosing class declares, else one exactly
+  one in-repo supertype declares, else the class itself when it's
+  called `X`, else the next class out. A class with a supertype
+  outside the repo stops the search (it could declare an `X` dekko
+  can't see), and a construction inside an anonymous class body is
+  left to the ladder: calls and references there are now marked as
+  such when a Java file is extracted. spring-boot: +93 edges, none
+  lost, ambiguous rows 45,134 -> 45,076, and 10 constructors and types
+  leave `unused`, none join it.
+
+## [1.9.3] — 2026-10-12
+
+### Fixed
+- **A Java or Kotlin type written as a nested path is read as that
+  path.** A parameter typed `Health.Builder builder` was read by its
+  outer type, so `builder.up()` landed on the static factory
+  `Health.up()` and `Health.Builder.up` had no callers at all; a
+  receiver typed `LoaderZipEntries.@Nullable WrittenEntries` (a
+  type-use annotation inside the path) wasn't read at all, and its
+  calls went external. Now a nested-path parameter is typed by the
+  path, type-use annotations are dropped before any declared type is
+  read, and a supertype written as a nested path (`class Options
+  extends InterpreterApi.Options`) is found by its path rather than
+  as the `Options` declaring it. spring-boot: +143 edges, 29 lost (all
+  29 were wrong), ambiguous rows 45,263 -> 45,134, and 63 methods get
+  their first caller (`Health.Builder.up`: 0 -> 22). A nested path no
+  repo type has
+  (`ServletRegistration.Dynamic`) is external. Stored type texts keep
+  their annotations for signatures and `query type`.
+
+## [1.9.2] — 2026-10-09
+
+### Fixed
+- **A Java construction argument that is a name counts as its declared
+  type.** Constructor overloads that take the same number of arguments
+  were split only by literals (`"x"`, `X.class`, `true`); a variable
+  read as "unknown", so `new Instantiator<>(parent, loaderClassName)`
+  against `(ClassLoader, Class<?>)` and `(ClassLoader, String)` stayed
+  ambiguous though `loaderClassName` is a `String` parameter one line
+  up. A plain name or `this.x` now takes the type its declaration in
+  the same file writes (a parameter, a local declared before it, a
+  loop, catch, resource or typed lambda variable, a field or record
+  component), and rules out the overloads it can't be passed to, the
+  way a literal of that type does. A `String`, `Class`, `boolean`,
+  `int` or `char` (or their boxes) narrows like its literal; any other
+  type only rules out `String`, `Class`, the boxes, primitives and
+  arrays. spring-boot: +60 constructor edges, none lost, ambiguous rows
+  45,316 -> 45,263. Arrays, `var`, type variables, `long`/`double`
+  and the other wide primitives, untyped lambda parameters, pattern
+  variables, inherited fields and call results still read as unknown.
+
+## [1.9.1] — 2026-10-09
+
+### Fixed
+- **A record's declared constructors keep the ids they had before
+  1.9.0.** 1.9.0 made a Java record's canonical constructor a symbol
+  and numbered it first, so on a record that also declares a
+  constructor, `R.R` moved from the declared one to the canonical one
+  (and `R.R#2` to `R.R#3`). Notes are keyed by id, so a note on the
+  declared constructor silently moved to the other symbol, and
+  `note list --orphaned` couldn't see it. The canonical constructor
+  (from the header or a compact constructor) is now numbered after the
+  record's declared ones, so every id 1.8.0 handed out names the same
+  symbol again. spring-boot: 17 declared constructors across 15 records
+  get their ids back; every other id is unchanged. A note added under
+  1.9.0 to such a record's canonical constructor now sits on the
+  declared one; `dekko note list` shows where each note lands.
+
 ## [1.9.0] — 2026-10-09
 
 Closes the fix cycle 1.8.0 left open: the round 1.8 findings it carried

@@ -761,6 +761,10 @@ def name_delta(
     )
 
 
+# A same-qualname collision suffix on an id (``C.of#2``).
+_OVERLOAD_SUFFIX = re.compile(r"#\d+$")
+
+
 def resolved_id_name(symbol_id: str) -> str:
     """Bare ``Symbol.name`` a resolved symbol id's qualname ends in.
 
@@ -783,11 +787,13 @@ def resolved_id_name(symbol_id: str) -> str:
             *callees*/*candidates* are ever looked up this way.
 
     Returns:
-        The bare name, with any ``#N`` suffix stripped.
+        The bare name, with any ``#N`` suffix stripped. Only a numeric
+        suffix goes: an ES private method's name keeps its own ``#``
+        (``C.#m`` is ``#m``).
     """
     _, _, qualname = symbol_id.partition("::")
     tail = qualname.rsplit(".", 1)[-1]
-    return tail.partition("#")[0]
+    return _OVERLOAD_SUFFIX.sub("", tail)
 
 
 def alias_original_name(source: str) -> str:
@@ -1344,6 +1350,9 @@ def resolve(
     import_ctx = _import_resolve_context(files, root, manifests)
     crates = load_cargo_crates(root) if root is not None else {}
     _index_rust_crates(crates, index)
+    _index_rust_reach(
+        load_cargo_reach(root) if root is not None else {}, index
+    )
     imports_by_file = _imports_by_file(
         files,
         workspace_pkgs,
@@ -1699,6 +1708,7 @@ def _resolve_refs_chunk(
     dict — the reference-resolution analog of ``_resolve_files_chunk``,
     same pure-function/worker-safety shape."""
     edges: dict[tuple[str, str], set[int]] = {}
+    ctx = _WalkCtx(index, by_name_path, imports_by_file, repo_stems)
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
         file_exports = any(sym.exported for sym in fm.symbols)
@@ -1712,6 +1722,7 @@ def _resolve_refs_chunk(
                 edges=edges,
                 repo_stems=repo_stems,
                 file_exports=file_exports,
+                ctx=ctx,
             )
     return edges
 
@@ -1849,6 +1860,7 @@ def _resolve_ref(
     edges: dict[tuple[str, str], set[int]],
     repo_stems: set[str],
     file_exports: bool = False,
+    ctx: "_WalkCtx | None" = None,
 ) -> None:
     """Resolve one reference; ambiguous/unmatched refs are dropped.
 
@@ -1857,6 +1869,8 @@ def _resolve_ref(
     or more than one with no disambiguating signal) simply contributes
     no edge, mirroring how a call with no in-repo candidates already
     falls through to ``external`` with nothing further tracked.
+    ``ctx`` (the walk's tables) lets a Java ``X::new`` name a member
+    type of its enclosing classes (``_java_member_type``).
     """
     caller_id = ref.caller_id or f"{ref.path}{MODULE_CALLER_SUFFIX}"
     candidates = _language_filtered(ref, index.get(ref.name, []))
@@ -1877,12 +1891,14 @@ def _resolve_ref(
             edges.setdefault((caller_id, alias[0].id), set()).add(ref.line)
         return
     same_file = by_name_path.get((ref.name, ref.path), [])
-    target = _pick_candidate(
+    caller = symbols_by_id.get(ref.caller_id or "")
+    member = _java_member_type(ref, caller, ctx) if ctx is not None else None
+    target = member or _pick_candidate(
         ref,
         candidates,
         same_file,
         file_imports,
-        symbols_by_id.get(ref.caller_id or ""),
+        caller,
         index,
     )
     if (
@@ -3093,11 +3109,13 @@ def _resolve_call(
     ctx = _WalkCtx(index, by_name_path, imports_by_file or {}, repo_stems)
     walk = _call_walk(call, caller, ctx)
     if _settled_before_lookup(
-        call, caller_id, walk, index, file_imports, repo_stems, edges, external
+        call, caller_id, walk, ctx, file_imports, edges, external
     ):
         return
 
-    candidates = _language_filtered(call, index.get(call.name, []))
+    candidates = _bare_js_reachable(
+        call, _language_filtered(call, index.get(call.name, []))
+    )
     if not candidates:
         alias = _language_filtered(
             call, _alias_candidates(call, file_imports, index)
@@ -3119,7 +3137,9 @@ def _resolve_call(
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
-    same_file = by_name_path.get((call.name, call.path), [])
+    same_file = _bare_js_reachable(
+        call, by_name_path.get((call.name, call.path), [])
+    )
     scoped = _written_scope_match(call, candidates, index, same_file)
     if scoped is not None:
         if scoped.trusted and len(scoped.candidates) == 1:
@@ -3137,12 +3157,14 @@ def _resolve_call(
             return
         candidates = scoped.candidates
         same_file = [s for s in same_file if s in candidates]
+    unwalked = candidates
     walked, candidates, same_file = _walk_verdict(
         walk, call, caller, candidates, same_file, ctx
     )
     target = walked or _within_scope(
         scoped,
-        _pick_candidate(
+        _java_member_type(call, caller, ctx)
+        or _pick_candidate(
             call,
             candidates,
             same_file,
@@ -3151,12 +3173,18 @@ def _resolve_call(
             index,
             repo_stems,
             raw_imports,
+            noise_guard=not _walk_skips_noise_guard(
+                walk, call, unwalked, candidates
+            ),
         ),
     )
     if target is _NOISE or (
         isinstance(target, Symbol)
-        and not _call_target_visible(
-            call, target, file_imports, repo_stems, stars
+        and (
+            not _call_target_visible(
+                call, target, file_imports, repo_stems, stars
+            )
+            or _java_out_of_scope(call, caller, target, file_imports, ctx)
         )
     ):
         external.setdefault((caller_id, call.text), set()).add(call.line)
@@ -3175,6 +3203,30 @@ def _resolve_call(
         call, candidates, index, file_imports, repo_stems
     )
     _record_ambiguous(caller_id, call.name, disclosed, ambiguous)
+
+
+def _bare_js_call(call: RawCall) -> bool:
+    """Whether ``call`` is a JS/TS call written with no receiver.
+
+    A JS or TS method (a class member, an object-literal method, an
+    interface member) is only reachable through a receiver. A bare
+    ``f()`` names a binding in lexical scope (a local, a parameter, an
+    import or a module-level function), never a member, so its
+    candidates are read without methods: a ``useState`` setter called
+    ``setError`` isn't the repo's one ``Mgr.setError``, and
+    ``getSessionId()`` inside a class with its own ``getSessionId``
+    method is the imported function. Java and Kotlin bare calls do name
+    the enclosing class's members, so they are left alone.
+    """
+    return _written_bare(call) and _site_language(call.path) in _JS_FAMILY
+
+
+def _bare_js_reachable(call: RawCall, symbols: list[Symbol]) -> list[Symbol]:
+    """``symbols`` without methods when ``call`` is a bare JS/TS call."""
+    if not _bare_js_call(call):
+        return symbols
+
+    return [s for s in symbols if s.kind != "method"]
 
 
 def _ambiguous_candidates(
@@ -3263,7 +3315,7 @@ def _rust_row_narrowed(
             c
             for c in candidates
             if c.kind in ("function", "method")
-            and not _rust_call_excludes(call, c)
+            and not _rust_call_excludes(call, c, index)
         ]
     else:
         return narrowed
@@ -3738,6 +3790,8 @@ def _pick_candidate_ladder(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    *,
+    noise_guard: bool = True,
 ) -> Symbol | _Noise | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
@@ -3773,6 +3827,10 @@ def _pick_candidate_ladder(
     built-in method names like ``trim``). Callers that pass a
     non-``None`` ``repo_stems`` must check for ``_NOISE`` before
     treating a non-``None`` return as a resolved ``Symbol``.
+
+    ``noise_guard=False`` skips that check: the caller already narrowed
+    the candidates to a typed receiver's own members, so the name is
+    evidence enough (``_walk_skips_noise_guard``).
 
     ``raw_imports``, when given, is the calling file's full (undeduped)
     import list — passed only for whole-file-include languages
@@ -3815,7 +3873,7 @@ def _pick_candidate_ladder(
     )
     same_file = _without_own_constructors(same_file)
     candidates, same_file, shape_narrowed = _rust_shape_narrowed_candidates(
-        call, candidates, same_file, index, file_imports, repo_stems
+        call, candidates, same_file, index, file_imports, repo_stems, caller
     )
     if shape_narrowed and not candidates:
         return _NOISE if repo_stems is not None else None
@@ -3852,8 +3910,10 @@ def _pick_candidate_ladder(
     if hinted is not None:
         return hinted
 
-    if repo_stems is not None and _is_noise_call(
-        call, file_imports, repo_stems
+    if (
+        noise_guard
+        and repo_stems is not None
+        and _is_noise_call(call, file_imports, repo_stems)
     ):
         return _NOISE
 
@@ -3887,6 +3947,8 @@ def _pick_candidate(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    *,
+    noise_guard: bool = True,
 ) -> Symbol | _Noise | None:
     """Pick a candidate, then let Java's package scope settle a tie.
 
@@ -3906,6 +3968,7 @@ def _pick_candidate(
         raw_imports,
         crate_roots,
         tiebreak_hits,
+        noise_guard=noise_guard,
     )
     if picked is not None:
         return picked
@@ -3965,6 +4028,407 @@ def _java_same_package_type(
     return types[0] if len(types) == 1 else None
 
 
+def _java_member_type(
+    call: RawCall | RawRef, caller: Symbol | None, ctx: "_WalkCtx"
+) -> Symbol | None:
+    """The type a Java ``new X(..)`` or ``X::new`` names through its
+    enclosing classes, when one of them settles it.
+
+    Java looks a simple type name up in the enclosing classes first,
+    innermost out, before any import or the package (JLS 6.4.1,
+    8.5). At each level ``T`` (``_java_scope_levels``): a member type
+    ``X`` that ``T`` declares is the type; else one that exactly one
+    in-repo supertype declares (an interface's nested record,
+    inherited); else, when ``T`` has a supertype outside the repo
+    (which may declare an ``X`` dekko can't see), the search stops;
+    else ``T`` itself when it is called ``X`` (a record's own name in
+    its field initializer); else the next level out. ``new
+    Outer.Inner(..)`` is written through its scope and left to the
+    written-path rung.
+
+    Args:
+        call: The raw call or reference.
+        caller: Its enclosing symbol.
+        ctx: The repo-wide tables.
+
+    Returns:
+        The type, or ``None`` when the call isn't a Java simple-name
+        construction or constructor reference, sits in an anonymous
+        class body, or no level settles it (the ladder decides).
+    """
+    if (
+        caller is None
+        or call.anonymous
+        or not call.path.endswith(".java")
+        or not _java_names_simple_type(call)
+    ):
+        return None
+    for level in _java_scope_levels(caller, ctx) or ():
+        own = _java_member_types(level, call.name, ctx)
+        if len(own) == 1:
+            return own[0]
+        supers, is_open = _java_scope_supertypes(level, ctx)
+        inherited = [
+            m for s in supers for m in _java_member_types(s, call.name, ctx)
+        ]
+        if len(inherited) == 1:
+            return inherited[0]
+        if own or inherited or is_open:
+            return None
+        if level.name == call.name:
+            return level
+
+    return None
+
+
+def _java_names_simple_type(call: RawCall | RawRef) -> bool:
+    """A ``new X(..)`` with no ``.`` before its type arguments, or an
+    ``X::new`` reference (its name is the type's)."""
+    if isinstance(call, RawRef):
+        return call.name[:1].isupper()
+    if call.receiver is not None or not call.text.startswith("new "):
+        return False
+
+    return "." not in call.text[4:].split("<", 1)[0]
+
+
+def _java_scope_levels(
+    caller: Symbol, ctx: "_WalkCtx"
+) -> tuple[Symbol, ...] | None:
+    """The Java types enclosing ``caller``, innermost first (memoized).
+
+    The caller itself when it is a type (a field initializer or an
+    initializer block), else the type its qualname sits in, then each
+    type further out. ``None`` when a level isn't a type symbol in the
+    caller's file, which leaves every call there to the ladder.
+    """
+    if caller.id not in _SCOPE_LEVELS:
+        _SCOPE_LEVELS[caller.id] = _java_scope_levels_uncached(caller, ctx)
+    return _SCOPE_LEVELS[caller.id]
+
+
+def _java_scope_levels_uncached(
+    caller: Symbol, ctx: "_WalkCtx"
+) -> tuple[Symbol, ...] | None:
+    """``_java_scope_levels`` without the memo."""
+    if caller.kind in TYPE_KINDS:
+        inner: Symbol | None = caller
+    else:
+        inner = _java_type_at(
+            caller.path, caller.qualname.rpartition(".")[0], ctx
+        )
+    if inner is None:
+        return None
+    chain = [inner]
+    parts = inner.qualname.split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        outer = _java_type_at(inner.path, ".".join(parts[:cut]), ctx)
+        if outer is None:
+            return None
+        chain.append(outer)
+
+    return tuple(chain)
+
+
+def _java_type_at(path: str, qualname: str, ctx: "_WalkCtx") -> Symbol | None:
+    """The type symbol ``qualname`` names in ``path``, if any."""
+    name = qualname.rpartition(".")[2]
+    return next(
+        (
+            s
+            for s in ctx.by_name_path.get((name, path), ())
+            if s.kind in TYPE_KINDS and s.qualname == qualname
+        ),
+        None,
+    )
+
+
+def _java_member_types(
+    owner: Symbol, name: str, ctx: "_WalkCtx"
+) -> list[Symbol]:
+    """The types ``owner`` declares as its member called ``name``."""
+    qualname = f"{owner.qualname}.{name}"
+    return [
+        s
+        for s in ctx.by_name_path.get((name, owner.path), ())
+        if s.kind in TYPE_KINDS and s.qualname == qualname
+    ]
+
+
+def _java_scope_supertypes(
+    owner: Symbol, ctx: "_WalkCtx"
+) -> tuple[tuple[Symbol, ...], bool]:
+    """``owner``'s in-repo Java supertypes, nearest first, and whether
+    any supertype is outside the repo (memoized).
+
+    Followed ``_WALK_SUPER_DEPTH`` levels up, each clause read as the
+    receiver walk reads it (``_walk_supertype``). A clause that names no
+    in-repo Java type makes ``owner`` open: what it inherits from there
+    can't be seen.
+    """
+    hit = _SCOPE_SUPERS.get(owner.id)
+    if hit is None:
+        hit = _java_scope_supertypes_uncached(owner, ctx)
+        _SCOPE_SUPERS[owner.id] = hit
+    return hit
+
+
+def _java_scope_supertypes_uncached(
+    owner: Symbol, ctx: "_WalkCtx"
+) -> tuple[tuple[Symbol, ...], bool]:
+    """``_java_scope_supertypes`` without the memo."""
+    found: list[Symbol] = []
+    is_open = False
+    seen = {owner.id}
+    level = [owner]
+    for _ in range(_WALK_SUPER_DEPTH):
+        nxt: list[Symbol] = []
+        for sub in level:
+            for stand_in in ctx.index.get(_SUPERS_KEY + sub.id, []):
+                read = [
+                    s
+                    for s in _walk_supertype(stand_in, sub, ctx)
+                    if s.language == "java"
+                ]
+                is_open = is_open or not read
+                for s in read:
+                    if s.id not in seen:
+                        seen.add(s.id)
+                        nxt.append(s)
+        if not nxt:
+            break
+        found.extend(nxt)
+        level = nxt
+
+    return tuple(found), is_open
+
+
+# Methods every Java class has, and every enum, without declaring them.
+_JAVA_OBJECT_METHODS = frozenset(
+    {
+        "equals",
+        "hashCode",
+        "toString",
+        "getClass",
+        "notify",
+        "notifyAll",
+        "wait",
+        "clone",
+        "finalize",
+    }
+)
+_JAVA_ENUM_METHODS = frozenset(
+    {
+        "name",
+        "ordinal",
+        "compareTo",
+        "getDeclaringClass",
+        "valueOf",
+        "values",
+        "describeConstable",
+    }
+)
+
+
+def _java_scope_verdict(
+    call: RawCall,
+    caller: Symbol | None,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    ctx: "_WalkCtx",
+) -> tuple[Symbol | None, list[Symbol], list[Symbol]]:
+    """The method a bare Java call ``m(..)`` names through its
+    enclosing classes, when one of them settles it.
+
+    Java searches the enclosing classes innermost out and stops at the
+    first one with a member method called ``m``, declared or inherited
+    (JLS 15.12.1); overload resolution then runs among that class's
+    methods only. No rung read this: a bare call was settled only when
+    its file held one symbol of the name, so ``test(value)`` in a class
+    whose nested class also declares ``test`` went to the noise guard
+    (a JS test global), and a test's call to a helper its base class
+    declares tied with every same-named method in the repo. On
+    spring-boot, 3,247 sites. At each level (``_java_scope_levels``)
+    the methods called ``m`` it declares or its in-repo supertypes do
+    (``_java_scope_methods``) are counted (``_java_call_excludes``):
+    one fit is the target, several go to the ladder as the only
+    candidates, none leaves the call to the ladder. A level with no
+    such method moves the search out, unless it may have one dekko
+    can't see (``_java_scope_may_hide``).
+
+    One exception: on a level with a supertype outside the repo, a
+    lone fit that is the caller itself is not taken. ``write(buf)``
+    inside ``write(int b)`` of a class extending ``OutputStream``
+    means ``OutputStream.write(byte[])``.
+
+    Args:
+        call: The raw call.
+        caller: Its enclosing symbol.
+        candidates: The ladder's candidates so far.
+        same_file: Those in the call's file.
+        ctx: The repo-wide tables.
+
+    Returns:
+        ``(target, candidates, same_file)``: the target, or ``None``
+        with the candidates narrowed to the level's fits (or unchanged)
+        for the ladder to decide.
+    """
+    unchanged = None, candidates, same_file
+    if (
+        caller is None
+        or call.anonymous
+        or call.receiver is not None
+        or call.text.startswith("new ")
+        or not call.path.endswith(".java")
+    ):
+        return unchanged
+    for level in _java_scope_levels(caller, ctx) or ():
+        members, is_open = _java_scope_methods(level, call, ctx)
+        if not members:
+            if _java_scope_may_hide(level, call, is_open):
+                return unchanged
+            continue
+        fits = [m for m in members if not _java_call_excludes(call, m)]
+        if len(fits) == 1 and not (is_open and fits[0].id == caller.id):
+            return fits[0], candidates, same_file
+        if len(fits) < 2:
+            return unchanged
+        ids = {m.id for m in fits}
+        return None, fits, [s for s in same_file if s.id in ids]
+
+    return unchanged
+
+
+def _java_scope_methods(
+    level: Symbol, call: RawCall, ctx: "_WalkCtx"
+) -> tuple[list[Symbol], bool]:
+    """The methods called ``call.name`` that ``level`` declares or
+    inherits from an in-repo supertype the call's file can reach, and
+    whether ``level`` has a supertype outside the repo."""
+    supers, is_open = _java_scope_supertypes(level, ctx)
+    inherited = [
+        m
+        for s in supers
+        for m in _walk_own_members(s, call.name, ctx)
+        if not jvm_unreachable(call.path, m)
+    ]
+
+    return _walk_own_members(level, call.name, ctx) + inherited, is_open
+
+
+def _java_out_of_scope(
+    call: RawCall,
+    caller: Symbol | None,
+    target: Symbol,
+    file_imports: dict[str, Import],
+    ctx: "_WalkCtx",
+) -> bool:
+    """Whether a bare Java call's pick is a method it can't name.
+
+    A bare ``m(..)`` reaches a method two ways: a member of an
+    enclosing class, declared or inherited, or a static import. The
+    name-only rungs needed neither, so one same-named method anywhere
+    was enough: ``getProject()`` in a Gradle task (``DefaultTask``'s)
+    landed on an unrelated build class's ``getProject``, and a record's
+    own accessor ``minor()`` on another type's ``minor``. A pick that no
+    level has (``_java_scope_methods``, every level, past an open one)
+    and no import binds is outside the repo. The import test is loose:
+    the target's name, or the simple name of any type its qualname runs
+    through (``import static a.B.*`` is recorded as an import of
+    ``B``).
+
+    Not judged: a call in an anonymous class body, a caller whose
+    levels can't be read, and one where some level's supertype clause
+    names an in-repo JVM type but read to no Java one
+    (``_java_scope_unread``), since the method may be inherited through
+    it.
+
+    Args:
+        call: The raw call.
+        caller: Its enclosing symbol.
+        target: The ladder's pick.
+        file_imports: The call's file's bound import names.
+        ctx: The repo-wide tables.
+
+    Returns:
+        True when the call should be counted external.
+    """
+    if (
+        caller is None
+        or call.anonymous
+        or call.receiver is not None
+        or call.text.startswith("new ")
+        or not call.path.endswith(".java")
+        or target.language != "java"
+    ):
+        return False
+    levels = _java_scope_levels(caller, ctx)
+    if not levels or any(_java_scope_unread(t, ctx) for t in levels):
+        return False
+    if any(
+        m.id == target.id
+        for level in levels
+        for m in _java_scope_methods(level, call, ctx)[0]
+    ):
+        return False
+    owners = target.qualname.split(".")[:-1]
+
+    return target.name not in file_imports and not any(
+        owner in file_imports for owner in owners
+    )
+
+
+def _java_scope_unread(owner: Symbol, ctx: "_WalkCtx") -> bool:
+    """Whether a supertype clause of ``owner`` or of one of its in-repo
+    supertypes names an in-repo JVM type but read to no Java one
+    (memoized).
+
+    The scope walk reads Java supertypes only, so a Java class
+    extending the repo's Kotlin class inherits methods it can't see;
+    and an import naming an outside package, or a nested path that
+    didn't resolve, may still mean a type in the repo.
+    """
+    hit = _SCOPE_UNREAD.get(owner.id)
+    if hit is None:
+        hit = any(
+            not _java_supertype_read(stand_in, sub, ctx)
+            and _jvm_type_named(stand_in.name, ctx)
+            for sub in (owner, *_java_scope_supertypes(owner, ctx)[0])
+            for stand_in in ctx.index.get(_SUPERS_KEY + sub.id, [])
+        )
+        _SCOPE_UNREAD[owner.id] = hit
+    return hit
+
+
+def _java_supertype_read(
+    stand_in: Symbol, sub: Symbol, ctx: "_WalkCtx"
+) -> bool:
+    """Whether one supertype clause reads to an in-repo Java type."""
+    return any(
+        s.language == "java" for s in _walk_supertype(stand_in, sub, ctx)
+    )
+
+
+def _jvm_type_named(name: str, ctx: "_WalkCtx") -> bool:
+    """Whether some in-repo Java or Kotlin type is called ``name``."""
+    return any(
+        s.kind in TYPE_KINDS and s.language in _JVM_TYPE_LANGUAGES
+        for s in ctx.index.get(name, ())
+    )
+
+
+def _java_scope_may_hide(level: Symbol, call: RawCall, is_open: bool) -> bool:
+    """Whether ``level`` may have a method ``call`` names that dekko
+    has no symbol for: one inherited from outside the repo, one of
+    ``Object``'s or an enum's, or a record component's accessor."""
+    if is_open or call.name in _JAVA_OBJECT_METHODS:
+        return True
+    if level.kind == "enum" and call.name in _JAVA_ENUM_METHODS:
+        return True
+
+    return level.kind == "record" and call.arg_count == 0
+
+
 def _pick_candidate_retried(
     call: _Referable,
     candidates: list[Symbol],
@@ -3976,6 +4440,8 @@ def _pick_candidate_retried(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    *,
+    noise_guard: bool = True,
 ) -> Symbol | _Noise | None:
     """Pick a candidate, skipping a pick the call can't mean.
 
@@ -4009,11 +4475,12 @@ def _pick_candidate_retried(
             raw_imports,
             crate_roots,
             tiebreak_hits,
+            noise_guard=noise_guard,
         )
         if picked is None and _java_unanswerable(call, candidates):
             return _NOISE if repo_stems is not None else None
         if not isinstance(picked, Symbol) or not (
-            _rust_call_excludes(call, picked)
+            _rust_call_excludes(call, picked, index)
             or _python_call_excludes(call, picked, file_imports)
             or jvm_unreachable(call.path, picked)
             or _java_call_excludes(call, picked)
@@ -4035,7 +4502,38 @@ def _pick_candidate_retried(
             return _NOISE if repo_stems is not None else None
 
 
-def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
+def _rust_call_excludes(
+    call: _Referable, candidate: Symbol, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether a Rust call can't mean ``candidate``: its shape or
+    argument count rules it out (``_rust_call_shape_excludes``), or it
+    is a dot-call into a crate the caller's crate doesn't depend on
+    (``_rust_crate_unreachable``).
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidate: The symbol the ladder picked, or one an ambiguous
+            row keeps.
+        index: Bare symbol name to every symbol sharing it, with the
+            crate tables under ``_RUST_REACH_KEY``.
+
+    Returns:
+        True for a ``RawCall`` in a ``.rs`` file and a Rust symbol it
+        can't mean.
+    """
+    if (
+        not isinstance(call, RawCall)
+        or not call.path.endswith(".rs")
+        or candidate.language != "rust"
+    ):
+        return False
+
+    return _rust_call_shape_excludes(
+        call, candidate
+    ) or _rust_crate_unreachable(call, candidate, index)
+
+
+def _rust_call_shape_excludes(call: RawCall, candidate: Symbol) -> bool:
     """Whether a Rust call's shape or argument count rules out
     ``candidate``.
 
@@ -4063,23 +4561,18 @@ def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
     ``Foo::new(a, b)``. The path count is read here only.
 
     Args:
-        call: The raw call or reference being resolved.
-        candidate: The symbol the ladder picked.
+        call: The Rust call being resolved.
+        candidate: A Rust symbol it might mean.
 
     Returns:
-        True for a ``RawCall`` in a ``.rs`` file and a Rust function or
-        method it can't mean. A call whose arguments the extractor
-        couldn't count (``arg_count is None``) is judged by shape only.
+        True for a function or method the call can't mean. A call
+        whose arguments the extractor couldn't count (``arg_count is
+        None``) is judged by shape only.
     """
-    if (
-        not isinstance(call, RawCall)
-        or not call.path.endswith(".rs")
-        or candidate.language != "rust"
-        or candidate.kind not in ("function", "method")
-    ):
+    if candidate.kind not in ("function", "method"):
         return False
     params = candidate.params
-    has_self = bool(params) and _is_receiver_param(params[0], "rust")
+    has_self = _rust_has_self(candidate)
     if _rust_is_dot_call(call):
         if not has_self:
             return True
@@ -4097,6 +4590,104 @@ def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
         return True
 
     return max_count is not None and call.arg_count > max_count
+
+
+class _RustReachMemo:
+    """Per-index lookups for ``_rust_crate_unreachable``: each path's
+    crate directory and each crate's reach as a set. Tied to the
+    ``_RUST_MANIFEST_KEY`` list it was filled from, so an index built
+    later starts it over.
+
+    Attributes:
+        manifests: The stand-in list the lookups were read against.
+        crate_of: File path to its crate directory, ``None`` for a path
+            under no crate.
+        reach: Crate directory to the crate directories it reaches.
+    """
+
+    def __init__(self) -> None:
+        self.manifests: list[Symbol] | None = None
+        self.crate_of: dict[str, str | None] = {}
+        self.reach: dict[str, frozenset[str] | None] = {}
+
+    def bind(self, manifests: list[Symbol]) -> None:
+        """Start over unless the lookups were read against
+        ``manifests``."""
+        if self.manifests is not manifests:
+            self.manifests = manifests
+            self.crate_of = {}
+            self.reach = {}
+
+
+_RUST_REACH_MEMO = _RustReachMemo()
+
+
+def _rust_crate_of(path: str, manifests: list[Symbol]) -> str | None:
+    """The directory of the nearest crate manifest above ``path``
+    (``manifests`` is deepest first), ``None`` under no crate."""
+    memo = _RUST_REACH_MEMO.crate_of
+    if path not in memo:
+        memo[path] = next(
+            (m.path for m in manifests if path.startswith(m.path + "/")),
+            None,
+        )
+
+    return memo[path]
+
+
+def _rust_crate_reach(
+    where: str, index: dict[str, list[Symbol]]
+) -> frozenset[str] | None:
+    """The crate directories the crate at ``where`` reaches, ``None``
+    when the index has no entry for it."""
+    memo = _RUST_REACH_MEMO.reach
+    if where not in memo:
+        stand_ins = index.get(_RUST_REACH_KEY + where)
+        memo[where] = (
+            frozenset(s.path for s in stand_ins) if stand_ins else None
+        )
+
+    return memo[where]
+
+
+def _rust_crate_unreachable(
+    call: RawCall, candidate: Symbol, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether a Rust dot-call's candidate lives in a crate the
+    caller's crate doesn't depend on, directly or not.
+
+    A value of a type can only exist in a crate whose dependency graph
+    contains the type's crate, so such a pick is never right. On zed,
+    the ``http`` crate's ``Request::builder().header(..)`` chains landed
+    on ``extension_api``'s ``HttpRequestBuilder.header`` from crates
+    that don't depend on it, and ``ExitStatus::code()`` on
+    ``anthropic``'s ``ApiError.code``. A file's crate is its nearest
+    manifest (a crate's ``tests/`` and ``benches/`` belong to it). A
+    path or bare call isn't judged (``use`` and crate paths already
+    narrow those), nor is a file under no crate.
+
+    Args:
+        call: The Rust call being resolved.
+        candidate: A Rust symbol it might mean.
+        index: The symbol index, with the crate tables.
+
+    Returns:
+        True when both files belong to crates and the caller's can't
+        reach the candidate's.
+    """
+    if not _rust_is_dot_call(call):
+        return False
+    manifests = index.get(_RUST_MANIFEST_KEY)
+    if not manifests:
+        return False
+    _RUST_REACH_MEMO.bind(manifests)
+    here = _rust_crate_of(call.path, manifests)
+    there = _rust_crate_of(candidate.path, manifests)
+    if here is None or there is None or here == there:
+        return False
+    reach = _rust_crate_reach(here, index)
+
+    return reach is not None and there not in reach
 
 
 def _rust_own_member_ruled_out(
@@ -4482,6 +5073,8 @@ def _pick_candidate_vetoed(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    *,
+    noise_guard: bool = True,
 ) -> Symbol | _Noise | None:
     """Run the candidate ladder, then veto a structurally impossible pick.
 
@@ -4513,6 +5106,7 @@ def _pick_candidate_vetoed(
         raw_imports,
         crate_roots,
         tiebreak_hits,
+        noise_guard=noise_guard,
     )
     if (
         isinstance(picked, Symbol)
@@ -5570,6 +6164,35 @@ _RUST_STD_METHOD_NAMES = frozenset(
     }
 )  # fmt: skip
 
+# Rust std method names that are ordinary method names elsewhere, so
+# consulted only for a call in a ``.rs`` file. zed defines each exactly
+# once, and with no type for the receiver the lone in-repo method took
+# every call by that name; a sample of each name's remaining calls was
+# wrong every time:
+#
+# - ``get_mut`` (``WatchPaths``) and ``contains_key`` (sum_tree's
+#   ``TreeMap``): ``HashMap``/``BTreeMap``/``HashSet`` and
+#   ``serde_json`` map values built by untyped ``let``s.
+# - ``to_path_buf`` (``SanitizedPath``): ``Path``/``PathBuf`` values
+#   from call results (``dir.path().to_path_buf()``).
+# - ``len_utf8`` (gpui's ``WrapBoundaryCandidate``): ``char`` values.
+# - ``random_range``/``random_bool`` (the scheduler's ``SharedRng``):
+#   ``rand`` RNGs; the right calls sit in the defining file and resolve
+#   on the same-file rung before this guard.
+# - ``saturating_add`` (settings_ui's ``NumberFieldType``, a trait the
+#   integer types implement): integer arithmetic; its one right call is
+#   in the same file.
+#
+# ``abs``, ``len_utf16``, ``signum`` and ``pow`` stay out: their lone
+# owners (gpui's ``Pixels``, ``ChunkSlice``) have real callers through
+# untyped values too, and the guard would drop those with the rest.
+_RUST_STD_ONLY_METHOD_NAMES = frozenset(
+    {
+        "get_mut", "contains_key", "to_path_buf", "len_utf8",
+        "random_range", "random_bool", "saturating_add",
+    }
+)  # fmt: skip
+
 # C++ standard-container, ``std::optional``/``std::pair`` and
 # ``absl::Status`` members. Consulted only for a call in a C/C++ file
 # (``size``/``status``/``message`` are everyday method names in every
@@ -5735,6 +6358,28 @@ _AMBIENT_GLOBAL_RECEIVERS = frozenset(
     }
 )  # fmt: skip
 
+# The JS/TS objects a receiver can name without the file binding them:
+# the ECMAScript built-ins, the common host statics, and the ambient
+# receivers above. A call on one is the language's or the host's, never
+# a repo method, unless the file binds the name or the repo declares a
+# type called that (``_js_global_receiver``).
+_JS_GLOBAL_RECEIVERS = _AMBIENT_GLOBAL_RECEIVERS | frozenset(
+    {
+        "Math", "JSON", "Object", "Array", "Promise", "Date", "Number",
+        "String", "Boolean", "Symbol", "BigInt", "Reflect", "Proxy",
+        "Intl", "Atomics", "RegExp", "Error", "Map", "Set", "WeakMap",
+        "WeakSet", "ArrayBuffer", "DataView", "Uint8Array", "Buffer",
+        "URL", "URLSearchParams", "AbortSignal", "Response", "Headers",
+        "performance", "WebAssembly", "location", "history",
+    }
+)  # fmt: skip
+
+# The built-in type a literal receiver head stands for, as the extractor
+# writes the head: a string or template literal is ``""``, an array
+# ``[]``, a regex ``/…/``.
+_JS_LITERAL_HEADS = {'""': "String", "[]": "Array"}
+_JS_NUMBER_HEAD = re.compile(r"^\(?-?\d[\d_.eExXn]*\)?$")
+
 
 def is_guarded_method_name(name: str, path: str = "") -> bool:
     """Whether a receiver call with this method name is never resolved.
@@ -5743,7 +6388,9 @@ def is_guarded_method_name(name: str, path: str = "") -> bool:
     receiver call (``x.name(...)``, receiver not exactly ``self``/
     ``this``) in any language: built-in methods, chain-builder methods,
     Rust std methods, Java assertions and ``build``; plus, when
-    ``path`` is a C/C++ file, the C++ standard-library members. Such a
+    ``path`` is a C/C++ file, the C++ standard-library members, and
+    when it is a Rust file, the Rust std names that are everyday
+    method names elsewhere. Such a
     call goes external however many same-named repo symbols exist, so
     it never shows up as ambiguous either. ``unused``'s dispatch check
     reads this, the one copy of the lists, to see those calls as
@@ -5752,7 +6399,8 @@ def is_guarded_method_name(name: str, path: str = "") -> bool:
     Args:
         name: A call's bare method name.
         path: The call's (or the candidate symbol's) file; only a
-            C/C++ path adds the C++ list.
+            C/C++ path adds the C++ list, and only a ``.rs`` path the
+            Rust-only list.
 
     Returns:
         True when the noise guard sends a receiver call with this name
@@ -5765,6 +6413,7 @@ def is_guarded_method_name(name: str, path: str = "") -> bool:
         or name in _JAVA_ASSERTION_METHOD_NAMES
         or name in _BUILDER_METHOD_NAMES
         or (name in _CPP_STD_METHOD_NAMES and path.endswith(_CPP_EXTENSIONS))
+        or (name in _RUST_STD_ONLY_METHOD_NAMES and path.endswith(".rs"))
     )
 
 
@@ -5918,10 +6567,13 @@ def _shadowed_by_external_import(
 # type-local-impl match (zed's own ``impl Into<SelectionEffects> for
 # Option<Autoscroll>``) from absorbing an unrelated ``Option<X>``'s
 # ``.into()`` call; that gate is unaffected by adding them here.
+# ``RwLock`` and ``RefCell`` hand out their contents the way ``Mutex``
+# does (``.read()``, ``.borrow_mut()`` are transparent calls).
 _TRANSPARENT_TYPE_WRAPPERS = frozenset(
     {
         "Box", "Rc", "Arc", "Ref", "RefMut", "Optional",
-        "Entity", "WeakEntity", "Mutex", "Option", "Result",
+        "Entity", "WeakEntity", "Mutex", "RwLock", "RefCell",
+        "Option", "Result",
     }
 )  # fmt: skip
 _TYPE_QUALIFIER_WORDS = frozenset({"mut", "const", "ref", "readonly"})
@@ -5996,6 +6648,10 @@ def _typed_param_token_candidates(
     ``needs_refresh.changed()`` regressed exactly this way while this
     fix was in progress).
 
+    A JVM nested path (``Health.Builder``) yields its outer type first;
+    a parameter typed that way is walked by its path instead
+    (``_walk_nested_param``) and never reaches these tokens.
+
     Args:
         type_text: A declared parameter's type, as written.
 
@@ -6050,22 +6706,28 @@ class WalkResult:
         open: Whether a deeper layer is a type the walk can't read (a
             type parameter), so a member missing from ``layers`` may
             still be there.
+        type_args: For ``foreign``, whether the type text carried type
+            arguments (``std::vector<Foo>``), so a call on it can hand
+            one of them back.
     """
 
     kind: str
     layers: tuple[tuple[Symbol, ...], ...] = ()
     open: bool = False
+    type_args: bool = False
 
 
 _WALK_UNKNOWN = WalkResult("unknown")
 _WALK_FOREIGN = WalkResult("foreign")
+_WALK_FOREIGN_WITH_ARGS = WalkResult("foreign", type_args=True)
 
 _WALK_SEGMENT_SPLIT = re.compile(r"->|::|\.")
 # Languages whose methods use a field without ``this``; C has no
 # methods.
 _BARE_FIELD_LANGUAGES = frozenset({"java", "kotlin", "cpp"})
 _WALK_PLAIN_NAME = re.compile(r"[A-Za-z_$][\w$]*\Z")
-_WALK_SEGMENT = re.compile(r"[A-Za-z_$][\w$]*(?:\(\))?\Z|\d+\Z")
+# A JS/TS private name (`this.#disk`) keeps its `#`, as its field does.
+_WALK_SEGMENT = re.compile(r"#?[A-Za-z_$][\w$]*(?:\(\))?\Z|\d+\Z")
 # Calls that hand back what they're called on (a lock guard, a cell
 # borrow, an unwrap, an awaited future), so the type walks through.
 _WALK_TRANSPARENT_CALLS = frozenset(
@@ -6093,6 +6755,15 @@ _WALK_TRANSPARENT_CALLS = frozenset(
 _WALK_SELF_RETURN = re.compile(r"\b(?:Self|this|SELF)\b")
 # A field type named by a nested-type path, ``ZipContent.Entry``.
 _WALK_DOTTED_TYPE = re.compile(r"[A-Z]\w*(?:\.[A-Z]\w*)+\Z")
+# The same nested path written with type arguments, ``Outer.Inner<T>``.
+_WALK_JVM_NESTED_GENERIC = re.compile(r"([A-Z]\w*(?:\.[A-Z]\w*)+)\s*<.*>\Z")
+# A type-use annotation inside a declared JVM type text:
+# ``Outer.@Nullable Inner``, ``@Size(max = 3)``, Kotlin's
+# ``@field:Valid``.
+_DECLARED_TYPE_ANNOTATION = re.compile(r"@[\w.:]+(?:\([^)]*\))?\s*")
+# Languages whose declared types can carry type-use annotations, and
+# whose nested types are written ``Outer.Inner``.
+_JVM_TYPE_LANGUAGES = frozenset({"java", "kotlin"})
 # The first generic or indexed head in a type text: ``list[`` /
 # ``std::vector<`` / ``map[``.
 _WALK_GENERIC_HEAD = re.compile(r"([A-Za-z_]\w*)\s*[<\[]")
@@ -6104,6 +6775,18 @@ _WALK_RUST_LOCAL_HEADS = frozenset({"crate", "self", "super"})
 _WALK_MODULE_HEAD_LANGUAGES = frozenset(
     {"python", "go", "javascript", "typescript", "tsx"}
 )
+# A C/C++ cast receiver, ``llvm::cast<T>()`` or ``static_cast<const
+# T*>()`` with its argument dropped: the value is a ``T``.
+_WALK_CPP_CAST = re.compile(
+    r"(?:[A-Za-z_]\w*\s*::\s*)*(?:static_cast|dynamic_cast|"
+    r"reinterpret_cast|const_cast|cast|dyn_cast|cast_or_null|"
+    r"dyn_cast_or_null|down_cast|cast_if_present|dyn_cast_if_present)"
+    r"\s*<(.+)>\s*\(\)\Z",
+    re.S,
+)
+# A type name inside a Java type's arguments (``Repo`` in
+# ``Optional<Repo>``, ``Entry`` in ``Map<String, Entry>``).
+_JAVA_TYPE_ARG_TOKEN = re.compile(r"\b[A-Z]\w*")
 # Lowercase smart pointers whose methods are reached through ``->``.
 _WALK_LOWER_WRAPPERS = frozenset(
     {"unique_ptr", "shared_ptr", "optional", "reference_wrapper"}
@@ -6128,8 +6811,12 @@ _WALK_SPREAD_MEMBER_LANGUAGES = frozenset({"c", "cpp", "kotlin"})
 # Reserved ``index`` namespace: ``_SUPERS_KEY + type id`` holds one
 # stand-in per supertype name the type declares, and ``_SUPERS_KEY +
 # "@" + name`` the same for a Rust ``impl Trait for Name`` the extractor
-# couldn't attach to a symbol (``RawHeritage.subtype_name``).
+# couldn't attach to a symbol (``RawHeritage.subtype_name``). A
+# stand-in's ``name`` is the clause's last segment and its ``qualname``
+# the clause as written, without type arguments (``Api.Options``).
 _SUPERS_KEY = "::supers::"
+# A written type's arguments, ``<T>`` in ``Foo.Bar<T>``.
+_TYPE_ARGUMENTS_TAIL = re.compile(r"<.*", re.S)
 # Reserved ``index`` namespace: ``_SUBS_KEY + name`` holds every type
 # that declares a supertype called ``name`` (its implementors).
 _SUBS_KEY = "::subs::"
@@ -6142,6 +6829,18 @@ _WALK_SUPERS: dict[str, list[Symbol]] = {}
 _WALK_TEXTS: dict[tuple[str, str], WalkResult] = {}
 _WALK_TOKENS: dict[tuple[str, str], tuple[Symbol, ...] | None] = {}
 _WALK_MEMBERS: dict[tuple[str, str, bool], list[Symbol]] = {}
+# The Java enclosing-scope chain per caller id, and each type's in-repo
+# supertypes with whether any is outside the repo, per type id.
+_SCOPE_LEVELS: dict[str, tuple[Symbol, ...] | None] = {}
+_SCOPE_SUPERS: dict[str, tuple[tuple[Symbol, ...], bool]] = {}
+# Whether a type's supertype clauses (its own or an in-repo
+# supertype's) name an in-repo Java type that didn't resolve, per id.
+_SCOPE_UNREAD: dict[str, bool] = {}
+# Python module (dotted, from the repo root) -> its file, and whether a
+# Python class layer has a supertype clause up its chain the map can't
+# place, per layer's ids.
+_PY_MODULE_FILES: dict[str, str] = {}
+_PY_SUPERS_UNREAD: dict[tuple[str, ...], bool] = {}
 
 
 def _reset_walk_memo() -> None:
@@ -6152,8 +6851,14 @@ def _reset_walk_memo() -> None:
         _WALK_TEXTS,
         _WALK_TOKENS,
         _WALK_MEMBERS,
+        _SCOPE_LEVELS,
+        _SCOPE_SUPERS,
+        _SCOPE_UNREAD,
+        _PY_MODULE_FILES,
+        _PY_SUPERS_UNREAD,
     ):
         memo.clear()
+    _RUST_REACH_MEMO.bind([])
 
 
 class _WalkCtx(NamedTuple):
@@ -6177,8 +6882,9 @@ def _index_supertypes(
                 "@" + clause.subtype_name if clause.subtype_name else ""
             )
             if owner:
+                written = _TYPE_ARGUMENTS_TAIL.sub("", clause.text or "")
                 index.setdefault(_SUPERS_KEY + owner, []).append(
-                    _stand_in(clause.name, fm.path)
+                    _stand_in(clause.name, fm.path, written or clause.name)
                 )
             sub = by_id.get(clause.subtype_id)
             if sub is not None:
@@ -6193,8 +6899,18 @@ def _call_walk(
     """Type a call's chained receiver by walking its segments.
 
     A receiver of one segment (``self``, ``w``, ``Type``) is left to
-    the structural rungs, which already read it: the walk changes
-    nothing about a depth-zero call.
+    the structural rungs, which already read it, unless its declaration
+    types it, it is a bare field, or it is a JVM parameter typed by a
+    nested path (``_walk_one_segment``): the typed-parameter rung reads
+    only a type's outer token, which for ``Health.Builder`` lands on
+    ``Health``'s same-named method. A C/C++ cast receiver
+    (``llvm::cast<T>(v)``) is typed by its template argument.
+
+    A foreign hop with more segments after it is ``unknown``: what it
+    hands back may be in-repo. A C/C++ chain of calls on an outside type
+    without type arguments stays foreign (``_foreign_holds_through``),
+    and so does a Java chain of bare calls whose head is declared with
+    an outside type (``_java_chain_stays_outside``).
 
     Args:
         call: The raw call being resolved.
@@ -6208,6 +6924,10 @@ def _call_walk(
     spec = languages.spec_for_path(call.path)
     if spec is None or spec.field_query is None:
         return _WALK_UNKNOWN
+    if _site_language(call.path) in _CPP_FAMILY:
+        cast = _WALK_CPP_CAST.match((call.receiver or "").strip())
+        if cast is not None:
+            return _walk_type_text(cast.group(1), call.path, ctx)
     segments = _walk_segments(call.receiver)
     if segments is None:
         return _walk_one_segment(call, caller, ctx)
@@ -6218,35 +6938,127 @@ def _call_walk(
         result, used = _walk_step(result, segments[at], nxt, ctx)
         at += used
     if result.kind == "foreign" and not _walk_only_transparent(segments[at:]):
+        if _foreign_holds_through(result, segments[at:], call.path):
+            return result
         # ``this.tasks.get(id).abort()`` on a ``Map``: the foreign hop
         # hands back something the walk can't name, not something
         # foreign.
-        return _WALK_UNKNOWN
+        result = _WALK_UNKNOWN
+    if result.kind == "unknown" and _java_chain_stays_outside(
+        call, segments, ctx
+    ):
+        return _WALK_FOREIGN
 
     return result
+
+
+def _foreign_holds_through(
+    result: WalkResult, rest: list[str], path: str
+) -> bool:
+    """Whether a foreign hop stays foreign through the segments after it.
+
+    C and C++: when every later segment is a call and the outside type
+    had no type arguments. ``v.getType().getElementType()`` on an
+    ``mlir::Value`` asks MLIR's ``getType()`` for another MLIR value; a
+    ``std::vector<Foo>`` can hand back its ``Foo`` (``front()``), and a
+    field of an outside value can be anything.
+    """
+    if _site_language(path) in _CPP_FAMILY:
+        return not result.type_args and all(s.endswith("()") for s in rest)
+
+    return False
+
+
+def _java_chain_stays_outside(
+    call: RawCall, segments: list[str], ctx: _WalkCtx
+) -> bool:
+    """Whether a Java chain's head keeps every hop outside the repo.
+
+    ``ds.getConnection().getMetaData().getURL()`` on a ``DataSource
+    ds``: a method declared outside the repo returns a type declared
+    outside it, so the last call can't land on the repo's one
+    ``getURL``. Java's types are nominal, so this holds unless a hop
+    is generic in something the repo declares: a type argument of the
+    head's type (``Optional<Repo>.get()``), or a call's own argument,
+    which the extractor rules out by recording the head's type
+    (``RawCall.receiver_type``) only for a chain of bare calls.
+    """
+    text = call.receiver_type
+    if not text or len(segments) < 2 or _site_language(call.path) != "java":
+        return False
+    if _walk_type_text(text, call.path, ctx).kind != "foreign":
+        return False
+    _, _, args = text.partition("<")
+
+    return not any(
+        _walk_type_token(token, call.path, ctx)
+        for token in _JAVA_TYPE_ARG_TOKEN.findall(args)
+    )
+
+
+def _js_global_receiver(
+    call: RawCall, ctx: _WalkCtx, file_imports: dict[str, Import]
+) -> bool:
+    """Whether a JS/TS call's receiver is a literal or a standard global.
+
+    ``Math.max(..)``, ``Date.now()``, ``console.log(..)``,
+    ``'a'.split('b')`` and ``/re/.exec(s)`` call the language's or the
+    host's own objects. The noise guard catches some of them, but only
+    after the same-file rung, so ``Date.now()`` in a file that defines
+    ``now`` landed on it. A head the file binds (a parameter, a local,
+    an import, a same-file symbol) is the file's own, and a repo JS/TS
+    type of the head's name (a ``declare global`` augmentation of
+    ``String``) may be what the call means, so neither is read as the
+    global.
+    """
+    if not call.receiver or _site_language(call.path) not in _JS_FAMILY:
+        return False
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    if first in _JS_LITERAL_HEADS:
+        head = _JS_LITERAL_HEADS[first]
+    elif _JS_NUMBER_HEAD.match(first):
+        head = "Number"
+    elif call.receiver.startswith("/") and call.receiver.count("/") >= 2:
+        head = "RegExp"
+    elif (
+        first in _JS_GLOBAL_RECEIVERS
+        and call.bound is None
+        and first not in file_imports
+        and not ctx.by_name_path.get((first, call.path))
+    ):
+        head = first
+    else:
+        return False
+
+    return not any(
+        s.kind in TYPE_KINDS and s.language in _JS_FAMILY
+        for s in ctx.index.get(head, ())
+    )
 
 
 def _settled_before_lookup(
     call: RawCall,
     caller_id: str,
     walk: WalkResult,
-    index: dict[str, list[Symbol]],
+    ctx: _WalkCtx,
     file_imports: dict[str, Import],
-    repo_stems: set[str],
     edges: dict[tuple[str, str], set[int]],
     external: dict[tuple[str, str], set[int]],
 ) -> bool:
     """Record a call the candidate ladder never sees, if this is one.
 
-    A bare call to a parameter (see ``_bare_call_is_param``), and a
-    call whose receiver is typed outside the repo or names an outside
-    import. Returns whether the call was recorded.
+    A bare call to a parameter (see ``_bare_call_is_param``), a JS/TS
+    call on a literal or a standard global (``_js_global_receiver``),
+    and a call whose receiver is typed outside the repo or names an
+    outside import. Returns whether the call was recorded.
     """
     if _bare_call_is_param(call):
-        _resolve_param_call(call, caller_id, index, edges, external)
+        _resolve_param_call(call, caller_id, ctx.index, edges, external)
         return True
-    if walk.kind == "foreign" or _receiver_is_external(
-        call, file_imports, repo_stems
+    if (
+        walk.kind == "foreign"
+        or _js_global_receiver(call, ctx, file_imports)
+        or _receiver_is_external(call, file_imports, ctx.repo_stems)
     ):
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return True
@@ -6257,18 +7069,561 @@ def _settled_before_lookup(
 def _walk_one_segment(
     call: RawCall, caller: Symbol | None, ctx: _WalkCtx
 ) -> WalkResult:
-    """A one-segment receiver: walked only when it is a bare field.
+    """A one-segment receiver: walked when its declaration types it, it
+    is a bare field, or it is a JVM parameter typed by a nested path.
 
+    ``result_type.getElementType()`` on a C++ ``ShapedType`` parameter
+    is read from the declaration (``_walk_declared_receiver``).
     ``repository.findAll()`` in Java, Kotlin or C++ is a call on the
-    caller's field. Every other one-segment receiver (self, a typed
-    parameter, a type name) stays with the structural rungs.
+    caller's field. ``builder.up()`` on a ``Health.Builder builder``
+    parameter is walked too (``_walk_nested_param``). Every other
+    one-segment receiver (self, a typed parameter, a type name) stays
+    with the structural rungs.
     """
     receiver = call.receiver or ""
     if not _WALK_PLAIN_NAME.match(receiver):
         return _WALK_UNKNOWN
+    declared = _walk_declared_receiver(receiver, call, caller, ctx)
+    if declared is not None:
+        return declared
+    nested = _walk_nested_param(receiver, call, caller, ctx)
+    if nested is not None:
+        return nested
     result, _ = _walk_bare_field(receiver, None, call, caller, ctx)
 
     return result
+
+
+def _walk_declared_receiver(
+    name: str, call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> WalkResult | None:
+    """A one-segment receiver typed by its declaration, walked from it.
+
+    The one place a language reads a plain-name receiver's declared
+    type (a parameter's, or a local's where the extractor records it)
+    ahead of the structural rungs. A branch returns the walk's verdict,
+    which the resolver applies like any walk: ``foreign`` sends the
+    call external, ``typed`` narrows it to that type's members (one is
+    the target, several narrow the ladder), ``unknown`` leaves it to
+    the ladder. ``None`` means the language has no reading for this
+    receiver, and the one-segment rules below run as before.
+
+    C and C++: a typed local (``RawCall.receiver_type``), else a typed
+    parameter of the caller. The typed-parameter rung compares
+    ``Type.name`` with qualnames, which a namespaced C++ member never
+    matches, an outside type (``mlir::Value``, ``std::vector<int>``)
+    gives it nothing to say, and nothing read a local's type at all, so
+    the ladder's sole candidate took the call.
+
+    Python: ``self``/``cls``, declared by the method's class
+    (``_walk_python_self``).
+
+    Java and Kotlin: a parameter or local declared with a type the walk
+    can read, outside or in-repo (``_walk_jvm_declared``).
+
+    Rust and JS/TS: a typed parameter, kept only when its type is outside
+    the repo (``_walk_outside_param``; Rust first checks the reading can
+    be trusted, ``_walk_rust_param``).
+    """
+    local = _walk_local_type(call, ctx)
+    if local is not None:
+        return local
+    language = _site_language(call.path)
+    if language in ("java", "kotlin"):
+        return _walk_jvm_declared(name, call, caller, ctx)
+    if caller is None:
+        return None
+    if language == "python":
+        return _walk_python_self(name, call, caller, ctx)
+    if language == "rust":
+        return _walk_rust_param(name, call, caller, ctx)
+    if language in _JS_FAMILY:
+        param = _walk_param(caller, name)
+        if param is None or _js_param_names_repo(param.type, call.path, ctx):
+            return None
+        return _walk_outside_param(name, caller, ctx)
+    if language in _CPP_FAMILY:
+        param = _walk_param(caller, name)
+        if param is None or not param.type:
+            return None
+        result, _ = _walk_param_type(param, None, caller, ctx)
+        return result
+
+    return None
+
+
+def _walk_rust_param(
+    name: str, call: RawCall, caller: Symbol, ctx: _WalkCtx
+) -> WalkResult | None:
+    """A Rust parameter typed outside the repo, walked: the call is
+    external.
+
+    ``rng.random_range(0..9)`` on ``mut rng: StdRng`` can only be
+    rand's, but nothing read the parameter's type when it named no
+    repo type, so the ladder handed the call to the repo's one
+    ``random_range``. Only a ``foreign`` verdict is kept; any other
+    leaves the receiver to the rungs below, as before. It abstains when
+    the outside reading may be wrong (``_rust_param_abstains``).
+
+    Only a dot-call is judged: ``filter::init_env_filter(filter)``
+    names the crate's ``filter`` module, whatever a parameter called
+    ``filter`` holds.
+    """
+    if not _rust_is_dot_call(call) or _walk_is_self(name, call.path):
+        return None
+    param = _walk_param(caller, name)
+    if param is None or not param.type:
+        return None
+    if _rust_param_abstains(param.type, call, ctx):
+        return None
+
+    return _walk_outside_param(name, caller, ctx)
+
+
+_JS_TYPE_HEAD = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*")
+_JS_TYPE_ARGS = re.compile(r"<[^<>]*>")
+
+
+def _js_param_names_repo(text: str | None, path: str, ctx: _WalkCtx) -> bool:
+    """Whether a JS/TS parameter type may name a repo type the walk
+    can't read.
+
+    The walk reads a name the file neither imports nor defines as a
+    global, which a module file can only mean. A script file (no
+    ``import``/``export``) also sees every other script's top-level
+    types, so a repo type of that name may be what it means. And a
+    dotted path off an in-repo import (``p: NS.Thing`` with ``NS`` from
+    the repo's own namespace) is the repo's whatever the walk made of it.
+    Type arguments don't count: ``Map<string, Rule>`` is still ``Map``.
+    """
+    if not text:
+        return False
+    while True:
+        stripped = _JS_TYPE_ARGS.sub("", text)
+        if stripped == text:
+            break
+        text = stripped
+    imports = ctx.imports_by_file.get(path, {})
+    for token in _JS_TYPE_HEAD.findall(text):
+        imp = imports.get(token)
+        if imp is not None:
+            if _js_import_in_repo(imp):
+                return True
+            continue
+        if any(
+            s.kind in TYPE_KINDS and s.language in _JS_FAMILY
+            for s in ctx.index.get(token, ())
+        ):
+            return True
+
+    return False
+
+
+def _js_import_in_repo(imp: Import) -> bool:
+    """Whether a JS/TS import binding comes from the repo: its specifier
+    was followed to a repo file, is relative, or names a workspace
+    package. (A scoped package such as ``@playwright/test`` is outside
+    however its last segment reads.)"""
+    return (
+        bool(getattr(imp, "origins", ()))
+        or imp.source.startswith(".")
+        or isinstance(imp, _WorkspaceImport)
+    )
+
+
+def _walk_outside_param(
+    name: str, caller: Symbol, ctx: _WalkCtx
+) -> WalkResult | None:
+    """The caller's parameter ``name``, walked only to call it outside.
+
+    ``signal.throwIfAborted()`` on ``signal: AbortSignal`` or
+    ``logger.debug(..)`` on a pino ``logger: PinoLogger`` can only reach
+    the outside type's method. A ``foreign`` reading is the verdict; any
+    other leaves the receiver to the rungs that already read a parameter
+    typed in the repo.
+    """
+    param = _walk_param(caller, name)
+    if param is None or not param.type:
+        return None
+    result, _ = _walk_param_type(param, None, caller, ctx)
+    if result.kind != "foreign":
+        return None
+
+    return result
+
+
+def _rust_param_abstains(text: str, call: RawCall, ctx: _WalkCtx) -> bool:
+    """Whether a Rust parameter type's outside reading can't be trusted.
+
+    ``source: &mut Self`` names the caller's own type, which the walk
+    can't look up by name. A trait in the repo can bring ``call.name``
+    to an outside value (``lparam.signed_hiword()`` through ``impl
+    HiLoWord for LPARAM``). And the extractor files a ``use`` inside
+    ``mod tests {}`` for the whole file, so an outside import there
+    (``use anyhow::Context``) shadows the repo type of that name the
+    rest of the file means (``cx: &mut Context<Self>``).
+    """
+    if "Self" in _TYPE_TOKEN_RE.findall(text):
+        return True
+    if ctx.index.get(_RUST_TRAIT_REACH_KEY + call.name):
+        return True
+    imports = ctx.imports_by_file.get(call.path, {})
+    for token, _ in _typed_param_token_candidates(text):
+        imp = imports.get(token)
+        if imp is None or _import_is_in_repo(imp, ctx.repo_stems):
+            continue
+        if any(
+            s.kind in TYPE_KINDS
+            and s.kind != "type_alias"
+            and s.language == "rust"
+            for s in ctx.index.get(token, ())
+        ):
+            return True
+
+    return False
+
+
+def _walk_jvm_declared(
+    name: str, call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> WalkResult | None:
+    """A JVM parameter or local, walked from the type it is declared with.
+
+    ``config.getMaxRequestSize()`` on ``MultipartConfigElement config``
+    can only call the servlet API's method, so it goes external, as a
+    field of that type already does; the ladder used to hand it the
+    repo's lone ``getMaxRequestSize``. That holds for an outside
+    interface an in-repo class implements: the declared type is all the
+    call site knows, unless a Java local is built right there by an
+    in-repo class (``Resource res = new OriginTrackedResource(..)``),
+    which is then walked instead (``RawCall.receiver_init``).
+
+    A parameter or Java local declared with an in-repo type is walked
+    like a field of that type: ``health.getStatus()`` on ``Health
+    health`` takes ``Health``'s own or inherited ``getStatus``, where
+    the ladder saw every ``getStatus`` in the repo. For a parameter
+    this runs ahead of the typed-parameter rung, which reads only the
+    type's own name, so it missed a method an in-repo supertype
+    declares and couldn't tell a method only an outside supertype holds
+    (``getBean`` on an interface extending Spring's
+    ``ApplicationContext``) from one the repo has.
+
+    Java reads the type the extractor recorded
+    (``RawCall.receiver_type``); Kotlin reads a parameter's (its locals
+    are mostly inferred). An ``unknown`` verdict is ``None``, so a
+    receiver the walk can't type stays with the rungs below.
+    """
+    if call.bound not in ("param", "local"):
+        return None
+    if _site_language(call.path) == "kotlin":
+        param = _walk_param(caller, name) if call.bound == "param" else None
+        text = param.type if param is not None else None
+    else:
+        text = call.receiver_type
+    if not text or text.strip() in ("", "var"):
+        return None
+    result = _walk_type_text(text, call.path, ctx)
+    if result.kind == "foreign" and call.receiver_init:
+        built = _walk_type_text(call.receiver_init, call.path, ctx)
+        if built.kind == "typed":
+            return built
+    if result.kind in ("foreign", "typed"):
+        return result
+
+    return None
+
+
+def _walk_local_type(call: RawCall, ctx: _WalkCtx) -> WalkResult | None:
+    """The walk from the declared type of a call's local receiver head.
+
+    ``None`` when the extractor recorded no type for it (only C++
+    records one: ``mlir::ShapedType t = ..``, ``auto t = cast<T>(..)``).
+    """
+    if not call.receiver_type or _site_language(call.path) not in _CPP_FAMILY:
+        return None
+
+    return _walk_type_text(call.receiver_type, call.path, ctx)
+
+
+def _walk_python_self(
+    name: str, call: RawCall, caller: Symbol, ctx: _WalkCtx
+) -> WalkResult | None:
+    """``self``/``cls`` in a Python method: the caller's class, walked.
+
+    ``self.skipTest()`` in a ``unittest.TestCase`` subclass found no
+    ``skipTest`` on the class, so the ladder's one repo ``skipTest``, on
+    an unrelated class, took it. Walked, the class's own and inherited
+    members decide, then a subclass's (a template hook the base calls),
+    and a method none of them has is external.
+
+    ``None`` keeps the old reading: outside a class, for a nested class
+    built through ``self`` (``self._Creator(..)``: a type is no member
+    the walk reads), and when a supertype clause up the class's chain
+    is one the map can't place, which could hold the method.
+    """
+    if name not in ("self", "cls"):
+        return None
+    container = _walk_container(caller, ctx)
+    if container.kind != "typed":
+        return None
+    layer = container.layers[0]
+    if _python_nested_type(layer, call.name, ctx):
+        return None
+    if _python_supers_unread(layer, ctx):
+        return None
+
+    return container
+
+
+def _python_nested_type(
+    layer: tuple[Symbol, ...], name: str, ctx: _WalkCtx
+) -> bool:
+    """Whether a type in ``layer``, or a supertype, declares a nested
+    type called ``name``."""
+    level = list(layer)
+    seen = {t.id for t in layer}
+    for _ in range(_WALK_SUPER_DEPTH + 1):
+        for owner in level:
+            qual = f"{owner.qualname}.{name}"
+            if any(
+                s.kind in TYPE_KINDS and s.qualname == qual
+                for s in ctx.by_name_path.get((name, owner.path), ())
+            ):
+                return True
+        level = [
+            s
+            for t in level
+            for s in _walk_supertypes(t, ctx)
+            if s.id not in seen
+        ]
+        if not level:
+            break
+        seen.update(s.id for s in level)
+    return False
+
+
+def _python_supers_unread(layer: tuple[Symbol, ...], ctx: _WalkCtx) -> bool:
+    """Whether a supertype clause up ``layer``'s chain is unread
+    (``_python_supertype_clause``), memoized per layer."""
+    key = tuple(t.id for t in layer)
+    hit = _PY_SUPERS_UNREAD.get(key)
+    if hit is None:
+        hit = _python_supers_unread_uncached(layer, ctx)
+        _PY_SUPERS_UNREAD[key] = hit
+    return hit
+
+
+def _python_supers_unread_uncached(
+    layer: tuple[Symbol, ...], ctx: _WalkCtx
+) -> bool:
+    """``_python_supers_unread`` without the memo: breadth-first up the
+    in-repo supertypes."""
+    seen = {t.id for t in layer}
+    level = list(layer)
+    for _ in range(_WALK_SUPER_DEPTH + 2):
+        nxt: list[Symbol] = []
+        for owner in level:
+            for stand_in in ctx.index.get(_SUPERS_KEY + owner.id, []):
+                found, verdict = _python_supertype_clause(stand_in, owner, ctx)
+                if verdict == _CLAUSE_UNREAD:
+                    return True
+                nxt.extend(t for t in found if t.id not in seen)
+        if not nxt:
+            break
+        seen.update(t.id for t in nxt)
+        level = nxt
+    return False
+
+
+# How a Python supertype clause reads (``_python_supertype_clause``):
+# to in-repo types, to something outside the repo, or to nothing the
+# map can place.
+_CLAUSE_READ = "read"
+_CLAUSE_OUTSIDE = "outside"
+_CLAUSE_UNREAD = "unread"
+# Bases that are Python's own: a class deriving from one has no repo
+# supertype there.
+_PY_BUILTIN_BASES = frozenset(
+    {
+        "object",
+        "type",
+        "property",
+        "staticmethod",
+        "classmethod",
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "str",
+        "bytes",
+        "int",
+        "float",
+        "BaseException",
+        "Exception",
+        "ArithmeticError",
+        "AssertionError",
+        "AttributeError",
+        "ImportError",
+        "IndexError",
+        "IOError",
+        "KeyError",
+        "LookupError",
+        "NotImplementedError",
+        "OSError",
+        "RuntimeError",
+        "StopIteration",
+        "TypeError",
+        "ValueError",
+        "Warning",
+        "UserWarning",
+        "DeprecationWarning",
+    }
+)
+# Import hops followed through re-exporting modules before giving up.
+_PY_REEXPORT_DEPTH = 4
+
+
+def _python_supertype_clause(
+    stand_in: Symbol, owner: Symbol, ctx: _WalkCtx
+) -> tuple[tuple[Symbol, ...], str]:
+    """The in-repo types one Python supertype clause names, and how it read.
+
+    ``mod.Name``, with ``mod`` an in-repo module the file imports, is
+    read in that module (``_python_reexported_type``): tensorflow's
+    ``test.TestCase`` is ``platform/test.py``'s import of
+    ``TensorFlowTestCase``, which the bare name ``TestCase`` never
+    finds. A bare ``Name`` is read as a type token. A clause is outside
+    when it names an import from outside the repo, a builtin, a keyword
+    (``metaclass=``) or a name no repo type has, and unread when the map
+    can't place it at all.
+    """
+    written = stand_in.qualname.strip()
+    head, dot, name = written.rpartition(".")
+    imports = ctx.imports_by_file.get(owner.path, {})
+    if dot and head and "." not in head and "(" not in written:
+        imp = imports.get(head)
+        if imp is None:
+            return (), _CLAUSE_UNREAD
+        if not _import_is_in_repo(imp, ctx.repo_stems):
+            return (), _CLAUSE_OUTSIDE
+        module_file = _python_module_file(imp.source, ctx)
+        if module_file is None:
+            return (), _CLAUSE_UNREAD
+        return _python_reexported_type(module_file, name, ctx, 0)
+    if dot:
+        return (), _CLAUSE_UNREAD
+    imp = imports.get(written)
+    if imp is not None and not _import_is_in_repo(imp, ctx.repo_stems):
+        return (), _CLAUSE_OUTSIDE
+    found = _walk_type_token(written, owner.path, ctx) or ()
+    if found:
+        return found, _CLAUSE_READ
+    if written in _PY_BUILTIN_BASES or "(" in written or "=" in written:
+        return (), _CLAUSE_OUTSIDE
+    if imp is None and not any(
+        s.kind in TYPE_KINDS for s in ctx.index.get(written, ())
+    ):
+        return (), _CLAUSE_OUTSIDE
+
+    return (), _CLAUSE_UNREAD
+
+
+def _python_reexported_type(
+    module_file: str, name: str, ctx: _WalkCtx, depth: int
+) -> tuple[tuple[Symbol, ...], str]:
+    """The type ``name`` means in a Python module, and how it read.
+
+    The module's own class ``name``, else its import of ``name``
+    followed (``from x import Y as name`` follows ``Y``), else its star
+    imports: ``from absl.testing.absltest import *`` puts ``TestCase``
+    outside the repo when no in-repo star has it.
+    """
+    own = tuple(
+        s
+        for s in ctx.by_name_path.get((name, module_file), ())
+        if s.kind in TYPE_KINDS and s.qualname == name
+    )
+    if own:
+        return own, _CLAUSE_READ
+    if depth >= _PY_REEXPORT_DEPTH:
+        return (), _CLAUSE_UNREAD
+    table = ctx.imports_by_file.get(module_file, {})
+    imp = table.get(name)
+    if imp is None:
+        return _python_star_type(table, name, ctx, depth)
+    if not _import_is_in_repo(imp, ctx.repo_stems):
+        return (), _CLAUSE_OUTSIDE
+    parent, _, last = imp.source.rpartition(".")
+    target = _python_module_file(parent, ctx)
+    if target is None:
+        return (), _CLAUSE_UNREAD
+
+    return _python_reexported_type(target, last, ctx, depth + 1)
+
+
+def _python_star_type(
+    table: dict[str, Import], name: str, ctx: _WalkCtx, depth: int
+) -> tuple[tuple[Symbol, ...], str]:
+    """``name`` through a module's star imports (``_PY_STAR_KEY``)."""
+    stars = [imp for key, imp in table.items() if key.startswith(_PY_STAR_KEY)]
+    if not stars:
+        return (), _CLAUSE_UNREAD
+    for star in stars:
+        if not _import_is_in_repo(star, ctx.repo_stems):
+            continue
+        target = _python_module_file(star.source, ctx)
+        if target is None:
+            continue
+        found = _python_reexported_type(target, name, ctx, depth + 1)
+        if found[0]:
+            return found
+    if all(not _import_is_in_repo(s, ctx.repo_stems) for s in stars):
+        return (), _CLAUSE_OUTSIDE
+
+    return (), _CLAUSE_UNREAD
+
+
+# ``_PY_MODULE_FILES`` holds this key once it has been filled.
+_PY_MODULES_BUILT = "::built::"
+
+
+def _python_module_file(source: str, ctx: _WalkCtx) -> str | None:
+    """The file of the Python module ``source`` names (``a.b.c``),
+    dotted from the repo root, or ``None``."""
+    if _PY_MODULES_BUILT not in _PY_MODULE_FILES:
+        paths = {path for _, path in ctx.by_name_path}
+        paths.update(ctx.imports_by_file)
+        for path in sorted(paths):
+            if path.endswith(_PY_EXTENSIONS):
+                module = _python_module_path(path).replace("/", ".")
+                _PY_MODULE_FILES.setdefault(module, path)
+        _PY_MODULE_FILES[_PY_MODULES_BUILT] = ""
+
+    return _PY_MODULE_FILES.get(source) or None
+
+
+def _walk_nested_param(
+    name: str, call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> WalkResult | None:
+    """A JVM parameter typed by a nested path (``Health.Builder``), walked.
+
+    The typed-parameter rung reads a declared type by its outermost
+    token, which for a nested path is the outer type: ``builder.up()``
+    would land on the static ``Health.up``. Walked, the path is read by
+    qualname, and its members (own, then inherited) decide. ``None``
+    when ``name`` isn't such a parameter, which leaves the call as it
+    was.
+    """
+    if caller is None or _site_language(call.path) not in _JVM_TYPE_LANGUAGES:
+        return None
+    param = _walk_param(caller, name)
+    if param is None or not param.type:
+        return None
+    text = _declared_type_text(param.type, caller.path).strip()
+    if not _WALK_DOTTED_TYPE.match(text):
+        return None
+
+    return _walk_type_text(text, caller.path, ctx)
 
 
 def _walk_bare_field(
@@ -6418,8 +7773,9 @@ def _walk_hop_zero(
     caller: Symbol | None,
     ctx: _WalkCtx,
 ) -> tuple[WalkResult, int]:
-    """Type a receiver's first segment: self, a parameter, a type, or
-    (Java, Kotlin, C++) a field used without ``this``.
+    """Type a receiver's first segment: self, a typed local (C++), a
+    parameter, a type, or (Java, Kotlin, C++) a field used without
+    ``this``.
 
     Returns the result and how many segments it used: two for a
     parameter with an inline object type (``input: { client: Client }``),
@@ -6430,6 +7786,9 @@ def _walk_hop_zero(
         return _walk_container(caller, ctx), 1
     if first.endswith("()"):
         return _walk_bare_call(first[:-2], path, caller, ctx), 1
+    local = _walk_local_type(call, ctx)
+    if local is not None:
+        return local, 1
     param = _walk_param(caller, first)
     if param is not None:
         return _walk_param_type(param, nxt, caller, ctx)
@@ -6467,21 +7826,48 @@ def _walk_bare_call(
     ctx: _WalkCtx,
 ) -> WalkResult:
     """A bare call at hop zero: a method of the caller's container, else
-    a same-file function, typed by its declared return type."""
+    a same-file function, typed by its declared return type.
+
+    In JS/TS, a name the file doesn't define is followed through its
+    import (``_walk_imported_function``), and the function's return type
+    is read in the function's own file: ``getFocusManager(node)`` names
+    ``FocusManager``, which only the defining file imports.
+    """
     container = _walk_container(caller, ctx)
     if container.kind == "typed":
         result = _walk_call(container, name, ctx)
         if result.kind != "unknown":
             return result
-    local = [
-        s
-        for s in ctx.by_name_path.get((name, path), ())
-        if s.kind == "function" and s.returns
-    ]
+    defined = ctx.by_name_path.get((name, path), ())
+    local = [s for s in defined if s.kind == "function" and s.returns]
+    if not defined and _site_language(path) in _JS_FAMILY:
+        imported = _walk_imported_function(name, path, ctx)
+        if imported is not None:
+            return _walk_type_text(imported.returns or "", imported.path, ctx)
     if len(local) != 1:
         return _WALK_UNKNOWN
 
     return _walk_type_text(local[0].returns or "", path, ctx)
+
+
+def _walk_imported_function(
+    name: str, path: str, ctx: _WalkCtx
+) -> Symbol | None:
+    """The one top-level function with a declared return type that
+    ``path``'s in-repo import of ``name`` brings in."""
+    imp = ctx.imports_by_file.get(path, {}).get(name)
+    if imp is None or not _import_is_in_repo(imp, ctx.repo_stems):
+        return None
+    found = [
+        s
+        for s in ctx.index.get(imp.name or name, ())
+        if s.kind == "function"
+        and s.returns
+        and "." not in s.qualname
+        and _module_matches(imp.source, s.path)
+    ]
+
+    return found[0] if len(found) == 1 else None
 
 
 def _walk_is_self(name: str, path: str) -> bool:
@@ -6600,22 +7986,49 @@ def _walk_type_fields_uncached(
 
 
 def _walk_supertypes(owner: Symbol, ctx: _WalkCtx) -> list[Symbol]:
-    """The in-repo types ``owner`` declares as its supertypes (memoized)."""
+    """The in-repo types ``owner`` declares as its supertypes (memoized).
+
+    A JVM supertype is read by its written path (``_walk_supertype``).
+    """
     hit = _WALK_SUPERS.get(owner.id)
     if hit is None:
-        names = [
-            s.name
-            for s in ctx.index.get(_SUPERS_KEY + owner.id, [])
-            + ctx.index.get(_SUPERS_KEY + "@" + owner.name, [])
-        ]
-        names += _go_embedded_types(owner)
-        hit = [
+        stand_ins = ctx.index.get(_SUPERS_KEY + owner.id, []) + ctx.index.get(
+            _SUPERS_KEY + "@" + owner.name, []
+        )
+        hit = [t for s in stand_ins for t in _walk_supertype(s, owner, ctx)]
+        hit += [
             t
-            for name in names
+            for name in _go_embedded_types(owner)
             for t in _walk_type_token(name, owner.path, ctx) or ()
         ]
         _WALK_SUPERS[owner.id] = hit
     return hit
+
+
+def _walk_supertype(
+    stand_in: Symbol, owner: Symbol, ctx: _WalkCtx
+) -> tuple[Symbol, ...]:
+    """The in-repo types one supertype clause names.
+
+    A JVM clause written as a nested path is read by that path:
+    ``class Options extends Api.Options`` by its last segment alone
+    would find the ``Options`` declaring it, and see no supertype at
+    all. A Python clause is read through the module it names
+    (``_python_supertype_clause``). Every other clause is read by its
+    name, as a type token.
+    """
+    if owner.language == "python":
+        return _python_supertype_clause(stand_in, owner, ctx)[0]
+    written = _declared_type_text(stand_in.qualname, owner.path).strip()
+    if (
+        owner.language in _JVM_TYPE_LANGUAGES
+        and written != stand_in.name
+        and _WALK_DOTTED_TYPE.match(written)
+    ):
+        found = _walk_nested_type(written, owner.path, ctx)
+        return found.layers[0] if found.kind == "typed" else ()
+
+    return _walk_type_token(stand_in.name, owner.path, ctx) or ()
 
 
 def _go_embedded_types(owner: Symbol) -> list[str]:
@@ -6629,12 +8042,34 @@ def _go_embedded_types(owner: Symbol) -> list[str]:
     ]
 
 
+def _declared_type_text(text: str, path: str) -> str:
+    """``text`` without its type-use annotations, at a JVM site.
+
+    ``LoaderZipEntries.@Nullable WrittenEntries`` is the nested type
+    ``LoaderZipEntries.WrittenEntries``; read with the annotation, its
+    first PascalCase token is the outer type (or, in
+    ``a.b.@Nullable Logger``, the annotation itself). Stored type texts
+    keep the annotation for display and type search; the resolver drops
+    it when it reads one.
+    """
+    if "@" not in text or _site_language(path) not in _JVM_TYPE_LANGUAGES:
+        return text
+    return _DECLARED_TYPE_ANNOTATION.sub("", text)
+
+
 def _walk_type_text(text: str, path: str, ctx: _WalkCtx) -> WalkResult:
-    """The types a declared type text names, read in ``path`` (memoized)."""
+    """The types a declared type text names, read in ``path`` (memoized).
+
+    A foreign verdict on a text with type arguments says so
+    (``WalkResult.type_args``).
+    """
+    text = _declared_type_text(text, path)
     key = (path, text)
     hit = _WALK_TEXTS.get(key)
     if hit is None:
         hit = _walk_type_text_uncached(text, path, ctx)
+        if hit.kind == "foreign" and "<" in text:
+            hit = _WALK_FOREIGN_WITH_ARGS
         _WALK_TEXTS[key] = hit
     return hit
 
@@ -6648,10 +8083,23 @@ def _walk_type_text_uncached(
     (``list[X]``, ``std::vector<X>``, ``map[K]V``), a type under a
     module or crate outside the repo, or a text with no in-repo token
     is ``foreign``. A text that says nothing (``any``) is ``unknown``.
-    Otherwise each token of the wrapper chain
-    (``_typed_param_token_candidates``) that names an in-repo type
-    becomes a layer.
+    Otherwise each token of the wrapper chain that names an in-repo
+    type becomes a layer (``_walk_type_tokens``). A C/C++ text written
+    with a scope is read by that whole path first
+    (``_walk_cpp_written_type``), a TS union or type operator by what it
+    means (``_walk_ts_written_type``), and a JVM nested path with type
+    arguments (``JsonWriter.Members<LogEvent>``) by its path, not its
+    outer type.
     """
+    written = _walk_cpp_written_type(text, path, ctx)
+    if written is None:
+        written = _walk_ts_written_type(text, path, ctx)
+    if written is not None:
+        return written
+    if _site_language(path) in _JVM_TYPE_LANGUAGES:
+        generic = _WALK_JVM_NESTED_GENERIC.match(text.strip())
+        if generic:
+            return _walk_nested_type(generic.group(1), path, ctx)
     stripped = _walk_unwrapped(text.strip().lstrip("&*").strip())
     if stripped is None:
         return _WALK_FOREIGN
@@ -6661,10 +8109,36 @@ def _walk_type_text_uncached(
         return _walk_nested_type(stripped, path, ctx)
     if _walk_head_is_foreign(stripped, path, ctx):
         return _WALK_FOREIGN
+
+    return _walk_type_tokens(stripped, path, ctx)
+
+
+def _walk_type_tokens(stripped: str, path: str, ctx: _WalkCtx) -> WalkResult:
+    """The layers the tokens of an unwrapped type text name.
+
+    Each token of the wrapper chain (``_typed_param_token_candidates``)
+    that names an in-repo type becomes a layer, an alias read through
+    to its target (``_walk_alias_token``). No layer is ``unknown`` when
+    a token was a type parameter or an alias the walk can't read, else
+    ``foreign``.
+    """
     layers: list[tuple[Symbol, ...]] = []
     is_open = False
+    # An alias of an outside template stays a template
+    # (``WalkResult.type_args``), though the text naming it has no ``<``.
+    foreign = _WALK_FOREIGN
     for token, _ in _typed_param_token_candidates(stripped):
-        found = _walk_type_token(token, path, ctx)
+        found = _walk_text_token(token, stripped, path, ctx)
+        through = _walk_alias_token(token, found, stripped, path, ctx)
+        if through is not None:
+            if through.kind == "typed":
+                layers.extend(through.layers)
+                is_open = is_open or through.open
+            elif through.kind == "unknown":
+                is_open = True
+            elif through.type_args:
+                foreign = through
+            continue
         if found:
             layers.append(found)
         elif found is not None or _walk_is_type_parameter(token):
@@ -6672,7 +8146,504 @@ def _walk_type_text_uncached(
     if layers:
         return WalkResult("typed", tuple(layers), is_open)
 
-    return _WALK_UNKNOWN if is_open else _WALK_FOREIGN
+    return _WALK_UNKNOWN if is_open else foreign
+
+
+def _walk_alias_token(
+    token: str,
+    found: tuple[Symbol, ...] | None,
+    stripped: str,
+    path: str,
+    ctx: _WalkCtx,
+) -> WalkResult | None:
+    """What ``token`` stands for when it names a type alias, read
+    through; ``None`` when it doesn't.
+
+    ``found`` is what the token looked up to (``_walk_text_token``): C/C++
+    aliases come back in it (``_walk_cpp_aliases``), while a Rust name
+    that only aliases have comes back as ``()`` (``_walk_rust_aliases``).
+    """
+    if found and any(_is_cpp_alias(s) for s in found):
+        args = _cpp_template_args(stripped, token)
+        return _walk_cpp_aliases(found, args, ctx)
+    if found == () and _site_language(path) == "rust":
+        return _walk_rust_aliases(token, ctx)
+
+    return None
+
+
+def _walk_text_token(
+    token: str, stripped: str, path: str, ctx: _WalkCtx
+) -> tuple[Symbol, ...] | None:
+    """The types one ``token`` of ``stripped`` names (as
+    ``_walk_type_token``), an unqualified C/C++ token looked up from
+    its scope first (``_walk_cpp_bare_token``)."""
+    found = _walk_type_token(token, path, ctx)
+    if _site_language(path) not in _CPP_FAMILY or re.search(
+        r"::\s*" + re.escape(token) + r"\b", stripped
+    ):
+        return found
+    bare = _walk_cpp_bare_token(token, path, ctx)
+    if bare is None:
+        return found
+
+    return bare or None
+
+
+def _walk_cpp_bare_token(
+    token: str, path: str, ctx: _WalkCtx
+) -> tuple[Symbol, ...] | None:
+    """The C/C++ types an unqualified ``token`` names from ``path``, in
+    C++ lookup order.
+
+    1. The file's own ``using ns::Name;`` for it, read as that written
+       path (``()`` when the path leads outside the repo).
+    2. The types of that name in the same file.
+    3. The types and visible aliases whose scope is the innermost of
+       the scopes ``path``'s definitions sit in (or global), so
+       ``Status`` in a ``tf::data`` file is ``tf``'s alias, not
+       ``tf::exp``'s class.
+
+    Returns ``None`` when no candidate's scope is visible (a ``using
+    namespace`` directive, which this doesn't read), so the by-path
+    reading stands.
+    """
+    for decl in ctx.index.get(_CPP_FILE_USING_KEY + path, ()):
+        if decl.name == token:
+            used = _walk_cpp_written_type(decl.qualname, path, ctx)
+            if used is None or used.kind == "unknown":
+                return None
+            return used.layers[0] if used.kind == "typed" else ()
+    types = [
+        s
+        for s in (
+            *ctx.index.get(token, ()),
+            *ctx.index.get(_CPP_ALIAS_KEY + token, ()),
+        )
+        if _is_cpp_type(s)
+        and (not _is_cpp_alias(s) or _cpp_alias_visible(s, path, ctx, True))
+    ]
+    same = tuple(s for s in types if s.path == path)
+    if same or not types:
+        return same or None
+    scopes = {
+        "",
+        *(s.name for s in ctx.index.get(_CPP_FILE_SCOPES_KEY + path, ())),
+    }
+    best: list[Symbol] = []
+    best_len = -1
+    for sym in types:
+        prefix = [s for s in _PATH_SPLIT.split(sym.qualname) if s][:-1]
+        if ".".join(prefix) not in scopes:
+            continue
+        if len(prefix) > best_len:
+            best, best_len = [sym], len(prefix)
+        elif len(prefix) == best_len:
+            best.append(sym)
+
+    return tuple(_walk_nearest(best, path)) or None
+
+
+# TS utility types that are still their first type argument to a
+# caller (``Pick<Svc, "run">`` has ``Svc``'s ``run``).
+_TS_PASS_THROUGH = re.compile(
+    r"\s*(?:Partial|Readonly|Required|NonNullable|Pick|Omit|NoInfer)"
+    r"\s*<(.*)>\s*\Z",
+    re.S,
+)
+# A TS type the walk can't compute: an object type literal, a type
+# query or operator, an indexed access, or a utility type whose result
+# isn't its argument.
+_TS_UNREADABLE = re.compile(
+    r"\A\s*\{|\btypeof\b|\bkeyof\b|\binfer\b|[\w$>)\]]\[\s*[\"'\w]"
+    r"|(?:\A|[^\w$.])(?:ReturnType|InstanceType|Awaited|Parameters"
+    r"|ConstructorParameters|Extract|Exclude|ThisType)\s*<"
+)
+_TS_NULLISH = frozenset({"null", "undefined", "void"})
+
+
+def _walk_ts_written_type(
+    text: str, path: str, ctx: _WalkCtx
+) -> WalkResult | None:
+    """What a TS union or type operator names; ``None`` for any other
+    text, or outside JS/TS.
+
+    A union or intersection drops its ``null``/``undefined``/``void``
+    members: one left is read on its own, several are ``foreign`` only
+    when every one is (``string | Buffer``) and ``unknown`` otherwise
+    (``Error | AppError``). ``Partial``, ``Readonly``, ``Required``,
+    ``NonNullable``, ``Pick``, ``Omit`` and ``NoInfer`` are read as
+    their first argument. ``typeof x``, ``keyof``, an indexed access,
+    an object type literal and the computing utility types
+    (``ReturnType<..>``) are ``unknown``: they name a type the walk
+    can't work out, which isn't one outside the repo.
+    """
+    if _site_language(path) not in _JS_FAMILY:
+        return None
+    members = _ts_type_members(text)
+    if len(members) > 1:
+        kinds = {_walk_type_text(m, path, ctx).kind for m in members}
+        return _WALK_FOREIGN if kinds == {"foreign"} else _WALK_UNKNOWN
+    if len(members) == 1 and members[0] != text.strip():
+        return _walk_type_text(members[0], path, ctx)
+    through = _TS_PASS_THROUGH.match(text)
+    if through:
+        first = _ts_first_type_arg(through.group(1))
+        return _walk_type_text(first, path, ctx) if first else _WALK_UNKNOWN
+    if _TS_UNREADABLE.search(text):
+        return _WALK_UNKNOWN
+
+    return None
+
+
+def _ts_type_members(text: str) -> list[str]:
+    """The top-level ``|``/``&`` members of a TS type text, nullish
+    ones dropped."""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in "<([{":
+            depth += 1
+        elif ch in ">)]}":
+            depth -= 1
+        elif ch in "|&" and depth == 0:
+            parts.append(text[start:i].strip())
+            start = i + 1
+    parts.append(text[start:].strip())
+    return [p for p in parts if p and p not in _TS_NULLISH]
+
+
+def _ts_first_type_arg(args: str) -> str:
+    """The first top-level argument of a TS type argument list."""
+    depth = 0
+    for i, ch in enumerate(args):
+        if ch in "<([{":
+            depth += 1
+        elif ch in ">)]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return args[:i].strip()
+
+    return args.strip()
+
+
+# A C/C++ type written as a path: an optional leading ``::``, the
+# scopes, the name. Decorations (``_CPP_TYPE_DECORATION``, ``*``, ``&``)
+# and spaces are dropped before matching.
+_CPP_WRITTEN_PATH = re.compile(r"(::)?((?:[A-Za-z_]\w*::)+)?([A-Za-z_]\w*)\Z")
+_CPP_TYPE_DECORATION = re.compile(
+    r"\b(?:const|volatile|struct|class|typename|enum)\b"
+)
+
+
+def _walk_cpp_written_type(
+    text: str, path: str, ctx: _WalkCtx
+) -> WalkResult | None:
+    """The types a C/C++ type text written with a scope names.
+
+    ``absl::Status`` is read as that whole path, not by its last token
+    (which finds the repo's unrelated ``tf::experimental::Status``):
+
+    1. the in-repo C/C++ types whose qualname ends with the path; of
+       several, the innermost a scope of ``path``'s own definitions
+       reaches (``internal::View`` written in ``a::utils`` is
+       ``a::utils::internal``'s, as C++ lookup reads it);
+    2. none, and a scope of the path is an in-repo type: a member the
+       map has no symbol for (``Analysis::Info``), so ``unknown``;
+    3. none, and an in-repo type of that name sits under the head
+       namespace (``tflite::Interp`` for ``tflite::impl::Interp``, a
+       namespace-level alias): those types;
+    4. otherwise ``foreign``. ``std::`` is always foreign.
+
+    An alias the path reaches (``Outer::Info`` for a class's ``using
+    Info = Real;``, visible from any file that can see the class) is
+    read through to what it names, with the written template
+    arguments.
+
+    A template is judged by its outer path (``absl::Span<int>``),
+    unless its outer name is a wrapper whose argument is the type
+    (``std::unique_ptr<Foo>``).
+
+    Returns:
+        The verdict, or ``None`` outside C/C++ and for a text written
+        without a scope (or a name no in-repo type has), which the
+        by-name reading handles.
+    """
+    if _site_language(path) not in _CPP_FAMILY:
+        return None
+    written = _CPP_TYPE_DECORATION.sub(" ", text)
+    written = re.sub(r"\s+", "", written.replace("*", " ").replace("&", " "))
+    if "<" in written:
+        outer = written.split("<", 1)[0]
+        last = outer.rsplit("::", 1)[-1]
+        if (
+            "::" in outer
+            and last not in _WALK_LOWER_WRAPPERS
+            and last not in _TRANSPARENT_TYPE_WRAPPERS
+        ):
+            written = outer
+    match = _CPP_WRITTEN_PATH.match(written)
+    if match is None or not match.group(2):
+        return None
+    scopes = [s for s in match.group(2).split("::") if s]
+    name = match.group(3)
+    if scopes[0] == "std":
+        return _WALK_FOREIGN
+    types = [
+        s
+        for s in (
+            *ctx.index.get(name, ()),
+            *ctx.index.get(_CPP_ALIAS_KEY + name, ()),
+        )
+        if _is_cpp_type(s)
+        and (not _is_cpp_alias(s) or _cpp_alias_visible(s, path, ctx, False))
+    ]
+    if not types:
+        return None
+    anchored = bool(match.group(1))
+    found = [
+        s
+        for s in types
+        if _on_written_path(s.qualname, [*scopes, name], anchored)
+    ]
+    if found:
+        found = _cpp_innermost(found, len(scopes) + 1, path, ctx)
+    elif any(_is_cpp_type(s) for q in scopes for s in ctx.index.get(q, ())):
+        return _WALK_UNKNOWN
+    else:
+        found = [
+            s for s in types if scopes[0] in _PATH_SPLIT.split(s.qualname)[:-1]
+        ]
+    if not found:
+        return _WALK_FOREIGN
+
+    return _walk_cpp_found(found, text, name, path, ctx)
+
+
+def _walk_cpp_found(
+    found: list[Symbol], text: str, name: str, path: str, ctx: _WalkCtx
+) -> WalkResult:
+    """The verdict for the C/C++ types a written path reached: those
+    nearest ``path``, each alias among them read through to its target
+    with the template arguments ``text`` gives ``name``."""
+    found = _walk_nearest(found, path)
+    if any(_is_cpp_alias(s) for s in found):
+        args = _cpp_template_args(text, name)
+        return _walk_cpp_aliases(tuple(found), args, ctx)
+
+    return WalkResult("typed", (tuple(found),))
+
+
+# How many C/C++ aliases deep the walk reads before it gives up
+# (``unknown``), and the aliases being read right now, so a loop
+# (``using A = B; using B = A;``) ends instead of recursing.
+_CPP_ALIAS_DEPTH = 6
+_CPP_ALIAS_ACTIVE: set[str] = set()
+
+# Files whose aliases other files can see: an alias in a source file
+# is visible only from that file.
+_CPP_HEADER_SUFFIXES = (".h", ".hh", ".hpp", ".hxx", ".inc", ".inl")
+
+
+def _is_cpp_alias(sym: Symbol) -> bool:
+    """Whether ``sym`` is a C/C++ ``using``/``typedef`` alias."""
+    return sym.kind == "type_alias" and sym.language in _CPP_FAMILY
+
+
+def _cpp_alias_visible(
+    alias: Symbol, path: str, ctx: _WalkCtx, bare: bool
+) -> bool:
+    """Whether C++ lookup from ``path`` can see ``alias``.
+
+    An alias in a source file is visible only from that file. Read by
+    bare name (``bare``), an alias is visible only when its scope is
+    global or one ``path``'s own definitions sit in, so a class's
+    ``typedef GPUDevice Device;`` types ``Device`` inside the class and
+    nowhere else. A written path (``Outer::Info``) names its scope, so
+    only the first rule applies to it.
+    """
+    if alias.path != path and not alias.path.endswith(_CPP_HEADER_SUFFIXES):
+        return False
+    if not bare:
+        return True
+    segs = [s for s in _PATH_SPLIT.split(alias.qualname) if s]
+    if len(segs) == 1:
+        return True
+    scopes = {s.name for s in ctx.index.get(_CPP_FILE_SCOPES_KEY + path, ())}
+
+    return ".".join(segs[:-1]) in scopes
+
+
+def _cpp_template_args(text: str, name: str) -> tuple[str, ...]:
+    """The template arguments written after ``name`` in ``text``.
+
+    ``("Engine",)`` for ``TrtUniquePtrType<Engine>``; ``()`` when
+    ``name`` takes none there. Commas inside nested ``<>`` or ``()``
+    don't split an argument.
+    """
+    match = re.search(r"\b" + re.escape(name) + r"\s*<", text)
+    if match is None:
+        return ()
+    args: list[str] = []
+    depth = 0
+    start = match.end()
+    for i in range(match.end(), len(text)):
+        char = text[i]
+        if char in "<(":
+            depth += 1
+        elif char in ">)" and depth:
+            depth -= 1
+        elif char in ">)":
+            args.append(text[start:i].strip())
+            return tuple(a for a in args if a)
+        elif char == "," and not depth:
+            args.append(text[start:i].strip())
+            start = i + 1
+
+    return ()
+
+
+def _cpp_alias_target_text(alias: Symbol, args: tuple[str, ...]) -> str:
+    """What ``alias`` names with its template parameters replaced by
+    ``args``, in order (all at once, so an argument that happens to
+    share a parameter's name isn't replaced again)."""
+    target = alias.returns or ""
+    pairs = dict(zip((p.name for p in alias.params), args))
+    if not pairs:
+        return target
+    pattern = r"\b(" + "|".join(map(re.escape, pairs)) + r")\b"
+
+    return re.sub(pattern, lambda m: pairs[m.group(1)], target)
+
+
+def _walk_cpp_aliases(
+    found: tuple[Symbol, ...], args: tuple[str, ...], ctx: _WalkCtx
+) -> WalkResult:
+    """``found`` with each C/C++ alias read through to what it names.
+
+    An alias has no members, so a call on one is a call on its target,
+    read in the alias's own file, with ``args`` (the use's template
+    arguments) standing in for an alias template's parameters. The
+    types found join ``found``'s other types in one layer; an alias
+    whose target reads ``unknown`` makes the result open; when every
+    target is outside the repo, the result is ``foreign`` (with type
+    arguments when a target had them, so a chain off ``using Shapes =
+    std::vector<Shape>`` isn't held outside the repo). A loop or a
+    chain deeper than ``_CPP_ALIAS_DEPTH`` reads ``unknown``.
+    """
+    layer = [s for s in found if not _is_cpp_alias(s)]
+    unknown = False
+    type_args = False
+    for alias in found:
+        if not _is_cpp_alias(alias):
+            continue
+        if (
+            not alias.returns
+            or alias.id in _CPP_ALIAS_ACTIVE
+            or len(_CPP_ALIAS_ACTIVE) >= _CPP_ALIAS_DEPTH
+        ):
+            unknown = True
+            continue
+        target = _cpp_alias_target_text(alias, args)
+        _CPP_ALIAS_ACTIVE.add(alias.id)
+        try:
+            res = _walk_type_text_uncached(target, alias.path, ctx)
+        finally:
+            _CPP_ALIAS_ACTIVE.discard(alias.id)
+        if res.kind == "typed":
+            layer.extend(t for t in res.layers[0] if t not in layer)
+            unknown = unknown or res.open or len(res.layers) > 1
+        elif res.kind == "unknown":
+            unknown = True
+        elif "<" in target:
+            type_args = True
+    if layer:
+        return WalkResult("typed", (tuple(layer),), unknown)
+    if unknown:
+        return _WALK_UNKNOWN
+
+    return _WALK_FOREIGN_WITH_ARGS if type_args else _WALK_FOREIGN
+
+
+# The Rust aliases being read through, so a loop (``type A = B; type B =
+# A;``) or a chain deeper than ``_RUST_ALIAS_DEPTH`` reads ``unknown``.
+_RUST_ALIAS_ACTIVE: set[str] = set()
+
+
+def _walk_rust_aliases(token: str, ctx: _WalkCtx) -> WalkResult:
+    """What the Rust ``type`` aliases called ``token`` stand for.
+
+    An alias has no members, so a call on a value of it is a call on
+    its target, read in the alias's own file: zed's ``pub type
+    HashMap<K, V> = FxHashMap<K, V>;`` is outside the repo, ``type
+    WrapPatch = Patch<u32>;`` is ``Patch``. Unlike a C/C++ alias, which
+    C++ lookup has already narrowed to the one in scope, the name is
+    looked up repo-wide, so aliases in unrelated crates can share it:
+    every one outside the repo is ``foreign``, one reading they all
+    share is that reading, and anything else (or a loop, or a chain too
+    deep) is ``unknown``.
+    """
+    aliases = [
+        s
+        for s in ctx.index.get(token, ())
+        if s.kind == "type_alias" and s.language == "rust" and s.returns
+    ]
+    if not aliases or len(_RUST_ALIAS_ACTIVE) >= _RUST_ALIAS_DEPTH:
+        return _WALK_UNKNOWN
+    seen: list[WalkResult] = []
+    for alias in aliases:
+        if alias.id in _RUST_ALIAS_ACTIVE:
+            seen.append(_WALK_UNKNOWN)
+            continue
+        _RUST_ALIAS_ACTIVE.add(alias.id)
+        try:
+            seen.append(
+                _walk_type_text_uncached(alias.returns, alias.path, ctx)
+            )
+        finally:
+            _RUST_ALIAS_ACTIVE.discard(alias.id)
+    if all(w.kind == "foreign" for w in seen):
+        return _WALK_FOREIGN
+    shapes = {
+        (w.kind, w.open, tuple(tuple(s.id for s in t) for t in w.layers))
+        for w in seen
+    }
+
+    return seen[0] if len(shapes) == 1 else _WALK_UNKNOWN
+
+
+def _is_cpp_type(sym: Symbol) -> bool:
+    """Whether ``sym`` is a C/C++ type."""
+    return sym.kind in TYPE_KINDS and sym.language in _CPP_FAMILY
+
+
+def _cpp_innermost(
+    found: list[Symbol], depth: int, path: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """The ``found`` types whose scope above the written path is the
+    longest one ``path``'s own definitions sit in; all of them when
+    none is.
+
+    ``depth`` is the written path's segment count, so what is left of
+    a qualname above it is the scope the path was looked up from.
+    """
+    scopes = {
+        "",
+        *(s.name for s in ctx.index.get(_CPP_FILE_SCOPES_KEY + path, ())),
+    }
+    best: list[Symbol] = []
+    best_len = -1
+    for sym in found:
+        prefix = [s for s in _PATH_SPLIT.split(sym.qualname) if s][:-depth]
+        if ".".join(prefix) not in scopes:
+            continue
+        if len(prefix) > best_len:
+            best, best_len = [sym], len(prefix)
+        elif len(prefix) == best_len:
+            best.append(sym)
+
+    return best or found
 
 
 def _walk_unwrapped(text: str) -> str | None:
@@ -6751,9 +8722,12 @@ def _walk_type_token(
     ``None`` when it names none: an import from outside the repo, a
     name no repo type has, or (JS/TS) a name the file neither imports
     nor defines, which is a global like the DOM's ``Request``. ``()``
-    when it names only a Rust ``type`` alias, which the walk can't see
-    through. Otherwise the types the import was followed to, else the
-    same-file types, else those nearest ``path``.
+    when it names only a Rust ``type`` alias, which the caller reads
+    through (``_walk_rust_aliases``). Otherwise the types the import
+    was followed to, else the same-file types, else (Java, Kotlin) the
+    type the file's import or package names (``_walk_jvm_named``), else
+    those nearest ``path``. A C/C++ type nested in a class counts only
+    where C++ lookup sees it (``_cpp_nested_visible``).
     """
     key = (path, token)
     if key not in _WALK_TOKENS:
@@ -6784,7 +8758,17 @@ def _walk_type_token_uncached(
     name = _imported_original_name(token, imp)
     types = _language_filtered_at(
         path,
-        [s for s in ctx.index.get(name, ()) if s.kind in TYPE_KINDS],
+        [
+            s
+            for s in (
+                *ctx.index.get(name, ()),
+                *ctx.index.get(_CPP_ALIAS_KEY + name, ()),
+            )
+            if s.kind in TYPE_KINDS
+            and (
+                not _is_cpp_alias(s) or _cpp_alias_visible(s, path, ctx, True)
+            )
+        ],
         bare=False,
     )
     real = [
@@ -6792,17 +8776,148 @@ def _walk_type_token_uncached(
         for s in types
         if not (s.kind == "type_alias" and s.language == "rust")
     ]
+    if language in _CPP_FAMILY:
+        real = [s for s in real if _cpp_nested_visible(s, path, ctx)]
+        if not real:
+            # A member class the map has members for but no symbol
+            # (``class Outer::Impl {..}`` out of line) may be what the
+            # name means: open, not outside the repo.
+            return () if _CPP_PHANTOM_KEY + name in ctx.index else None
     if not real:
         return () if types else None
     if language == "rust" and imp is not None:
         real = _walk_in_import_crate(real, imp, path, ctx)
+
+    return _walk_pick_type(real, imp, path, language)
+
+
+def _walk_pick_type(
+    real: list[Symbol], imp: Import | None, path: str, language: str
+) -> tuple[Symbol, ...] | None:
+    """Which of the in-repo types ``real`` a bare name in ``path`` means.
+
+    The same-file ones, else (Java, Kotlin) the one the file's import or
+    package names, else those nearest ``path``. A JS/TS name the file
+    neither imports nor defines is a global: ``None``.
+    """
     same = tuple(s for s in real if s.path == path)
     if same:
         return same
     if language in _JS_FAMILY and imp is None:
         return None
+    if language in _JVM_TYPE_LANGUAGES:
+        named = _walk_jvm_named(real, imp, path)
+        if named:
+            return named
 
     return tuple(_walk_nearest(real, path))
+
+
+def _walk_jvm_named(
+    types: list[Symbol], imp: Import | None, path: str
+) -> tuple[Symbol, ...]:
+    """The JVM ``types`` a Java or Kotlin file means by their simple name.
+
+    A single-type import names its type by fully qualified name, so
+    ``Status`` in a file importing ``com.acme.health.Status`` is that
+    one, not a nearer nested ``GrpcProperties.Status``; one name in
+    several modules (sample apps) reads as the nearest copy. With no
+    import, a top-level type of the file's own package. ``()`` when
+    neither names one, so the nearest by path stands.
+    """
+    jvm = [s for s in types if s.language in _JVM_TYPE_LANGUAGES]
+    if imp is not None and imp.source:
+        exact = [s for s in jvm if _jvm_qualified_name(s) == imp.source]
+        return tuple(_walk_nearest(exact, path))
+    here = jvm_package_dir(path)
+    if here is None:
+        return ()
+    own = [
+        s
+        for s in jvm
+        if "." not in s.qualname and jvm_package_dir(s.path) == here
+    ]
+
+    return tuple(_walk_nearest(own, path))
+
+
+def _jvm_qualified_name(sym: Symbol) -> str:
+    """A JVM type's fully qualified name: its package, then qualname."""
+    package = (jvm_package_dir(sym.path) or "").replace("/", ".")
+
+    return f"{package}.{sym.qualname}"
+
+
+def _cpp_enclosing_type(sym: Symbol, ctx: _WalkCtx) -> Symbol | None:
+    """The in-repo C/C++ class ``sym`` is nested in, if any."""
+    segs = [s for s in _PATH_SPLIT.split(sym.qualname) if s]
+    if len(segs) < 2:
+        return None
+    parent = ".".join(segs[:-1])
+    for t in ctx.index.get(segs[-2], ()):
+        if _is_cpp_type(t) and t.qualname == parent and not _is_cpp_alias(t):
+            return t
+
+    return None
+
+
+def _cpp_nested_visible(sym: Symbol, path: str, ctx: _WalkCtx) -> bool:
+    """Whether C++ lookup from ``path`` can see type ``sym`` by its bare
+    name.
+
+    A type nested in a class is visible that way only inside the class
+    (a file defining it or its members), in a class derived from it,
+    or in a file holding a class defined out of line
+    (``class Op::Dataset : public Base``), whose bases the map can't
+    read. Any other type is always visible.
+    """
+    if sym.language not in _CPP_FAMILY:
+        return True
+    outer = _cpp_enclosing_type(sym, ctx)
+    if outer is None:
+        return True
+    scopes = {s.name for s in ctx.index.get(_CPP_FILE_SCOPES_KEY + path, ())}
+    if outer.path == path or outer.qualname in scopes:
+        return True
+    if _CPP_OOL_KEY + path in ctx.index:
+        return True
+
+    return any(_cpp_scope_derives(scope, outer, ctx) for scope in scopes)
+
+
+def _cpp_scope_derives(scope: str, outer: Symbol, ctx: _WalkCtx) -> bool:
+    """Whether the C/C++ class named ``scope`` has ``outer`` among its
+    supertypes, read by clause name up to ``_WALK_SUPER_DEPTH`` levels.
+
+    By name only: reading the clauses as types would come back through
+    ``_walk_type_token``.
+    """
+    last = scope.rsplit(".", 1)[-1]
+    level = [
+        t
+        for t in ctx.index.get(last, ())
+        if _is_cpp_type(t) and t.qualname == scope
+    ]
+    seen = {t.id for t in level}
+    for _ in range(_WALK_SUPER_DEPTH):
+        names = {
+            stand_in.name
+            for t in level
+            for stand_in in ctx.index.get(_SUPERS_KEY + t.id, [])
+        }
+        if outer.name in names:
+            return True
+        level = [
+            t
+            for n in names
+            for t in ctx.index.get(n, ())
+            if _is_cpp_type(t) and t.id not in seen
+        ]
+        seen.update(t.id for t in level)
+        if not level:
+            break
+
+    return False
 
 
 def _walk_in_import_crate(
@@ -7029,6 +9144,39 @@ def _walk_member_is_local(
     return owner.language in _WALK_SPREAD_MEMBER_LANGUAGES
 
 
+def _walk_skips_noise_guard(
+    walk: WalkResult,
+    call: RawCall,
+    unwalked: list[Symbol],
+    candidates: list[Symbol],
+) -> bool:
+    """Whether a typed walk narrowed a JVM call to its type's members.
+
+    The ladder's noise guard sends a common name (``build``, ``parse``,
+    ``get``) external because a pick on the name alone is usually a
+    library call. Once the walk has read the receiver's type and handed
+    the ladder only that type's members, the name is no longer the
+    only evidence: ``this.gradleBuild.build("x")`` on a ``GradleBuild``
+    field is ``GradleBuild``'s ``build``. ``_walk_typed_verdict`` hands
+    over a new list exactly when it narrowed, and passes ``unwalked``
+    through otherwise.
+
+    Args:
+        walk: The call's receiver walk.
+        call: The call being resolved.
+        unwalked: The candidates before ``_walk_verdict``.
+        candidates: The candidates it handed the ladder.
+
+    Returns:
+        True when the ladder should skip the noise guard.
+    """
+    return (
+        walk.kind == "typed"
+        and candidates is not unwalked
+        and _site_language(call.path) in _JVM_TYPE_LANGUAGES
+    )
+
+
 def _walk_verdict(
     walk: WalkResult,
     call: RawCall,
@@ -7042,7 +9190,9 @@ def _walk_verdict(
     ``typed``: see ``_walk_typed_verdict``. ``unknown`` on a
     ``self.field.name(..)`` chain: the caller's own container's ``name``
     is dropped from the candidates, since a field of a type is not,
-    without a declared type saying so, the type itself.
+    without a declared type saying so, the type itself. A bare Java
+    call has no receiver to walk; its enclosing classes decide it
+    (``_java_scope_verdict``).
 
     Returns:
         ``(target, candidates, same_file)``: the target is a symbol, the
@@ -7053,7 +9203,7 @@ def _walk_verdict(
         return _walk_typed_verdict(walk, call, candidates, same_file, ctx)
     own = _walk_self_field_members(call, caller, ctx)
     if not own:
-        return None, candidates, same_file
+        return _java_scope_verdict(call, caller, candidates, same_file, ctx)
     ids = {m.id for m in own}
 
     return (
@@ -7094,20 +9244,72 @@ def _walk_typed_verdict(
 def _walk_implementor_members(
     walk: WalkResult, name: str, ctx: _WalkCtx
 ) -> list[Symbol]:
-    """``name`` on the types that implement the walked layer's types."""
+    """``name`` on the types that implement the walked layer's types.
+
+    Python looks further (``_python_descendant_members``).
+    """
     for layer in walk.layers:
         found = _walk_unique(
             [
                 m
                 for owner in layer
-                for sub in ctx.index.get(_SUBS_KEY + owner.name, ())
-                if _resolution_language(sub.language)
-                == _resolution_language(owner.language)
-                for m in _walk_own_members(sub, name, ctx)
+                for m in _walk_owner_implementor_members(owner, name, ctx)
             ]
         )
         if found:
             return found
+    return []
+
+
+def _walk_owner_implementor_members(
+    owner: Symbol, name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """``name`` on the types that implement ``owner``."""
+    subs = _walk_direct_subtypes(owner, ctx)
+    if owner.language == "python":
+        return _python_descendant_members(owner, subs, name, ctx)
+
+    return [m for sub in subs for m in _walk_own_members(sub, name, ctx)]
+
+
+def _walk_direct_subtypes(owner: Symbol, ctx: _WalkCtx) -> list[Symbol]:
+    """The types that name ``owner`` as a supertype, in its language."""
+    return [
+        sub
+        for sub in ctx.index.get(_SUBS_KEY + owner.name, ())
+        if _resolution_language(sub.language)
+        == _resolution_language(owner.language)
+    ]
+
+
+def _python_descendant_members(
+    owner: Symbol, subs: list[Symbol], name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """``name`` on ``owner``'s Python subclasses, nearest level first.
+
+    A template hook can live further down than a direct subclass
+    (``Layer.add_loss`` calls ``self._graph_network_add_loss()``, which
+    only ``Functional``, a ``Model`` subclass, defines), and a subclass
+    also counts what it inherits from its other bases: a mixin's
+    ``self.assertProtoEquals()`` is the method its host class gets from
+    ``TestCase``.
+    """
+    seen = {owner.id}
+    level = subs
+    for _ in range(_WALK_SUPER_DEPTH):
+        level = [s for s in level if s.id not in seen]
+        if not level:
+            break
+        seen.update(s.id for s in level)
+        found = [
+            m
+            for sub in level
+            for m in _walk_own_members(sub, name, ctx)
+            or _walk_inherited_members((sub,), name, ctx)
+        ]
+        if found:
+            return found
+        level = [d for sub in level for d in _walk_direct_subtypes(sub, ctx)]
     return []
 
 
@@ -7200,6 +9402,12 @@ def _receiver_type_match(
     ``BufferDiff.new``, called from inside ``BufferDiff``'s own file,
     read zero callers despite 13 real call sites).
 
+    C/C++ qualnames carry their namespaces
+    (``tensorflow.DeviceFactory.NewDevice``), so for a C/C++ call
+    written through exactly one scope (``DeviceFactory::NewDevice()``)
+    that finds no exact qualname, the candidates whose qualname ends
+    with ``DeviceFactory.NewDevice`` are the ones it can mean.
+
     Args:
         call: The raw call or reference being resolved.
         candidates: Every same-named symbol repo-wide (already looked
@@ -7221,6 +9429,13 @@ def _receiver_type_match(
         return None
     target_qual = f"{first}.{call.name}"
     matched = [c for c in candidates if c.qualname == target_qual]
+    if not matched and _cpp_scope_parts(call) == ([first], False):
+        matched = [
+            c
+            for c in candidates
+            if c.language in _CPP_FAMILY
+            and _on_written_path(c.qualname, [first, call.name], False)
+        ]
     if len(matched) == 1:
         return matched[0]
     return None
@@ -7257,6 +9472,7 @@ def _rust_shape_narrowed_candidates(
     index: dict[str, list[Symbol]],
     file_imports: dict[str, Import] | None = None,
     repo_stems: set[str] | None = None,
+    caller: Symbol | None = None,
 ) -> tuple[list[Symbol], list[Symbol], bool]:
     """Narrow candidates by Rust call shape, before the rest of
     ``_pick_candidate``'s ladder runs.
@@ -7270,7 +9486,9 @@ def _rust_shape_narrowed_candidates(
     (``_owned_by_receiver_type``), the same path rooted at a type the
     repo doesn't define can reach nothing at all
     (``_rust_unknown_type_path``), and a ``recv.name`` dot-call can
-    never reach a free function (``_drop_free_functions``). Split out of
+    never reach a free function (``_drop_free_functions``, when every
+    candidate is one; ``_rust_dot_call_narrowed`` for the tie a
+    same-file one causes). Split out of
     ``_pick_candidate`` purely to keep that function's cyclomatic
     complexity under the project's Ruff limit — mirrors
     ``_structural_match``'s own reason for existing.
@@ -7289,6 +9507,8 @@ def _rust_shape_narrowed_candidates(
         file_imports: The calling file's import bindings by local
             name, for the unknown-type rule's in-repo ``use`` check.
         repo_stems: Every repo file's matching stem, same purpose.
+        caller: The call's enclosing symbol, for the dot-call tie's
+            typed-parameter test.
 
     Returns:
         ``(candidates, same_file, narrowed)`` — the (possibly)
@@ -7328,9 +9548,18 @@ def _rust_shape_narrowed_candidates(
         return [], [], True
     if _rust_is_dot_call(call) and not _drop_free_functions(candidates):
         # Every candidate is a free function: nothing a dot-call could
-        # mean. Anything less than that is left alone here on purpose,
-        # see ``_pick_candidate``'s veto.
+        # mean. Dropping only some of them repo-wide is wrong: with
+        # fewer candidates the sole-candidate rung hands a std call to
+        # the repo's one method of the name (``.values()`` on a
+        # ``HashMap`` to ``TreeMap.values``). ``_pick_candidate``'s veto
+        # removes one once it's picked, and ``_rust_dot_call_narrowed``
+        # handles the one tie it can't reach.
         return [], [], True
+    dotted = _rust_dot_call_narrowed(
+        call, candidates, same_file, index, caller
+    )
+    if dotted is not None:
+        return dotted
     if _rust_is_bare_call(call):
         # A method or associated function needs ``x.`` or ``Type::``;
         # a bare ``new(cx)`` can only be a free function (or a
@@ -7571,6 +9800,83 @@ def _rust_is_bare_call(call: _Referable) -> bool:
         and not call.receiver
         and call.path.endswith(".rs")
     )
+
+
+def _rust_dot_call_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    index: dict[str, list[Symbol]],
+    caller: Symbol | None,
+) -> tuple[list[Symbol], list[Symbol], bool] | None:
+    """A Rust dot-call's one candidate, when a same-file function it
+    can't call is all that keeps the ladder from it.
+
+    ``recv.name(..)`` can't reach a function without ``self``, but
+    ``_rust_call_excludes`` only vetoes a pick: when the calling file
+    also defines a free ``name``, the same-file rung sees two symbols
+    and declines, and the call stays tied with a target it can never
+    mean (zed's ``picker.delegate.delete_recent_project(..)`` beside the
+    file's ``async fn delete_recent_project``). So when the file
+    defines such a function, the repo has exactly one ``name`` that
+    takes ``self`` (``_RUST_DOT_KEY``), and the receiver isn't one of
+    the caller's typed parameters, that function is the only
+    candidate. Each condition was measured on zed: without the
+    same-file one, std calls go to the one in-repo method of their name
+    (``.values()``, ``.or(..)``); with two methods, file locality alone
+    chooses (``branch.name()`` on git's ``Branch`` to ``Entry.name``);
+    and a typed parameter already went through ``_typed_param_match``,
+    so a method its type doesn't own is an outside one (alacritty's
+    ``term: &Term`` wrappers). The count is still checked on the pick.
+
+    Returns:
+        ``(candidates, same_file, False)`` narrowed to the one method,
+        or ``None`` to leave the call alone.
+    """
+    if not _rust_is_dot_call(call) or not any(
+        _rust_takes_no_self(s) for s in same_file
+    ):
+        return None
+    methods = index.get(_RUST_DOT_KEY + call.name, ())
+    if len(methods) != 1 or _rust_typed_param_receiver(call, caller):
+        return None
+    only = methods[0]
+    if not any(c.id == only.id for c in candidates):
+        return None
+
+    return [only], [s for s in same_file if s.id == only.id], False
+
+
+def _rust_has_self(sym: Symbol) -> bool:
+    """Whether ``sym`` is a Rust function or method taking ``self``."""
+    return (
+        sym.language == "rust"
+        and sym.kind in ("function", "method")
+        and bool(sym.params)
+        and _is_receiver_param(sym.params[0], "rust")
+    )
+
+
+def _rust_takes_no_self(sym: Symbol) -> bool:
+    """Whether ``sym`` is a Rust function or method a dot-call can't
+    reach: one with no ``self``."""
+    return (
+        sym.language == "rust"
+        and sym.kind in ("function", "method")
+        and not _rust_has_self(sym)
+    )
+
+
+def _rust_typed_param_receiver(
+    call: _Referable, caller: Symbol | None
+) -> bool:
+    """Whether a dot-call's receiver is one of the caller's parameters
+    with a declared type (``term`` in ``fn lines(term: &Term)``)."""
+    head = (call.receiver or "").strip().lstrip("&*").rstrip("?!")
+    if caller is None or not head:
+        return False
+
+    return any(p.type and p.name.split()[-1] == head for p in caller.params)
 
 
 def _drop_free_functions(symbols: list[Symbol]) -> list[Symbol]:
@@ -7960,6 +10266,7 @@ def _typed_param_match(
     )
     if not param_type:
         return None
+    param_type = _declared_type_text(param_type, call.path)
     tokens = _object_type_field_tokens(param_type, call.receiver)
     if tokens is None:
         tokens = _typed_param_token_candidates(param_type)
@@ -8299,10 +10606,11 @@ def _pick_constructor(
     is the ``(Class<?>...)`` one, and ``new ErrorPage(X.class,
     "/500")`` the ``(Class, String)`` one. Overloads nothing visible
     separates (``new ErrorPage(HttpStatus.NOT_FOUND, "/404")``) are
-    returned undecided, never guessed: dekko has no types for other
-    expressions. A constructor the call site can't reach
-    (``jvm_unreachable``, a private overload from another file) is no
-    overload of it at all.
+    returned undecided, never guessed. A name counts as its declared
+    type (a ``File file`` parameter is never a ``String``), but a call
+    result or a field chain still has no type. A constructor the call
+    site can't reach (``jvm_unreachable``, a private overload from
+    another file) is no overload of it at all.
 
     Args:
         cls: The constructed class.
@@ -8366,8 +10674,9 @@ _JAVA_ACCEPTS = {
     "char": frozenset({"char", "int", "long", "float", "double", "Character"})
     | _JAVA_ANY,
 }
-# Types a freshly constructed object or a lambda is never an instance
-# of (unless it constructs that very type).
+# Types a freshly constructed object, a lambda, or a name declared as
+# some other reference type is never an instance of (unless it
+# constructs that very type).
 _JAVA_NOT_OBJECTS = _JAVA_PRIMITIVES | frozenset(
     {
         "String",
@@ -8483,7 +10792,7 @@ def _java_literal_rules_out(
         return True
     if kind.startswith("new:"):
         return base in _JAVA_NOT_OBJECTS and base != kind[4:]
-    if kind == "lambda":
+    if kind == "lambda" or kind.startswith("type:"):
         return base in _JAVA_NOT_OBJECTS
 
     return base not in _JAVA_ACCEPTS[kind]
@@ -9716,6 +12025,34 @@ _RUST_VARIANT_KEY = "::variant::"
 # re-exports as ``H::Name``.
 _CPP_SCOPE_KEY = "::cpp-scope::"
 _CPP_USING_KEY = "::cpp-using::"
+# Reserved ``index`` namespace for C/C++ ``using``/``typedef`` aliases:
+# ``_CPP_ALIAS_KEY + name`` is the only place one is filed. Only the
+# type walk reads it (``_walk_type_token_uncached``,
+# ``_walk_cpp_written_type``), so no call, reference, heritage clause
+# or member lookup can land on an alias, which has no members: filed
+# under its plain name, a class's ``typedef X Ref;`` caught every
+# ``h->Ref()`` in the repo.
+_CPP_ALIAS_KEY = "::cpp-alias::"
+# Reserved ``index`` namespace holding stand-ins: ``_CPP_FILE_SCOPES_KEY
+# + path`` has one per scope a C/C++ file's own definitions sit in (each
+# dotted qualname prefix, the stand-in's ``name``), for
+# ``_cpp_innermost``.
+_CPP_FILE_SCOPES_KEY = "::cpp-file-scopes::"
+# Reserved ``index`` namespace holding stand-ins: ``_CPP_FILE_USING_KEY
+# + path`` has one per namespace-scope ``using ns::Name;`` in that C/C++
+# file (``name`` the declared name, ``qualname`` the written path), for
+# ``_walk_cpp_bare_token``.
+_CPP_FILE_USING_KEY = "::cpp-file-using::"
+# Reserved ``index`` namespace: ``_CPP_OOL_KEY + path`` is present when
+# that C/C++ file defines a class out of line (``class Op::Dataset :
+# public Base {..}``), whose bases the map can't read, so every nested
+# type stays visible there (``_cpp_nested_visible``).
+_CPP_OOL_KEY = "::cpp-out-of-line::"
+# Reserved ``index`` namespace: ``_CPP_PHANTOM_KEY + name`` is present
+# when the repo has members of a C/C++ member class called ``name`` that
+# the map has no symbol for (``ClientSession::Impl`` defined out of
+# line), so the bare name reads open rather than outside the repo.
+_CPP_PHANTOM_KEY = "::cpp-phantom::"
 
 # Reserved ``index`` namespace for C/C++ definitions whose arity a
 # prototype declares: ``_CPP_DECLARED_KEY + sym.id`` holds one copy of
@@ -9751,6 +12088,28 @@ _RUST_PATH_KEY = "::rust-path::"
 # binding for (``_rust_head_entries``). Only a call written
 # ``serde_json::..`` reads it, never a local ``serde_json.f()``.
 _RUST_HEAD_KEY = "::rust-head::"
+# Reserved import-table namespace: ``_PY_STAR_KEY + "a.b"`` holds a
+# Python file's ``from a.b import *``. A star binds no name, so only
+# the walk reads it, to follow a supertype a module re-exports
+# (``_python_reexported_type``).
+_PY_STAR_KEY = "::py-star::"
+# Reserved ``index`` namespace: ``_RUST_DOT_KEY + name`` holds the Rust
+# functions and methods called ``name`` that take ``self``, the ones a
+# dot-call can mean (``_rust_dot_call_narrowed``). Read only by
+# ``.get``, so no per-call rule scans ``candidates`` for them.
+_RUST_DOT_KEY = "::rust-dot::"
+# Reserved ``index`` namespace: ``_RUST_TRAIT_REACH_KEY + name`` holds
+# the Rust methods called ``name`` taking ``self`` that a trait declares
+# or that implement one for a type their crate doesn't define (``impl
+# HiLoWord for LPARAM``): the ones that can bring ``name`` to a value of
+# an outside type (``_walk_rust_param``).
+_RUST_TRAIT_REACH_KEY = "::rust-trait-reach::"
+# Reserved ``index`` namespaces holding stand-ins: ``_RUST_REACH_KEY +
+# dir`` has one per crate directory the crate at ``dir`` reaches
+# (``load_cargo_reach``), and ``_RUST_MANIFEST_KEY`` one per crate
+# directory, for the nearest-manifest lookup (``_rust_crate_reaches``).
+_RUST_REACH_KEY = "::rust-reach::"
+_RUST_MANIFEST_KEY = "::rust-manifests::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -9763,16 +12122,14 @@ _UNNAMED_CTOR_LANGUAGES = frozenset(_UNNAMED_CTOR_NAMES)
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
     ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
+    ``_CPP_FILE_SCOPES_KEY``, ``_CPP_FILE_USING_KEY``,
     ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY``,
-    ``_RUST_RENAMED_KEY`` and ``_SUPERS_KEY`` entries."""
+    ``_RUST_RENAMED_KEY``, ``_RUST_DOT_KEY``, ``_RUST_TRAIT_REACH_KEY``
+    and ``_SUPERS_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
-            index.setdefault(sym.name, []).append(sym)
-            if sym.language in _CPP_FAMILY:
-                for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
-                    if scope:
-                        index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
+            _index_symbol(sym, index)
         for entry in fm.enum_variants:
             owner, _, variant = entry.partition("::")
             index.setdefault(_RUST_VARIANT_KEY + variant, []).extend(
@@ -9781,9 +12138,13 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     for fm in files:
         for entry in fm.cpp_using:
             _index_cpp_using(entry, index)
+        _index_cpp_file_using(fm, index)
+        _index_cpp_file_scopes(fm, index)
     _index_cpp_declared(files, index)
+    _index_cpp_phantoms(files, index)
     _index_constructions(files, index)
     _index_supertypes(files, index)
+    _index_rust_trait_reach(index)
     for name, original in sorted(rust_renames(files)):
         index.setdefault(_RUST_RENAMED_KEY + name, []).append(
             _stand_in(original)
@@ -9792,13 +12153,112 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     return index
 
 
-def _stand_in(name: str, path: str = "") -> Symbol:
+def _index_symbol(sym: Symbol, index: dict[str, list[Symbol]]) -> None:
+    """File one symbol under its name, and under ``_RUST_DOT_KEY`` and
+    ``_CPP_SCOPE_KEY`` where those apply; a C/C++ alias only under
+    ``_CPP_ALIAS_KEY``."""
+    if _is_cpp_alias(sym):
+        index.setdefault(_CPP_ALIAS_KEY + sym.name, []).append(sym)
+        return
+    index.setdefault(sym.name, []).append(sym)
+    if _rust_has_self(sym):
+        index.setdefault(_RUST_DOT_KEY + sym.name, []).append(sym)
+    if sym.language in _CPP_FAMILY:
+        for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
+            if scope:
+                index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
+
+
+def _index_rust_trait_reach(index: dict[str, list[Symbol]]) -> None:
+    """File the ``_RUST_DOT_KEY`` methods a trait can carry to an outside
+    type under ``_RUST_TRAIT_REACH_KEY``.
+
+    A method qualifies when its owner is a trait declared in the same
+    file, or when no non-trait, non-alias Rust type of the owner's name
+    lives in the method's crate: an ``impl`` for a type from elsewhere
+    (``impl HiLoWord for LPARAM``, a blanket ``impl<T> Ext for T``).
+    """
+    reach: dict[str, list[Symbol]] = {}
+    for key in [k for k in index if k.startswith(_RUST_DOT_KEY)]:
+        for method in index[key]:
+            if "." in method.qualname and _rust_trait_can_reach(method, index):
+                reach.setdefault(key[len(_RUST_DOT_KEY) :], []).append(method)
+    for name, methods in reach.items():
+        index[_RUST_TRAIT_REACH_KEY + name] = methods
+
+
+def _rust_trait_can_reach(
+    method: Symbol, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether ``method`` is a trait's, or implements one for a type its
+    crate doesn't define (``_index_rust_trait_reach``)."""
+    owner_qualname = method.qualname.rsplit(".", 1)[0]
+    owner = owner_qualname.rsplit(".", 1)[-1]
+    types = [
+        s
+        for s in index.get(owner, ())
+        if s.kind in TYPE_KINDS and s.language == "rust"
+    ]
+    if any(
+        s.kind == "trait"
+        and s.path == method.path
+        and s.qualname == owner_qualname
+        for s in types
+    ):
+        return True
+    crate = _rust_crate_dir(method.path)
+
+    return not any(
+        s.kind not in ("trait", "type_alias")
+        and _rust_crate_dir(s.path) == crate
+        for s in types
+    )
+
+
+def _index_cpp_file_using(fm: FileMap, index: dict[str, list[Symbol]]) -> None:
+    """File ``fm``'s ``using ns::Name;`` declarations under
+    ``_CPP_FILE_USING_KEY``, whatever namespace they sit in."""
+    for entry in fm.cpp_using:
+        written = entry.partition("=")[2]
+        name = written.rsplit("::", 1)[-1]
+        if "::" in written and name:
+            index.setdefault(_CPP_FILE_USING_KEY + fm.path, []).append(
+                _stand_in(name, qualname=written)
+            )
+
+
+def _index_cpp_file_scopes(
+    fm: FileMap, index: dict[str, list[Symbol]]
+) -> None:
+    """File the scopes ``fm``'s C/C++ definitions sit in, under
+    ``_CPP_FILE_SCOPES_KEY``, and mark a file defining a class out of
+    line under ``_CPP_OOL_KEY``."""
+    if any(
+        sym.language in _CPP_FAMILY and "::" in sym.qualname
+        for sym in fm.symbols
+    ):
+        index[_CPP_OOL_KEY + fm.path] = [_stand_in(fm.path)]
+    scopes: set[str] = set()
+    for sym in fm.symbols:
+        if sym.language not in _CPP_FAMILY:
+            continue
+        segs = [s for s in _PATH_SPLIT.split(sym.qualname) if s]
+        for i in range(1, len(segs)):
+            scopes.add(".".join(segs[:i]))
+    if scopes:
+        index[_CPP_FILE_SCOPES_KEY + fm.path] = [
+            _stand_in(scope) for scope in sorted(scopes)
+        ]
+
+
+def _stand_in(name: str, path: str = "", qualname: str = "") -> Symbol:
     """A placeholder carrying a name or a directory through the index
-    to pool workers (see ``_RUST_RENAMED_KEY``); never a candidate."""
+    to pool workers (see ``_RUST_RENAMED_KEY``); never a candidate.
+    ``qualname`` defaults to ``name``."""
     return Symbol(
         id="",
         name=name,
-        qualname=name,
+        qualname=qualname or name,
         kind="module",
         path=path,
         language="rust",
@@ -9814,6 +12274,22 @@ def _index_rust_crates(
         stand_ins = [_stand_in(name, d) for d in sorted(dirs) if d]
         if stand_ins:
             index[_RUST_CRATE_KEY + name] = stand_ins
+
+
+def _index_rust_reach(
+    reach: dict[str, frozenset[str]], index: dict[str, list[Symbol]]
+) -> None:
+    """Record which crate directories each crate reaches
+    (``_RUST_REACH_KEY``) and every crate directory, deepest first
+    (``_RUST_MANIFEST_KEY``)."""
+    for where, dirs in reach.items():
+        index[_RUST_REACH_KEY + where] = [
+            _stand_in(d, d) for d in sorted(dirs)
+        ]
+    if reach:
+        index[_RUST_MANIFEST_KEY] = [
+            _stand_in(d, d) for d in sorted(reach, key=len, reverse=True)
+        ]
 
 
 def rust_renames(files: list[FileMap]) -> set[tuple[str, str]]:
@@ -9858,6 +12334,37 @@ def _index_constructions(
         for clause in fm.heritage:
             if clause.subtype_id and clause.relation == "extends":
                 index.setdefault(_EXTENDS_KEY + clause.subtype_id, [])
+
+
+def _index_cpp_phantoms(
+    files: list[FileMap], index: dict[str, list[Symbol]]
+) -> None:
+    """File the names of C/C++ member classes the map has members for
+    but no symbol, under ``_CPP_PHANTOM_KEY``.
+
+    ``class ClientSession::Impl {..}`` defined out of line is no class
+    symbol, only its members are (``ClientSession.Impl.M``): a member
+    whose parent is not a type but whose grandparent is.
+    """
+    types = {
+        ".".join(s for s in _PATH_SPLIT.split(sym.qualname) if s)
+        for fm in files
+        for sym in fm.symbols
+        if sym.language in _CPP_FAMILY and sym.kind in TYPE_KINDS
+    }
+    for fm in files:
+        for sym in fm.symbols:
+            if sym.language not in _CPP_FAMILY or sym.kind in TYPE_KINDS:
+                continue
+            segs = [s for s in _PATH_SPLIT.split(sym.qualname) if s]
+            if len(segs) < 3:
+                continue
+            if ".".join(segs[:-1]) not in types and ".".join(segs[:-2]) in (
+                types
+            ):
+                index.setdefault(
+                    _CPP_PHANTOM_KEY + segs[-2], [_stand_in(segs[-2])]
+                )
 
 
 def _index_cpp_declared(
@@ -10003,7 +12510,8 @@ def _build_name_path_index(
     index: dict[tuple[str, str], list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
-            index.setdefault((sym.name, sym.path), []).append(sym)
+            if not _is_cpp_alias(sym):
+                index.setdefault((sym.name, sym.path), []).append(sym)
     return index
 
 
@@ -10323,15 +12831,104 @@ def load_cargo_lib_roots(root: Path) -> dict[str, frozenset[str]]:
     return {name: frozenset(files) for name, files in roots.items()}
 
 
+_CARGO_DEP_KEY = re.compile(
+    r"\s*([A-Za-z0-9_\-]+)\s*(?:\.workspace)?\s*=\s*(.*)"
+)
+_CARGO_DEP_TABLE = re.compile(r".*dependencies\.([A-Za-z0-9_\-]+)$")
+_CARGO_DEP_RENAME = re.compile(r'package\s*=\s*"([^"]+)"')
+
+
+def _cargo_section_lines(body: str) -> list[str]:
+    """A section's lines after its header, up to an array-of-tables
+    header (``[[bin]]``), which ``_CARGO_SECTION`` doesn't split on."""
+    lines = []
+    for line in body.split("\n")[1:]:
+        if line.lstrip().startswith("["):
+            break
+        lines.append(line)
+    return lines
+
+
+def _cargo_dependencies(section: str, body: str) -> set[str]:
+    """The crate names one manifest section depends on, ``-`` read as
+    ``_``: every key of a ``*dependencies`` section (``name = ..``,
+    ``name.workspace = true``) and a ``[dependencies.name]`` table, each
+    under its ``package = ".."`` rename when it has one."""
+    deps = set()
+    lines = _cargo_section_lines(body)
+    table = _CARGO_DEP_TABLE.match(section)
+    if table:
+        renamed = _CARGO_DEP_RENAME.search("\n".join(lines))
+        deps.add(renamed.group(1) if renamed else table.group(1))
+    if section.endswith("dependencies"):
+        for line in lines:
+            key = _CARGO_DEP_KEY.match(line)
+            if key:
+                renamed = _CARGO_DEP_RENAME.search(key.group(2))
+                deps.add(renamed.group(1) if renamed else key.group(1))
+
+    return {dep.replace("-", "_") for dep in deps}
+
+
+def load_cargo_reach(root: Path) -> dict[str, frozenset[str]]:
+    """Every crate's directory with the crate directories it can reach:
+    itself and everything it depends on, directly or not.
+
+    A crate is a manifest with a ``[package]`` name; its dependencies
+    come from every ``*dependencies`` section, dev and build ones and
+    ``[target.'cfg(..)'.dependencies]`` included, kept when they name
+    a crate in the repo. Two manifests can declare one name (zed's lint
+    fixture is also ``gpui``): a dependency on it reaches both. A crate
+    at the repo root is left out, since its directory contains every
+    path.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Crate directory (repo-relative) to every crate directory it
+        reaches, itself included; empty for a repo with no crate.
+    """
+    names: dict[str, str] = {}
+    deps: dict[str, set[str]] = {}
+    for where, sections in _cargo_manifests(root):
+        named = dict(sections)
+        found = _CARGO_NAME.search(named.get("package", ""))
+        if found is None:
+            continue
+        names[where] = found.group(1).replace("-", "_")
+        deps[where] = set().union(
+            *(_cargo_dependencies(s, body) for s, body in sections)
+        )
+    dirs_by_name: dict[str, list[str]] = {}
+    for where, name in names.items():
+        dirs_by_name.setdefault(name, []).append(where)
+    reach: dict[str, frozenset[str]] = {}
+    for where in names:
+        if not where:
+            continue
+        seen, stack = {where}, [where]
+        while stack:
+            for dep in deps[stack.pop()]:
+                for there in dirs_by_name.get(dep, ()):
+                    if there not in seen:
+                        seen.add(there)
+                        stack.append(there)
+        reach[where] = frozenset(seen)
+
+    return reach
+
+
 def cargo_fingerprint(root: Path) -> str:
     """Digest of the repo's Rust crates, for cache invalidation.
 
     The cached call pass reads them to tell a ``use`` of a workspace
     crate from one of an outside crate, to narrow a
-    ``some_crate::name(..)`` path to that crate's directories, and to
-    walk a crate path from its lib root. Adding a crate or a path
-    dependency, renaming one, or moving a lib root moves no source
-    file and no symbol.
+    ``some_crate::name(..)`` path to that crate's directories, to walk
+    a crate path from its lib root, and to keep a dot-call inside the
+    crates its own crate depends on. Adding a crate or a dependency,
+    renaming one, or moving a lib root moves no source file and no
+    symbol.
 
     Args:
         root: Repository root.
@@ -10347,7 +12944,13 @@ def cargo_fingerprint(root: Path) -> str:
         [name, sorted(files)]
         for name, files in sorted(load_cargo_lib_roots(root).items())
     ]
-    return hashlib.sha256(json.dumps([table, libs]).encode()).hexdigest()
+    reach = [
+        [where, sorted(dirs)]
+        for where, dirs in sorted(load_cargo_reach(root).items())
+    ]
+    return hashlib.sha256(
+        json.dumps([table, libs, reach]).encode()
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -11756,6 +14359,17 @@ def _rust_own_crate_narrowed(
     return inside, True
 
 
+def _python_star_entries(fm: FileMap) -> dict[str, Import]:
+    """A Python file's star imports, keyed under ``_PY_STAR_KEY``; none
+    for any other file."""
+    if not fm.path.endswith(_PY_EXTENSIONS):
+        return {}
+
+    return {
+        _PY_STAR_KEY + imp.source: imp for imp in fm.imports if imp.name == "*"
+    }
+
+
 def _imports_by_file(
     files: list[FileMap],
     workspace_pkgs: dict[str, str] | None = None,
@@ -11779,7 +14393,8 @@ def _imports_by_file(
     the repo (``_rust_head_entries``). With none of them, every record
     is left as-is.
 
-    A Python or Rust glob binds no name, so it stays out of the table.
+    A Python or Rust glob binds no name, so it stays out of the name
+    table; a Python one is kept under ``_PY_STAR_KEY``.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
@@ -11787,6 +14402,7 @@ def _imports_by_file(
         used = _member_names(fm) if lookup is not None else {}
         python = fm.path.endswith(_PY_EXTENSIONS)
         rust = fm.path.endswith(".rs")
+        table.update(_python_star_entries(fm))
         for imp in fm.imports:
             if imp.name in table or ((python or rust) and imp.name == "*"):
                 continue

@@ -1,7 +1,7 @@
 [project]
 name = "dekko"
-version = "1.9.0"
-description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
+version = "1.10.0b1"
+description = "Static code map for any repo (MAP.md + map.json), plus Claude Code, Codex and Cursor plugins"
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -12,7 +12,8 @@ keywords = [
     "code-map", "tree-sitter", "static-analysis", "claude-code",
     "code-analysis", "call-graph", "mcp-server", "ai-coding",
     "dead-code-detection", "code-navigation", "repository-map",
-    "claude-code-plugin", "developer-tools", "llm-agents",
+    "claude-code-plugin", "codex", "codex-plugin", "cursor",
+    "cursor-plugin", "developer-tools", "llm-agents",
     "codebase-indexing", "model-context-protocol",
 ]
 classifiers = [
@@ -93,6 +94,11 @@ packages = ["src/dekko"]
 "integrations/claude/commands" = "dekko/_plugin/commands"
 "integrations/claude/skills" = "dekko/_plugin/skills"
 "integrations/claude/.mcp.json" = "dekko/_plugin/.mcp.json"
+"integrations/claude/.codex-plugin" = "dekko/_plugin/.codex-plugin"
+"integrations/claude/skills-codex" = "dekko/_plugin/skills-codex"
+"integrations/claude/codex.mcp.json" = "dekko/_plugin/codex.mcp.json"
+"integrations/claude/.cursor-plugin" = "dekko/_plugin/.cursor-plugin"
+"integrations/claude/cursor.mcp.json" = "dekko/_plugin/cursor.mcp.json"
 
 [dependency-groups]
 dev = [

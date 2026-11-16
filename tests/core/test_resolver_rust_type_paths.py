@@ -14,6 +14,7 @@ from dekko.core.resolver import (
     _rust_is_associated_type_path,
     cargo_fingerprint,
     load_cargo_crates,
+    load_cargo_reach,
     resolve,
 )
 from dekko.repo_ops import map_repository
@@ -449,6 +450,97 @@ def test_renamed_type_from_another_crate_still_resolves(
     )
     assert "crates/other/src/lib.rs::Other.new" not in _pairs(graph, _USE_MAP)
     assert _externals(graph, _USE_MAP) == set()
+
+
+def _write_manifests(root: Path, manifests: dict[str, str]) -> None:
+    for where, text in manifests.items():
+        (root / where).mkdir(parents=True, exist_ok=True)
+        (root / where / "Cargo.toml").write_text(text)
+
+
+def test_load_cargo_reach_reads_every_dependency_form(tmp_path: Path) -> None:
+    _write_manifests(
+        tmp_path,
+        {
+            "": '[workspace]\nmembers = ["crates/*"]\n',
+            "crates/app": (
+                '[package]\nname = "app"\n\n'
+                "[dependencies]\n"
+                "ws_dep.workspace = true\n"
+                'path-dep = { path = "../path-dep" }\n'
+                'alias = { path = "../renamed", package = "real-name" }\n'
+                'serde = "1.0"\n'
+                "\n[dependencies.table_dep]\n"
+                'path = "../table_dep"\n'
+                "\n[target.'cfg(windows)'.dependencies]\n"
+                "win_dep.workspace = true\n"
+                "\n[[bin]]\n"
+                'name = "lonely"\n'
+            ),
+            "crates/ws_dep": '[package]\nname = "ws_dep"\n',
+            "crates/path-dep": '[package]\nname = "path-dep"\n',
+            "crates/renamed": '[package]\nname = "real-name"\n',
+            "crates/table_dep": (
+                '[package]\nname = "table_dep"\n\n'
+                "[build-dependencies]\nleaf.workspace = true\n"
+            ),
+            "crates/win_dep": '[package]\nname = "win_dep"\n',
+            "crates/leaf": '[package]\nname = "leaf"\n',
+            "crates/lonely": '[package]\nname = "lonely"\n',
+        },
+    )
+    reach = load_cargo_reach(tmp_path)
+    assert reach["crates/app"] == frozenset(
+        {
+            "crates/app",
+            "crates/ws_dep",
+            "crates/path-dep",
+            "crates/renamed",
+            "crates/table_dep",
+            "crates/win_dep",
+            "crates/leaf",
+        }
+    )
+    assert reach["crates/table_dep"] == frozenset(
+        {"crates/table_dep", "crates/leaf"}
+    )
+    assert reach["crates/leaf"] == frozenset({"crates/leaf"})
+    assert "" not in reach
+
+
+def test_load_cargo_reach_follows_every_crate_of_a_shared_name(
+    tmp_path: Path,
+) -> None:
+    _write_manifests(
+        tmp_path,
+        {
+            "crates/gpui": '[package]\nname = "gpui"\n',
+            "tooling/fixture/gpui": '[package]\nname = "gpui"\n',
+            "crates/app": (
+                '[package]\nname = "app"\n\n'
+                "[dependencies]\ngpui.workspace = true\n"
+            ),
+        },
+    )
+    assert load_cargo_reach(tmp_path)["crates/app"] == frozenset(
+        {"crates/app", "crates/gpui", "tooling/fixture/gpui"}
+    )
+
+
+def test_cargo_fingerprint_sees_a_new_dependency(tmp_path: Path) -> None:
+    _write_manifests(
+        tmp_path,
+        {
+            "crates/a": '[package]\nname = "a"\n',
+            "crates/b": '[package]\nname = "b"\n',
+        },
+    )
+    before = cargo_fingerprint(tmp_path)
+    _write_manifests(
+        tmp_path,
+        {"crates/a": '[package]\nname = "a"\n\n[dependencies]\nb = "*"\n'},
+    )
+    assert cargo_fingerprint(tmp_path) != before
 
 
 def test_cargo_fingerprint_sees_crates_trading_directories(

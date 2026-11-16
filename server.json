@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.aahlijia/dekko",
-  "description": "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin",
+  "description": "Static code map for any repo (MAP.md + map.json), plus Claude Code, Codex and Cursor plugins",
   "repository": {
     "url": "https://github.com/aahlijia/dekko",
     "source": "github"

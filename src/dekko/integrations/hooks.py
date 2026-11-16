@@ -27,11 +27,29 @@ Four events, each individually opt-in (``dekko hooks install``):
   decision is never shown to the model.
 * **PreToolUse / Bash** (``pre-bash``) — the enforcement tier: a
   ``grep``/``rg``/``ag`` repo-wide search, a ``find -name`` hunt, or a
-  ``cat``/``head``/``sed`` on a large mapped file surfaces
-  ``permissionDecision: "ask"`` (or ``"deny"`` under ``--strict``) with
-  the dekko-equivalent command, instead of the purely advisory text
-  every other hook here emits. Off by default even when other hooks
-  are installed — see :func:`pre_bash`.
+  ``cat``/``head``/``sed``/``nl`` read of a large stretch of a mapped
+  file surfaces ``permissionDecision: "ask"`` (or ``"deny"`` under
+  ``--strict``) with the dekko-equivalent command, instead of the
+  purely advisory text every other hook here emits. Off by default
+  even when other hooks are installed — see :func:`pre_bash`.
+
+The same handlers serve OpenAI Codex (``--agent codex``), whose hooks
+use the same ``hookSpecificOutput`` envelope and the same
+``tool_name: "Bash"`` / ``tool_input.command`` shell payload. Codex has
+no Read tool (its model reads files through the shell, so ``pre-bash``
+covers them) and no ``"ask"`` decision, so ``pre-bash`` is advisory
+there by default and denies under ``--strict``. Its hooks live in
+``<root>/.codex/hooks.json``.
+
+Cursor (``--agent cursor``) sends a different payload and wants a flat
+answer per event, and it blocks a permission hook whose output it
+can't read. It also runs the hooks in ``.claude/settings.json`` by
+default, so the answer's flavor comes from the payload: one carrying
+Cursor's ``cursor_version`` key gets a Cursor answer whatever
+``--agent`` says. :mod:`dekko.integrations.hooks_cursor` does the
+translation; the handlers don't change. Cursor drops a session context
+past 10,000 chars, so its session-start map is sized to fit. Its hooks
+live in ``<root>/.cursor/hooks.json``.
 
 Every handler is **fail-silent**: any error, missing map, or empty signal
 yields no output and a clean exit, so a hook can never break or hijack a
@@ -53,7 +71,7 @@ from dekko.storage import ledger
 from dekko.analysis import ambiguous, outline, relevance, search, summary
 from dekko.render import mapfile, render_lean
 from dekko.render.mapfile import MapIndex
-from dekko.integrations import orient
+from dekko.integrations import hooks_cursor, orient
 
 EXIT_OK = 0
 
@@ -89,6 +107,9 @@ _BACKTICK_RE = re.compile(r"`([^`\s]+)`")
 _CAMEL_RE = re.compile(r"[a-z0-9][A-Z]")
 _QUALIFIER_RE = re.compile(r"::|#|\.")
 
+# The agents whose hook files dekko can write, and their hook flavors.
+AGENTS = ("claude", "codex", "cursor")
+
 # install-time map: our event name -> (Claude event, PreToolUse matcher).
 EVENTS: dict[str, tuple[str, str | None]] = {
     "session-start": ("SessionStart", None),
@@ -96,6 +117,16 @@ EVENTS: dict[str, tuple[str, str | None]] = {
     "pre-read": ("PreToolUse", "Read"),
     "pre-bash": ("PreToolUse", "Bash"),
 }
+# Codex uses the same event names and an exact-match "Bash" matcher, but
+# has no Read tool: its shell reads go through ``pre-bash``.
+CODEX_EVENTS: dict[str, tuple[str, str | None]] = {
+    event: EVENTS[event]
+    for event in ("session-start", "prompt-submit", "pre-bash")
+}
+# Codex spills a hook's additionalContext to a temp file past this many
+# tokens (its default is 2,500). Matching dekko's own session-start
+# ceiling lets Codex show the same payload Claude does.
+CODEX_SESSION_CONTEXT_LIMIT = SESSION_MAP_HARD_CEILING
 
 _HOOK_COMMAND_PREFIX = "dekko hooks run "
 
@@ -136,24 +167,11 @@ def _additional_context(event_name: str, text: str) -> dict:
 # --- SessionStart ----------------------------------------------------
 
 
-def session_start(payload: dict) -> dict | None:
-    """Inject a steering preamble + budget-capped lean map."""
-    root = _root_from(payload)
-    index = _load_index(root, allow_regen=True)
-    if index is None:
-        return None
-    lines, report = render_lean.generate(
-        index, root, render_lean.CapConfig(override=SESSION_MAP_BUDGET)
-    )
-    if report.total_symbols == 0 and not index.languages_by_path:
-        return None
-    # ``orient._preamble()``, not the raw constant: it drops the
-    # ``search`` line when that subcommand isn't usable in this install,
-    # and the hook should never steer toward a command that then fails.
-    parts = [orient._preamble()]
-    note = ambiguous.high_rate_note(index)
-    if note:
-        parts.append(note)
+def _session_parts(
+    lines: list[str],
+    report: render_lean.LeanReport,
+) -> list[str]:
+    """The map body and its floor notes, under Claude's budget rules."""
     if report.cap > SESSION_MAP_HARD_CEILING:
         # On a repo whose path-only floor exceeds even this hard ceiling
         # (spring-boot: ~113K tok, ~56x SESSION_MAP_BUDGET), rendering the
@@ -163,37 +181,116 @@ def session_start(payload: dict) -> dict | None:
         # currently no rung between the full path-only floor and "nothing" for
         # `render_lean` to fall back to, so this drops the map body entirely
         # rather than inject an unboundedly large payload.
-        parts.append(
+        return [
             f"note: this repo's path-only floor (~{report.cap} tok) is "
             f"far larger than dekko's {SESSION_MAP_BUDGET}-token "
             "session-start budget -- even the narrowest available map "
             "rendering would cost more than this hook should inject "
             "automatically. Run `dekko lean --budget N` or `dekko "
             "summary` directly for a repo map at a budget you choose."
+        ]
+
+    parts = []
+    if report.cap > SESSION_MAP_BUDGET:
+        # On a repo whose path-only floor alone exceeds
+        # SESSION_MAP_BUDGET (a large monorepo can
+        # need ~80K tokens just to list every file), `effective_cap`
+        # bends the cap upward the same way `render_lean.run()`'s
+        # `--budget` floor already does for the `lean` CLI command
+        # -- but this hook called `generate()` directly and never
+        # surfaced that, so the injected map silently cost up to
+        # ~40x its documented budget with no visible signal
+        # anywhere. Mirror the CLI wrapper's disclosure so an agent
+        # (and anyone reading the transcript) can see why the map
+        # below is larger than SESSION_MAP_BUDGET. Only applies
+        # below SESSION_MAP_HARD_CEILING -- above it, the branch
+        # above takes over and no map body is rendered at all.
+        parts.append(
+            f"note: this repo's path-only floor (~{report.cap} tok) "
+            f"exceeds dekko's {SESSION_MAP_BUDGET}-token "
+            "session-start budget; the map below uses the floor "
+            "instead."
         )
+    parts.append("\n".join(lines))
+    return parts
+
+
+def _limited_session_parts(
+    prefix: list[str],
+    lines: list[str],
+    report: render_lean.LeanReport,
+    budget: int,
+    char_limit: int,
+) -> list[str]:
+    """The map body if it fits ``char_limit``, else a note saying why not.
+
+    A client that throws away an oversized context gets the note, which
+    still points at a command for a wider map, rather than nothing.
+    """
+    body = "\n".join(lines)
+    text = "\n\n".join([*prefix, body])
+    if report.cap <= budget and len(text) <= char_limit:
+        return [body]
+
+    return [
+        f"note: this repo's path-only floor (~{report.cap} tok) doesn't "
+        f"fit the {budget}-token map budget left under this client's "
+        "session-start size limit, so no map is included. Run `dekko "
+        "lean --budget N` or `dekko summary` directly for a repo map "
+        "at a budget you choose."
+    ]
+
+
+def session_start(
+    payload: dict,
+    *,
+    char_limit: int | None = None,
+) -> dict | None:
+    """Inject a steering preamble + budget-capped lean map.
+
+    Args:
+        payload: The session-start hook JSON.
+        char_limit: The most characters the whole context may take, for
+            a client that drops a larger one; ``None`` for no limit.
+            The map's budget then shrinks to what's left after the
+            preamble, and a map that still doesn't fit is replaced by a
+            note.
+
+    Returns:
+        A ``hookSpecificOutput`` dict, or ``None`` with no map.
+    """
+    root = _root_from(payload)
+    index = _load_index(root, allow_regen=True)
+    if index is None:
+        return None
+
+    # ``orient._preamble()``, not the raw constant: it drops the
+    # ``search`` line when that subcommand isn't usable in this install,
+    # and the hook should never steer toward a command that then fails.
+    prefix = [orient._preamble()]
+    note = ambiguous.high_rate_note(index)
+    if note:
+        prefix.append(note)
+
+    budget = SESSION_MAP_BUDGET
+    if char_limit is not None:
+        left = char_limit - len("\n\n".join(prefix)) - 2
+        budget = max(1, min(budget, left // 4))
+
+    lines, report = render_lean.generate(
+        index, root, render_lean.CapConfig(override=budget)
+    )
+    if report.total_symbols == 0 and not index.languages_by_path:
+        return None
+
+    if char_limit is None:
+        parts = _session_parts(lines, report)
     else:
-        if report.cap > SESSION_MAP_BUDGET:
-            # On a repo whose path-only floor alone exceeds
-            # SESSION_MAP_BUDGET (a large monorepo can
-            # need ~80K tokens just to list every file), `effective_cap`
-            # bends the cap upward the same way `render_lean.run()`'s
-            # `--budget` floor already does for the `lean` CLI command
-            # -- but this hook called `generate()` directly and never
-            # surfaced that, so the injected map silently cost up to
-            # ~40x its documented budget with no visible signal
-            # anywhere. Mirror the CLI wrapper's disclosure so an agent
-            # (and anyone reading the transcript) can see why the map
-            # below is larger than SESSION_MAP_BUDGET. Only applies
-            # below SESSION_MAP_HARD_CEILING -- above it, the branch
-            # above takes over and no map body is rendered at all.
-            parts.append(
-                f"note: this repo's path-only floor (~{report.cap} tok) "
-                f"exceeds dekko's {SESSION_MAP_BUDGET}-token "
-                "session-start budget; the map below uses the floor "
-                "instead."
-            )
-        parts.append("\n".join(lines))
-    text = "\n\n".join(parts)
+        parts = _limited_session_parts(
+            prefix, lines, report, budget, char_limit
+        )
+
+    text = "\n\n".join([*prefix, *parts])
     return _additional_context("SessionStart", text)
 
 
@@ -486,7 +583,20 @@ def _rel_to_root(file_path: str, root: Path) -> str | None:
 # guessed at.
 _SHELL_SEPARATORS = {";", "&&", "||", "|"}
 _GREP_CMDS = {"grep", "egrep", "fgrep", "rgrep", "rg", "ag"}
-_CAT_CMDS = {"cat", "head", "sed"}
+_CAT_CMDS = {"cat", "head", "sed", "nl"}
+# A ranged read of at most this many lines is a targeted look at a few
+# sites, the line-ranged read dekko's own guidance recommends, so
+# ``pre-bash`` leaves it alone however large the file. On Codex, which
+# has no Read tool, ``sed -n 'A,Bp' file`` *is* that read.
+RANGED_READ_MAX_LINES = 200
+# A ``sed -n`` script dekko can read a line span from: ``5p``,
+# ``1,120p``, ``1,120 p``, ``40,$p``. Anything else is left unjudged.
+_SED_SPAN_RE = re.compile(r"^\s*(\d+)\s*(?:,\s*(\d+|\$)\s*)?p\s*$")
+# ``head -20`` / ``head -n20``; ``head -n 20`` is read token by token.
+_HEAD_COUNT_RE = re.compile(r"^-n?(\d+)$")
+# sed flags that don't change which lines it prints.
+_SED_NEUTRAL_FLAGS = {"-E", "-r", "--regexp-extended"}
+_SED_QUIET_FLAGS = {"-n", "--quiet", "--silent"}
 # Recursive/repo-wide flags for the grep family. `rg`/`ag` are recursive
 # by default, so an invocation of those two counts unless every path it
 # names is an existing file (see ``_targets_are_files``); the plain
@@ -532,26 +642,30 @@ def _targets_are_files(stmt: list[str], root: Path) -> bool:
     return True
 
 
-def _split_statements(command: str) -> list[list[str]]:
-    """Tokenize a shell command into per-statement argv lists.
+def _split_pipelines(command: str) -> list[list[list[str]]]:
+    """Tokenize a shell command into statements of pipeline stages.
 
-    Splits on ``;``/``&&``/``||``/``|`` tokens (only recognized when
-    whitespace-delimited, matching normal shell formatting) so each
-    piece of a chained/piped command is checked independently. Returns
-    ``[]`` on anything ``shlex`` can't parse (unbalanced quotes, etc.)
-    so the caller fails silent rather than guesses.
+    Splits statements on ``;``/``&&``/``||`` and each statement's
+    pipeline on ``|`` (all only recognized when whitespace-delimited,
+    matching normal shell formatting), so every piece of a chained or
+    piped command is checked, and a read can see what it's piped into.
+    Returns ``[]`` on anything ``shlex`` can't parse (unbalanced quotes,
+    etc.) so the caller fails silent rather than guesses.
     """
     try:
         tokens = shlex.split(command)
     except ValueError:
         return []
-    statements: list[list[str]] = [[]]
+    pipelines: list[list[list[str]]] = [[[]]]
     for tok in tokens:
-        if tok in _SHELL_SEPARATORS:
-            statements.append([])
+        if tok == "|":
+            pipelines[-1].append([])
+        elif tok in _SHELL_SEPARATORS:
+            pipelines.append([[]])
         else:
-            statements[-1].append(tok)
-    return [s for s in statements if s]
+            pipelines[-1][-1].append(tok)
+    stripped = [[stage for stage in p if stage] for p in pipelines]
+    return [p for p in stripped if p]
 
 
 def _grep_reason(stmt: list[str], root: Path) -> str | None:
@@ -582,42 +696,257 @@ def _find_reason(stmt: list[str]) -> str | None:
     )
 
 
-def _cat_reason(stmt: list[str], index: MapIndex, root: Path) -> str | None:
-    """Nudge for `cat`/`head`/`sed` on a large mapped file, or None."""
-    if stmt[0] not in _CAT_CMDS or len(stmt) < 2:
+@dataclasses.dataclass(frozen=True)
+class _Span:
+    """The lines a shell read prints: ``start`` to ``end`` (None: EOF)."""
+
+    start: int = 1
+    end: int | None = None
+
+    def count(self) -> int | None:
+        """How many lines the span covers, or None when it runs to EOF."""
+        if self.end is None:
+            return None
+
+        return self.end - self.start + 1
+
+    def within(self, limit: "_Span") -> "_Span":
+        """This span's output after a downstream ``limit`` selects from it."""
+        start = self.start + limit.start - 1
+        if limit.end is None:
+            return _Span(start, self.end)
+
+        end = self.start + limit.end - 1
+        if self.end is not None:
+            end = min(end, self.end)
+
+        return _Span(start, end)
+
+
+def _sed_span(script: str) -> _Span | None:
+    """The span a ``sed -n`` print script selects, or None."""
+    m = _SED_SPAN_RE.match(script)
+    if m is None:
         return None
-    candidate = stmt[-1]
+    start = int(m.group(1))
+    last = m.group(2)
+    if last is None:
+        return _Span(start, start)
+    if last == "$":
+        return _Span(start, None)
+
+    return _Span(start, max(start, int(last)))
+
+
+def _head_args(args: list[str]) -> tuple[_Span, list[str]] | None:
+    """``head``'s printed span and file operands, or None if unclear.
+
+    Only line counts are understood (``-n N``, ``-nN``, ``-N``,
+    ``--lines=N``); any other flag (``-c``, a negative count) leaves the
+    command unjudged rather than guessed at.
+    """
+    count = 10
+    files: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        m = _HEAD_COUNT_RE.match(tok)
+        if tok == "-n" and i + 1 < len(args) and args[i + 1].isdigit():
+            count = int(args[i + 1])
+            i += 1
+        elif tok.startswith("--lines=") and tok[8:].isdigit():
+            count = int(tok[8:])
+        elif m is not None:
+            count = int(m.group(1))
+        elif tok.startswith("-"):
+            return None
+        else:
+            files.append(tok)
+        i += 1
+
+    return _Span(1, count), files
+
+
+def _sed_args(args: list[str]) -> tuple[_Span, list[str]] | None:
+    """``sed``'s printed span and file operands, or None if unclear.
+
+    Without ``-n`` sed prints every line, so the span is the whole file.
+    With ``-n`` only a plain line-range print script is understood. An
+    in-place edit (``-i``), an explicit ``-e``/``-f`` script, or any
+    other flag leaves the command unjudged.
+    """
+    quiet = False
+    script: str | None = None
+    files: list[str] = []
+    for tok in args:
+        if tok in _SED_QUIET_FLAGS:
+            quiet = True
+        elif tok in _SED_NEUTRAL_FLAGS:
+            continue
+        elif tok.startswith("-"):
+            return None
+        elif script is None:
+            script = tok
+        else:
+            files.append(tok)
+    if script is None:
+        return None
+    if not quiet:
+        return _Span(), files
+
+    span = _sed_span(script)
+    if span is None:
+        return None
+
+    return span, files
+
+
+def _stage_span(stage: list[str]) -> tuple[_Span, list[str]] | None:
+    """A read command's printed span and file operands, or None."""
+    cmd, args = stage[0], stage[1:]
+    if cmd in ("cat", "nl"):
+        return _Span(), [a for a in args if not a.startswith("-")]
+    if cmd == "head":
+        return _head_args(args)
+    if cmd == "sed":
+        return _sed_args(args)
+
+    return None
+
+
+def _stage_read(stage: list[str]) -> tuple[str, _Span] | None:
+    """A pipeline stage that reads a file: (file operand, span), or None."""
+    if stage[0] not in _CAT_CMDS or len(stage) < 2:
+        return None
+    candidate = stage[-1]
     if candidate.startswith("-"):
         return None
-    rel = _rel_to_root(candidate, root)
-    if rel is None:
+    parsed = _stage_span(stage)
+    if parsed is None or not parsed[1]:
         return None
-    est = outline.size_estimate(index, root, rel)
-    if est is None or est[0] < READ_THRESHOLD:
+
+    return candidate, parsed[0]
+
+
+def _stage_limit(stage: list[str]) -> _Span | None:
+    """The span a downstream ``head``/``sed -n`` lets through, or None."""
+    if stage[0] not in ("head", "sed"):
         return None
-    full, outline_tokens = est
+    parsed = _stage_span(stage)
+    if parsed is None or parsed[1]:
+        return None
+
+    return parsed[0]
+
+
+def _line_count(path: Path) -> int:
+    """A file's line count (0 when unreadable or empty)."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 0
+    if not data:
+        return 0
+
+    return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+
+
+def _whole_read_reason(
+    cmd: str, rel: str, full: int, outline_tokens: int
+) -> str | None:
+    """The nudge for reading a large mapped file whole, or None."""
+    if full < READ_THRESHOLD:
+        return None
     pct = round(100 * outline_tokens / full)
+
     return (
-        f"dekko: {rel} ≈ {full} tok via {stmt[0]} — `dekko outline "
+        f"dekko: {rel} ≈ {full} tok via {cmd} — `dekko outline "
         f"{rel}` is ≈ {outline_tokens} tok ({pct}%); outline first if "
         "you only need its shape."
     )
 
 
+def _span_reason(
+    cmd: str, candidate: str, span: _Span, index: MapIndex, root: Path
+) -> str | None:
+    """The nudge for reading ``span`` of a mapped file, or None.
+
+    A short bounded span never matches. A span that covers the whole
+    file reads as a whole-file read; a partial one is costed by the
+    share of the file's lines it prints.
+    """
+    count = span.count()
+    if count is not None and count <= RANGED_READ_MAX_LINES:
+        return None
+    rel = _rel_to_root(candidate, root)
+    if rel is None:
+        return None
+    est = outline.size_estimate(index, root, rel)
+    if est is None:
+        return None
+    full, outline_tokens = est
+    if span.start == 1 and span.end is None:
+        return _whole_read_reason(cmd, rel, full, outline_tokens)
+
+    total = _line_count(root / rel)
+    end = total if span.end is None else min(span.end, total)
+    covered = end - span.start + 1
+    if covered <= 0:
+        return None
+    if covered >= total:
+        return _whole_read_reason(cmd, rel, full, outline_tokens)
+
+    read = round(full * covered / total)
+    if read < READ_THRESHOLD:
+        return None
+
+    return (
+        f"dekko: {rel} lines {span.start}-{end} ≈ {read} tok via {cmd} "
+        f"(whole file ≈ {full} tok); `dekko outline {rel}` is ≈ "
+        f"{outline_tokens} tok. Outline first, then read only the lines "
+        "you need."
+    )
+
+
+def _read_reason(
+    stages: list[list[str]], index: MapIndex, root: Path
+) -> str | None:
+    """Nudge for ``stages[0]`` reading a large stretch of a mapped file.
+
+    Later stages of the same pipeline that select lines (a bounded
+    ``head`` or ``sed -n``) narrow what the read actually prints, so
+    ``nl -ba big.py | sed -n '600,660p'`` costs 61 lines, not the file.
+    """
+    read = _stage_read(stages[0])
+    if read is None:
+        return None
+    candidate, span = read
+    for stage in stages[1:]:
+        limit = _stage_limit(stage)
+        if limit is not None:
+            span = span.within(limit)
+
+    return _span_reason(stages[0][0], candidate, span, index, root)
+
+
 def _bash_reason(command: str, index: MapIndex, root: Path) -> str | None:
     """The first dekko-equivalent nudge for a shell command, or None."""
-    for stmt in _split_statements(command):
-        reason = (
-            _grep_reason(stmt, root)
-            or _find_reason(stmt)
-            or _cat_reason(stmt, index, root)
-        )
-        if reason is not None:
-            return reason
+    for pipeline in _split_pipelines(command):
+        for i, stage in enumerate(pipeline):
+            reason = (
+                _grep_reason(stage, root)
+                or _find_reason(stage)
+                or _read_reason(pipeline[i:], index, root)
+            )
+            if reason is not None:
+                return reason
+
     return None
 
 
-def pre_bash(payload: dict, *, strict: bool = False) -> dict | None:
+def pre_bash(
+    payload: dict, *, strict: bool = False, agent: str = "claude"
+) -> dict | None:
     """Ask (or, under --strict, deny) before a grep/find/cat fallback.
 
     The enforcement tier (Tier 2): unlike every other hook in this
@@ -626,12 +955,19 @@ def pre_bash(payload: dict, *, strict: bool = False) -> dict | None:
     via ``--strict``) rejects the call outright and hands Claude the
     dekko-equivalent command to retry with. Matching is deliberately
     conservative (favor false negatives): a plain ``cat config.json``,
-    a non-recursive ``grep``, or an ``rg``/``grep -r`` whose every path
-    argument is an existing file never matches.
+    a non-recursive ``grep``, an ``rg``/``grep -r`` whose every path
+    argument is an existing file, or a line-ranged read of at most
+    ``RANGED_READ_MAX_LINES`` lines never matches.
+
+    Codex has no ``"ask"``, so there a match is advisory by default
+    (``additionalContext`` only; the command still runs) and a
+    ``"deny"`` under ``--strict``.
 
     Args:
         payload: The ``PreToolUse``/``Bash`` hook JSON.
-        strict: Escalate a match from ``"ask"`` to ``"deny"``.
+        strict: Escalate a match to ``"deny"``.
+        agent: Which agent's hook flavor to answer in (``claude`` or
+            ``codex``).
 
     Returns:
         A ``hookSpecificOutput`` dict on a match, else ``None``.
@@ -649,6 +985,15 @@ def pre_bash(payload: dict, *, strict: bool = False) -> dict | None:
     reason = _bash_reason(command, index, root)
     if reason is None:
         return None
+
+    return _pre_bash_output(reason, strict=strict, agent=agent)
+
+
+def _pre_bash_output(reason: str, *, strict: bool, agent: str) -> dict:
+    """The ``pre-bash`` decision for ``agent``, carrying ``reason``."""
+    if agent == "codex" and not strict:
+        return _additional_context("PreToolUse", reason)
+
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -660,6 +1005,40 @@ def pre_bash(payload: dict, *, strict: bool = False) -> dict | None:
 
 # --- dispatch (the `dekko hooks run <event>` entrypoint) -------------
 
+
+def _cursor_dispatch(
+    event: str, payload: dict, *, strict: bool
+) -> dict | None:
+    """Run ``event``'s handler on a Cursor payload; answer Cursor's way.
+
+    The payload is reshaped into the Claude form the handlers read, and
+    their Claude-shaped answer is converted for the Cursor event that
+    fired. ``pre-bash`` answers in Claude's flavor (``ask``), which the
+    converter keeps for a shell event and drops on ``preToolUse``,
+    where Cursor can't ask. A hook fired by an event it doesn't belong
+    to says nothing.
+    """
+    event_name = payload.get("hook_event_name")
+    if not isinstance(event_name, str) or not event_name:
+        event_name = hooks_cursor.CURSOR_EVENTS[event][0]
+
+    if not hooks_cursor.answers(event, event_name):
+        return None
+
+    normalized = hooks_cursor.normalize_payload(payload)
+    if event == "pre-bash":
+        output = pre_bash(normalized, strict=strict, agent="claude")
+    elif event == "session-start":
+        output = session_start(
+            normalized,
+            char_limit=hooks_cursor.CURSOR_CONTEXT_CHAR_LIMIT,
+        )
+    else:
+        output = _HANDLERS[event](normalized)
+
+    return hooks_cursor.cursor_output(event_name, output)
+
+
 _HANDLERS = {
     "session-start": session_start,
     "prompt-submit": prompt_submit,
@@ -668,7 +1047,13 @@ _HANDLERS = {
 }
 
 
-def dispatch(event: str, payload_text: str, *, strict: bool = False) -> int:
+def dispatch(
+    event: str,
+    payload_text: str,
+    *,
+    strict: bool = False,
+    agent: str = "claude",
+) -> int:
     """Run a hook handler over stdin JSON and print its output.
 
     Fail-silent by contract: a bad event, unparseable payload, or any
@@ -681,6 +1066,10 @@ def dispatch(event: str, payload_text: str, *, strict: bool = False) -> int:
         payload_text: The raw hook JSON from stdin.
         strict: Forwarded to ``pre_bash``; ignored by every other
             handler.
+        agent: Forwarded to ``pre_bash``, which answers in that agent's
+            hook flavor; ignored by every other handler. ``cursor``, or
+            a payload carrying Cursor's ``cursor_version`` key, makes
+            every handler answer in Cursor's format.
 
     Returns:
         Always ``0``.
@@ -692,8 +1081,10 @@ def dispatch(event: str, payload_text: str, *, strict: bool = False) -> int:
         payload = json.loads(payload_text) if payload_text.strip() else {}
         if not isinstance(payload, dict):
             return EXIT_OK
-        if event == "pre-bash":
-            output = handler(payload, strict=strict)
+        if agent == "cursor" or hooks_cursor.is_cursor_payload(payload):
+            output = _cursor_dispatch(event, payload, strict=strict)
+        elif event == "pre-bash":
+            output = handler(payload, strict=strict, agent=agent)
         else:
             output = handler(payload)
     except Exception:
@@ -706,9 +1097,31 @@ def dispatch(event: str, payload_text: str, *, strict: bool = False) -> int:
 # --- install / uninstall into project settings -----------------------
 
 
-def settings_path(root: Path) -> Path:
-    """Project-local Claude Code settings file for ``root``."""
+def settings_path(root: Path, agent: str = "claude") -> Path:
+    """The project-local file ``agent``'s hooks live in, for ``root``.
+
+    Claude Code keeps them in ``.claude/settings.json``; Codex in
+    ``.codex/hooks.json``, which has the same ``{"hooks": {...}}`` shape;
+    Cursor in ``.cursor/hooks.json``, with flat entries.
+    """
+    if agent == "codex":
+        return root / ".codex" / "hooks.json"
+
+    if agent == "cursor":
+        return root / ".cursor" / "hooks.json"
+
     return root / ".claude" / "settings.json"
+
+
+def events_for(agent: str) -> dict[str, tuple[str, str | None]]:
+    """The dekko events ``agent`` supports: name -> (event, matcher)."""
+    if agent == "codex":
+        return CODEX_EVENTS
+
+    if agent == "cursor":
+        return hooks_cursor.CURSOR_EVENTS
+
+    return EVENTS
 
 
 def _load_settings(path: Path) -> dict:
@@ -758,66 +1171,234 @@ def _write_settings(path: Path, settings: dict) -> None:
     )
 
 
-def _entry(event: str, matcher: str | None, *, strict: bool = False) -> dict:
+def _entry(
+    event: str,
+    matcher: str | None,
+    *,
+    strict: bool = False,
+    agent: str = "claude",
+) -> dict:
     """One settings hooks entry invoking ``dekko hooks run <event>``.
 
     ``strict`` only affects ``pre-bash``: it appends ``--strict`` to the
     command, which ``run_hooks_run``/``dispatch`` forward so
-    :func:`pre_bash` escalates its matches from ``"ask"`` to ``"deny"``.
+    :func:`pre_bash` escalates its matches to ``"deny"``.
+
+    A Codex entry adds ``--agent codex`` to the command, and its
+    ``session-start`` handler raises ``additionalContextLimit`` so the
+    lean map isn't spilled to a file. Codex's trust hash covers the
+    whole handler, so any change to what this writes for Codex makes
+    every existing install read as modified and stop running until the
+    user reviews it again: treat the Codex shape as fixed.
+
+    A Cursor entry is flat: the command and a timeout sit on the entry
+    itself, with no nested ``hooks`` list.
     """
     command = f"{_HOOK_COMMAND_PREFIX}{event}"
     if event == "pre-bash" and strict:
         command += " --strict"
-    block = {"hooks": [{"type": "command", "command": command}]}
+    if agent in ("codex", "cursor"):
+        command += f" --agent {agent}"
+    if agent == "cursor":
+        flat: dict = {"command": command}
+        if matcher is not None:
+            flat = {"matcher": matcher, **flat}
+        return {**flat, "timeout": hooks_cursor.CURSOR_HOOK_TIMEOUT}
+    handler: dict = {"type": "command", "command": command}
+    if agent == "codex" and event == "session-start":
+        handler["additionalContextLimit"] = CODEX_SESSION_CONTEXT_LIMIT
+    block = {"hooks": [handler]}
     if matcher is not None:
         block = {"matcher": matcher, **block}
     return block
 
 
+def _entry_commands(entry: dict) -> list[str]:
+    """The commands a hooks entry runs, in either entry shape.
+
+    Claude Code and Codex nest them (``{"hooks": [{"command": ...}]}``);
+    Cursor puts one on the entry itself (``{"command": ...}``).
+    """
+    commands = []
+    nested = entry.get("hooks")
+    if isinstance(nested, list):
+        commands = [
+            hook["command"]
+            for hook in nested
+            if isinstance(hook, dict) and isinstance(hook.get("command"), str)
+        ]
+
+    if isinstance(entry.get("command"), str):
+        commands.append(entry["command"])
+
+    return commands
+
+
 def _is_dekko_entry(entry: dict) -> bool:
     """Whether a settings hooks entry is one of ours."""
-    for hook in entry.get("hooks", []):
-        cmd = hook.get("command", "") if isinstance(hook, dict) else ""
-        if isinstance(cmd, str) and cmd.startswith(_HOOK_COMMAND_PREFIX):
-            return True
-    return False
+    return any(
+        cmd.startswith(_HOOK_COMMAND_PREFIX) for cmd in _entry_commands(entry)
+    )
 
 
-def install(root: Path, events: list[str], *, strict: bool = False) -> int:
+def _claude_hooks_installed(root: Path) -> bool:
+    """Whether ``.claude/settings.json`` under ``root`` has dekko hooks.
+
+    Cursor runs those too, so with Cursor's own dekko hooks installed
+    each one fires twice.
+    """
+    config = _load_settings(settings_path(root, "claude")).get("hooks")
+    if not isinstance(config, dict):
+        return False
+
+    return any(
+        isinstance(entry, dict) and _is_dekko_entry(entry)
+        for bucket in config.values()
+        if isinstance(bucket, list)
+        for entry in bucket
+    )
+
+
+def install(
+    root: Path,
+    events: list[str],
+    *,
+    strict: bool = False,
+    agent: str = "claude",
+) -> int:
     """Merge dekko hook entries into project settings (idempotent).
 
     Args:
-        root: Repository root whose ``.claude/settings.json`` to edit.
+        root: Repository root whose hook file to edit
+            (``.claude/settings.json``, or ``.codex/hooks.json`` for
+            Codex).
         events: dekko event names to enable.
-        strict: Escalate ``pre-bash`` matches from ``"ask"`` to
-            ``"deny"``. No effect unless ``"pre-bash"`` is in
-            ``events``; changing it on an already-installed ``pre-bash``
-            requires ``hooks uninstall`` first (install only merges).
+        strict: Escalate ``pre-bash`` matches to ``"deny"``. No effect
+            unless ``"pre-bash"`` is in ``events``; changing it on an
+            already-installed ``pre-bash`` requires ``hooks uninstall``
+            first (install only merges).
+        agent: Which agent's hooks to write: ``claude``, ``codex`` or
+            ``cursor``.
 
     Returns:
-        Process exit code (``0`` ok, ``2`` on an unknown event).
+        Process exit code (``0`` ok, ``2`` on an unknown event or a
+        Codex config that already defines hooks).
     """
-    unknown = [e for e in events if e not in EVENTS]
+    code = _check_install(root, events, agent)
+    if code is not None:
+        return code
+
+    path = settings_path(root, agent)
+    settings = _load_settings(path)
+    if agent == "cursor" and "version" not in settings:
+        settings = {"version": 1, **settings}
+    hooks = settings.setdefault("hooks", {})
+    table = events_for(agent)
+    for event in events:
+        agent_event, matcher = table[event]
+        bucket = hooks.setdefault(agent_event, [])
+        if not _already_installed(bucket, event):
+            bucket.append(_entry(event, matcher, strict=strict, agent=agent))
+    _write_settings(path, settings)
+    if agent == "codex":
+        print(f"dekko: enabled hooks [{', '.join(events)}] in {path}.")
+        print(_CODEX_TRUST_NOTE)
+        return 0
+
+    if agent == "cursor":
+        print(f"dekko: enabled hooks [{', '.join(events)}] in {path}.")
+        print(_CURSOR_TRUST_NOTE)
+        if _claude_hooks_installed(root):
+            print(_CURSOR_OVERLAP_NOTE)
+        return 0
+
+    print(
+        f"dekko: enabled hooks [{', '.join(events)}] in {path}. "
+        "Restart Claude Code."
+    )
+    return 0
+
+
+# A config.toml table header that defines hook events: ``[hooks]``,
+# ``[hooks.SessionStart]``, ``[[hooks.PreToolUse]]``, not
+# ``[hooks.state."..."]``.
+_TOML_HOOKS_HEADER_RE = re.compile(
+    r"^\s*\[\[?\s*hooks\s*(?:\]|\.\s*(?!state\b)\w)"
+)
+
+_CODEX_TRUST_NOTE = (
+    "Codex runs project hooks only in a trusted project, and asks you "
+    'to review each new hook the next time it starts ("Hooks need '
+    'review"). `codex exec` skips untrusted hooks silently. Changing a '
+    "hook later (for example reinstalling with or without --strict) "
+    "needs another review."
+)
+
+
+_CURSOR_TRUST_NOTE = (
+    "Cursor reloads hook files live, and runs project hooks only in a "
+    "trusted workspace (the headless `agent` CLI needs --trust)."
+)
+
+_CURSOR_OVERLAP_NOTE = (
+    "Note: .claude/settings.json also has dekko hooks, and Cursor runs "
+    "those too, so each fires twice and the context arrives twice. "
+    "Remove one set (`dekko hooks uninstall`), or turn off Cursor's "
+    "Settings > Agents > Third-Party Imports."
+)
+
+
+def _check_install(root: Path, events: list[str], agent: str) -> int | None:
+    """Refuse an install that can't be written as asked: exit code, or None.
+
+    Rejects events the agent doesn't support, and a Codex install into
+    a project whose ``.codex/config.toml`` already has a ``[hooks]``
+    table: Codex warns when one config layer defines hooks both there
+    and in ``hooks.json``. That's a substring check, not a TOML parse.
+    """
+    table = events_for(agent)
+    unknown = [e for e in events if e not in table]
+    if agent == "codex" and "pre-read" in unknown:
+        print(
+            "dekko: pre-read isn't available for Codex: Codex has no Read "
+            "tool and reads files through the shell, which pre-bash "
+            "covers.",
+            file=sys.stderr,
+        )
+        return 2
     if unknown:
         print(
             f"dekko: unknown hook event(s): {', '.join(unknown)}",
             file=sys.stderr,
         )
         return 2
-    path = settings_path(root)
-    settings = _load_settings(path)
-    hooks = settings.setdefault("hooks", {})
-    for event in events:
-        claude_event, matcher = EVENTS[event]
-        bucket = hooks.setdefault(claude_event, [])
-        if not _already_installed(bucket, event):
-            bucket.append(_entry(event, matcher, strict=strict))
-    _write_settings(path, settings)
-    print(
-        f"dekko: enabled hooks [{', '.join(events)}] in {path}. "
-        "Restart Claude Code."
-    )
-    return 0
+    if agent == "codex" and _codex_config_has_hooks(root):
+        print(
+            f"dekko: {root / '.codex' / 'config.toml'} already defines a "
+            "[hooks] table. Codex warns when one config layer defines "
+            "hooks both there and in .codex/hooks.json, so dekko won't "
+            "add a second set. Move those hooks into .codex/hooks.json "
+            "first, then rerun this.",
+            file=sys.stderr,
+        )
+        return 2
+
+    return None
+
+
+def _codex_config_has_hooks(root: Path) -> bool:
+    """Whether ``.codex/config.toml`` under ``root`` defines hook events.
+
+    Matches a ``[hooks]`` header or an event table such as
+    ``[[hooks.PreToolUse]]``. A ``[hooks.state."..."]`` table only
+    records trust, which Codex doesn't count as defining hooks.
+    """
+    try:
+        text = (root / ".codex" / "config.toml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    return any(_TOML_HOOKS_HEADER_RE.match(line) for line in text.splitlines())
 
 
 def _already_installed(bucket: list, event: str) -> bool:
@@ -828,28 +1409,26 @@ def _already_installed(bucket: list, event: str) -> bool:
     never adds a duplicate entry.
     """
     command = f"{_HOOK_COMMAND_PREFIX}{event}"
-    for entry in bucket:
-        if not isinstance(entry, dict):
-            continue
-        for hook in entry.get("hooks", []):
-            cmd = hook.get("command") if isinstance(hook, dict) else None
-            if isinstance(cmd, str) and (
-                cmd == command or cmd.startswith(f"{command} ")
-            ):
-                return True
-    return False
+    return any(
+        cmd == command or cmd.startswith(f"{command} ")
+        for entry in bucket
+        if isinstance(entry, dict)
+        for cmd in _entry_commands(entry)
+    )
 
 
-def uninstall(root: Path) -> int:
+def uninstall(root: Path, agent: str = "claude") -> int:
     """Remove all dekko hook entries from project settings.
 
     Args:
         root: Repository root whose settings to clean.
+        agent: Which agent's hook file to clean: ``claude``, ``codex``
+            or ``cursor``.
 
     Returns:
         Process exit code (always ``0``).
     """
-    path = settings_path(root)
+    path = settings_path(root, agent)
     settings = _load_settings(path)
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
@@ -869,11 +1448,15 @@ def uninstall(root: Path) -> int:
             del hooks[claude_event]
     if not hooks:
         settings.pop("hooks", None)
+    if agent == "cursor" and set(settings) <= {"version"}:
+        # A Cursor file needs a ``version``; one with nothing else is
+        # dekko's own and goes too.
+        settings = {}
     if not settings and path.exists():
         # Nothing left to keep -- remove the file (and the now-empty
-        # .claude/ dir it lived in, if nothing else uses it) rather
-        # than leaving a stray `{}` behind, matching --claude-md-
-        # install/uninstall's own byte-identical restoration.
+        # .claude/ or .codex/ dir it lived in, if nothing else uses it)
+        # rather than leaving a stray `{}` behind, matching `dekko
+        # uninstall claude-md`'s own byte-identical restoration.
         path.unlink()
         try:
             path.parent.rmdir()

@@ -7,7 +7,7 @@
 /map src/       # map a subtree only
 ```
 
-`dekko --claude-install` wires up both the `/map` command and the MCP
+`dekko install claude` wires up both the `/map` command and the MCP
 server (see below); the plugin just runs the installed `dekko` CLI, so
 install the package first — see [install.md](install.md).
 
@@ -108,17 +108,22 @@ overriding default agent behavior instead — a materially stronger,
 one-time lever:
 
 ```sh
-dekko --claude-md-install     # add/update a marker-bounded usage-policy block
-dekko --claude-md-uninstall   # remove just that block, leave the rest of the file
+dekko install claude-md       # add/update a marker-bounded usage-policy block
+dekko uninstall claude-md     # remove just that block, leave the rest of the file
 ```
 
 Writes a short block bounded by `<!-- dekko:usage-policy:start -->` /
-`...:end` markers into the project's `CLAUDE.md`, pointing Claude at
+`...:end` markers into the project's `CLAUDE.md`, pointing the agent at
 `search_code`/`outline`/`get_callers`/`workset` before `grep`/`Read`.
-Idempotent: re-running `--claude-md-install` replaces the block in
+Idempotent: re-running `dekko install claude-md` replaces the block in
 place rather than duplicating it. This is a separate, explicit opt-in
 from everything else on this page — it edits a file you own and read,
 unlike `.claude/settings.json` or the plugin registration.
+
+The block is written for any agent, not just Claude Code: `dekko
+install agents-md` puts the same block into `AGENTS.md` for Codex and
+the other agents that read it (see
+[codex.md](codex.md#a-persistent-usage-policy-in-agentsmd-opt-in)).
 
 ## Push hooks (opt-in)
 
@@ -159,7 +164,8 @@ dekko hooks uninstall                      # remove all dekko hooks
   first, before a whole-file `Read`.
 - **`pre-bash`** — the enforcement tier, off by default even when other
   hooks are installed. Matches a repo-wide `grep`/`rg`/`ag` search, a
-  `find -name` hunt, or a `cat`/`head`/`sed` on a large mapped file, and
+  `find -name` hunt, or a `cat`/`head`/`sed`/`nl` read of a large
+  stretch of a mapped file, and
   surfaces `permissionDecision: "ask"` with the dekko-equivalent
   command — a real interruption, not ignorable text. `--strict`
   escalates matches to `"deny"` instead. Matching is deliberately
@@ -170,15 +176,36 @@ dekko hooks uninstall                      # remove all dekko hooks
   comments, config/data files, and anything outside dekko's language
   coverage. Recursive short flags are read letter by letter, so
   `-rli`, `-nR`, and `-rnE` all count, not just a bare `-r`.
+  A line-ranged read is a targeted look, so one of at most 200 lines
+  never matches however large the file: `sed -n '1,120p' big.py`,
+  `head -n 50 big.py`, and a read piped into one
+  (`nl -ba big.py | sed -n '600,660p'`). A longer range is costed by
+  the lines it prints, not the whole file, and only matches past the
+  same ~1,000-token threshold.
 
 Installing writes to `.claude/settings.json` (restart Claude Code to
 activate). Every handler is fail-silent — a stale map or hook error
 never blocks a session or a tool call, it just produces no output (for
 `pre-bash`, "no output" means the command runs normally, unmatched).
 
+### OpenAI Codex
+
+The same hooks work in Codex with `--agent codex` on `install`,
+`uninstall` and `run`, written to `.codex/hooks.json`. Codex has no
+`pre-read` (it reads files through the shell, which `pre-bash`
+covers), no "ask" (so `pre-bash` advises by default and denies under
+`--strict`), and its own trust review for every hook. See
+[codex.md](codex.md#push-hooks-opt-in).
+
+They work in Cursor with `--agent cursor`, written to
+`.cursor/hooks.json`. Cursor also runs the hooks in
+`.claude/settings.json` on its own, and a dekko hook answers in the
+format of whichever tool called it, so the Claude Code install stays
+harmless there. See [cursor.md](cursor.md#push-hooks-opt-in).
+
 ## Skills
 
-`dekko --claude-install` also ships eight Claude Code skills alongside
+`dekko install claude` also ships eight Claude Code skills alongside
 the `/map` command and MCP server — Claude discovers and invokes them
 automatically when their trigger conditions match, no separate install
 step:
@@ -196,6 +223,12 @@ step:
 
 See each skill's `SKILL.md` under `integrations/claude/skills/` for the
 full guidance.
+
+The same eight skills ship in the Codex plugin, word for word: they
+name dekko's tools by bare name and cover both a Read tool and shell
+reads, so one text serves either agent. Codex also gets four skills in
+place of the slash commands (see
+[codex.md](codex.md#skills)).
 
 ## The MCP server
 
@@ -227,8 +260,8 @@ tool uses. Two of those names with different values is an error,
 whichever one the tool's own is. Every `budget` argument takes `0` for
 no cap.
 
-`dekko --claude-install` registers this automatically for Claude Code.
-For a standalone registration: `dekko --mcp-install` (runs
+`dekko install claude` registers this automatically for Claude Code.
+For a standalone registration: `dekko install claude --mcp-only` (runs
 `claude mcp add dekko -- dekko serve --mcp`; add `--dry-run` to print
 the command instead).
 
@@ -259,10 +292,10 @@ the installed dekko code last changed, naming the pids to restart.
 ## Cline
 
 ```sh
-dekko --cline-install      # merge dekko into cline_mcp_settings.json
-dekko --cline-uninstall    # remove just the dekko entry
+dekko install cline        # merge dekko into cline_mcp_settings.json
+dekko uninstall cline      # remove just the dekko entry
 ```
 
 Cline has no plugin system, so only the MCP tools are available (no
-`/map`-equivalent slash command). See `dekko --cline-install --help`
+`/map`-equivalent slash command). See `dekko install cline --help`
 for scope/config overrides if auto-detection picks the wrong file.

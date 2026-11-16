@@ -76,17 +76,116 @@ def test_an_explicit_canonical_constructor_replaces_the_header(
     assert syms["Arr.Arr"].start_line == 7
 
 
-def test_an_extra_constructor_follows_the_canonical_one(
+def test_an_extra_constructor_precedes_the_canonical_one(
     tmp_path: Path,
 ) -> None:
+    # The declared constructor had ``R.R`` before the header was a
+    # symbol; the header takes the next number rather than move it.
     syms = _symbols(
         tmp_path,
         "record R(int a, int b) {\n    R(int a) { this(a, 0); }\n}\n",
     )
-    assert _params(syms["R.R"]) == [("a", "int"), ("b", "int")]
-    assert syms["R.R"].start_line == 2
-    assert _params(syms["R.R#2"]) == [("a", "int")]
-    assert syms["R.R#2"].start_line == 3
+    assert _params(syms["R.R"]) == [("a", "int")]
+    assert syms["R.R"].start_line == 3
+    assert _params(syms["R.R#2"]) == [("a", "int"), ("b", "int")]
+    assert syms["R.R#2"].start_line == 2
+
+
+def test_a_compact_constructor_is_numbered_after_declared_ones(
+    tmp_path: Path,
+) -> None:
+    text = (
+        "record R(int a, String b) {\n"
+        "    R {\n"
+        "        check(a);\n"
+        "    }\n"
+        "    R(int a) { this(a, null); }\n"
+        "    R(String b) { this(0, b); }\n"
+        "    static void check(int a) { }\n"
+        "}\n"
+    )
+    syms = _symbols(tmp_path, text)
+    assert {q for q in syms if q.startswith("R.R")} == {
+        "R.R",
+        "R.R#2",
+        "R.R#3",
+    }
+    assert (syms["R.R"].start_line, _params(syms["R.R"])) == (
+        6,
+        [("a", "int")],
+    )
+    assert (syms["R.R#2"].start_line, _params(syms["R.R#2"])) == (
+        7,
+        [("b", "String")],
+    )
+    compact = syms["R.R#3"]
+    assert compact.start_line == 3
+    assert _params(compact) == [("a", "int"), ("b", "String")]
+
+    fm = extract_file(tmp_path, _REL, spec_for_path(_REL))
+    callers = {c.caller_id for c in fm.calls if c.name == "check"}
+    assert callers == {f"{_REL}::R.R#3"}
+
+
+def test_a_declared_constructor_before_a_compact_one_keeps_r_r(
+    tmp_path: Path,
+) -> None:
+    syms = _symbols(
+        tmp_path,
+        "record Host(String name, int port) {\n"
+        "    Host(String name) { this(name, 80); }\n"
+        "    Host { }\n"
+        "}\n",
+    )
+    assert syms["Host.Host"].start_line == 3
+    assert _params(syms["Host.Host"]) == [("name", "String")]
+    assert syms["Host.Host#2"].start_line == 4
+
+
+def test_an_explicit_canonical_keeps_source_order(tmp_path: Path) -> None:
+    # A full canonical constructor was always a declared symbol, so
+    # nothing about its number changed.
+    syms = _symbols(
+        tmp_path,
+        "record R(int a, int b) {\n"
+        "    R(int a) { this(a, 0); }\n"
+        "    R(int a, int b) { this.a = a; this.b = b; }\n"
+        "    R() { this(0, 0); }\n"
+        "}\n",
+    )
+    lines = {q: s.start_line for q, s in syms.items() if q.startswith("R.R")}
+    assert lines == {"R.R": 3, "R.R#2": 4, "R.R#3": 5}
+
+
+def test_canonical_constructors_of_two_records_keep_their_slots(
+    tmp_path: Path,
+) -> None:
+    # Deferring the numbering must not reorder the symbol list:
+    # callers are attributed by walking it in source order.
+    fm_text = (
+        "record A(int a) {\n"
+        "    A() { this(0); }\n"
+        "}\n"
+        "class Mid { void m() { } }\n"
+        "record B(int b) {\n"
+        "    B { }\n"
+        "    B(String s) { this(1); }\n"
+        "}\n"
+    )
+    (tmp_path / _REL).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / _REL).write_text("package app;\n" + fm_text)
+    fm = extract_file(tmp_path, _REL, spec_for_path(_REL))
+    order = [s.id.split("::", 1)[1] for s in fm.symbols]
+    assert order == [
+        "A",
+        "A.A#2",
+        "A.A",
+        "Mid",
+        "Mid.m",
+        "B",
+        "B.B#2",
+        "B.B",
+    ]
 
 
 def test_generic_varargs_and_empty_records(tmp_path: Path) -> None:

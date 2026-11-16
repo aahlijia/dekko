@@ -46,6 +46,7 @@ dekko deps --cycles                  # every detected circular-import cluster
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
 dekko doctor                         # diagnose install/environment issues (PATH shadowing, hooks, MCP, ...)
+dekko install claude                 # wire dekko into a client (claude, cline) or file (claude-md, agents-md); see below
 dekko sanity resolve                 # cross-check `callers resolve` against a targeted grep sweep
 dekko sanity Path --usages           # cross-check `uses Path` instead of `callers`
 dekko sanity --all                   # repo-wide sweep: every fan-in symbol, not just one target
@@ -324,8 +325,80 @@ stdout as JSON when the status is 0 or 1.
 
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
-`ledger`, `orient`, `deps` cover more specialized workflows; hooks are
-documented in [claude-code.md](claude-code.md#push-hooks-opt-in)).
+`ledger`, `orient`, `deps` cover more specialized workflows; hooks,
+including `--agent codex` for OpenAI Codex and `--agent cursor` for
+Cursor, are documented in
+[claude-code.md](claude-code.md#push-hooks-opt-in),
+[codex.md](codex.md#push-hooks-opt-in) and
+[cursor.md](cursor.md#push-hooks-opt-in)).
+
+## Wiring dekko into a client
+
+`dekko install <target>` wires dekko into one client or file, and
+`dekko uninstall <target>` takes it back out. `dekko install --help`
+lists the targets:
+
+```sh
+dekko install claude                 # Claude Code plugin: MCP server, skills, slash commands
+dekko install claude --mcp-only      # just the MCP server (claude mcp add)
+dekko install claude --dry-run       # print the claude commands instead of running them
+dekko install codex                  # OpenAI Codex plugin: MCP server and skills
+dekko install codex --mcp-only       # just the MCP server (codex mcp add)
+dekko install codex --dry-run        # print the codex commands instead of running them
+dekko install cursor                 # Cursor plugin: MCP server and skills, copied into ~/.cursor/plugins/local
+dekko install cursor --mcp-only      # just the MCP server, in this repo's .cursor/mcp.json (--root DIR, --force)
+dekko install cline                  # MCP server in Cline's cline_mcp_settings.json
+dekko install cline --scope global   # ...a standalone cline CLI's config (--config PATH to name the file)
+dekko install claude-md              # usage-policy block in this repo's CLAUDE.md (--root DIR)
+dekko install agents-md              # the same block in this repo's AGENTS.md, for Codex, Cursor and other agents (--root DIR)
+dekko uninstall claude               # the reverse of each, same options
+```
+
+`--dry-run` works only on the `claude` and `codex` targets, which shell
+out to the `claude` / `codex` CLI; `cursor`, `cline`, `claude-md` and
+`agents-md` edit files and refuse it (exit 2) rather than write for real. No
+target, or an unknown one, exits 2 with the list.
+
+`claude-md` and `agents-md` write the same agent-neutral block between
+the same markers, so installing one and then the other in a repo whose
+`CLAUDE.md` is a symlink to `AGENTS.md` (or the reverse) leaves a
+single block, and the link stays a link. After `agents-md`, dekko warns
+when Codex won't see the block: when the root `AGENTS.md` is over
+Codex's default 32 KiB `project_doc_max_bytes` (Codex cuts the end of
+the file, where the block sits), or when a root `AGENTS.override.md`
+exists (Codex reads that instead of `AGENTS.md`).
+
+Hooks have their own opt-in per event, under `dekko
+hooks install` (see
+[claude-code.md](claude-code.md#push-hooks-opt-in)).
+
+`dekko install codex` registers the plugin bundled in the dekko wheel
+(`codex plugin marketplace add`, then `codex plugin add dekko@dekko`).
+Codex copies the plugin into its own cache and refreshes that copy
+whenever dekko's version changes. Its skills are invoked as
+`$dekko:<skill>` (for example `$dekko:dekko-orient`); the `/map`,
+`/impact`, `/doctor` and `/sanity` commands become the skills
+`dekko-map`, `dekko-impact`, `dekko-doctor` and `dekko-sanity`, since
+Codex has no plugin slash commands. `codex` has no legacy flag.
+
+`dekko install cursor` copies the same bundle into
+`~/.cursor/plugins/local/dekko/`, pointing its MCP server at the
+resolved `dekko` executable; reload the Cursor window afterward. It
+only replaces its own earlier copy, and refuses (exit 2) a symlink or
+another plugin there. `--mcp-only` merges just the MCP server into
+`<root>/.cursor/mcp.json` instead (`--root`, default the cwd; `--force`
+replaces a malformed file); `--root` and `--force` without `--mcp-only`
+exit 2. The skills are called as `/dekko-orient`, `/dekko-impact` and
+so on. See [cursor.md](cursor.md). `cursor` has no legacy flag.
+
+The older flags still work and do exactly the same thing:
+
+| Flag | Same as |
+|---|---|
+| `--claude-install` / `--claude-uninstall` | `dekko install claude` / `dekko uninstall claude` |
+| `--mcp-install` / `--mcp-uninstall` | `dekko install claude --mcp-only` / `dekko uninstall claude --mcp-only` |
+| `--cline-install` / `--cline-uninstall` (`--cline-scope`, `--cline-config`, `--cline-force`) | `dekko install cline` / `dekko uninstall cline` (`--scope`, `--config`, `--force`) |
+| `--claude-md-install` / `--claude-md-uninstall` (`--root`) | `dekko install claude-md` / `dekko uninstall claude-md` (`--root`) |
 
 ## Diagnosing environment issues
 
@@ -340,6 +413,35 @@ anything not `ok`; `--json` for scripting. It never regenerates the map
 and never auto-fixes anything — reporting only. Full check list and the
 Claude Code `/doctor` slash command:
 [claude-code.md](claude-code.md#the-doctor-command).
+
+When Codex is installed (`codex` resolves on `$PATH`, or
+`$CODEX_HOME/plugins/cache/` exists; `CODEX_HOME` defaults to
+`~/.codex`), doctor adds Codex rows. A leftover `~/.codex/` alone
+doesn't count.
+
+| Row | Checks | Fix it names |
+|---|---|---|
+| `codex-plugin-installed` | `codex plugin list --json` has dekko installed and enabled, at this dekko's version (Codex caches the plugin and refreshes it only when the version changes, so a mismatch is `stale`) | `dekko install codex` |
+| `codex-mcp-registered` | `codex mcp list --json` has an enabled `dekko` server that runs `dekko serve`; plugin-provided servers show here too | `dekko install codex` (or `--mcp-only`) |
+| `agents-md-policy` | The policy block is in the root `AGENTS.md`; `advisory` when a root `AGENTS.override.md` shadows it, or the file is over Codex's 32 KiB default | `dekko install agents-md` |
+| `codex-hook:<event>` | One row each for `session-start`, `prompt-submit`, `pre-bash` in `.codex/hooks.json`. `stale` when an entry differs from what this dekko writes (Codex reads a changed hook as modified and won't run it until it's reviewed again). On Python 3.11+, `advisory` when Codex's config has no trust record for the hook yet; a record found reads "trusted (hash not verified)" | `dekko hooks install --agent codex --enable <event>` |
+
+The `agents-md-policy` row also shows without Codex when the block is
+already in `AGENTS.md`, since other agents read that file too.
+
+When Cursor is installed (`cursor-agent` or `cursor` on `$PATH`, an
+`agent` on `$PATH` that resolves into Cursor's install,
+`/Applications/Cursor.app`, or dekko's own
+`~/.cursor/plugins/local/dekko`), doctor adds Cursor rows. A leftover
+`~/.cursor/` alone doesn't count.
+
+| Row | Checks | Fix it names |
+|---|---|---|
+| `cursor-plugin` | The copy in `~/.cursor/plugins/local/dekko` is dekko's, at this dekko's version (a copy doesn't follow upgrades, so a mismatch is `stale`), and its MCP command resolves | `dekko install cursor` |
+| `cursor-mcp` | A `dekko` server in `<root>/.cursor/mcp.json` or `~/.cursor/mcp.json` whose command resolves, or the `cursor-plugin` row is `ok` | `dekko install cursor --mcp-only` |
+| `cursor-policy` | The policy block is in the root `AGENTS.md` or `CLAUDE.md` (Cursor applies both) | `dekko install agents-md` |
+| `cursor-hook:<event>` | One row each for `session-start`, `prompt-submit`, `pre-read`, `pre-bash` in `.cursor/hooks.json`; `stale` when an entry differs from what this dekko writes | `dekko hooks install --agent cursor --enable <event>` |
+| `cursor-claude-overlap` | `advisory` when Cursor's import of Claude Code setups loads dekko twice: the Claude Code plugin and the Cursor plugin, or dekko hooks in both `.claude/settings.json` and `.cursor/hooks.json` | remove one, or turn off Cursor's Settings > Agents > Third-Party Imports |
 
 ## Sanity-checking a low/zero call-graph result
 
@@ -1223,7 +1325,11 @@ those members. A lowercase path through a workspace crate
 or one of its modules) keeps the candidates inside that crate's
 directory, functions before methods, when it has any. A Rust dot-call
 `x.name(..)` row lists only the methods that take `self` and the
-written count, when two or more do. A Rust call
+written count, when two or more do. Since 1.9.7 a dot-call whose own
+file defines a free `name` (which it can't call) resolves to the
+repo's one `name` that takes `self`, when there is exactly one and the
+receiver isn't one of the caller's typed parameters; with no such
+same-file function, or two methods, the call stays as it was. A Rust call
 through a `use` rooted at `std`, `core` or `alloc` (`use std::path::
 Path; Path::new(..)`) is counted external even when the repo defines a
 type of that name. The same goes for a `use` rooted at any crate the
@@ -1265,7 +1371,31 @@ X(..)` or `X::new` that is still ambiguous, with no import of `X` in
 the file, takes the one top-level `X` in the file's own package, as
 Java does (the package is the directory under the source root, so
 `src/test/java/org/x` and `src/main/java/org/x` are one package). Two
-`X` in that package, or none, leave it ambiguous. A low ambiguous rate
+`X` in that package, or none, leave it ambiguous. Since 1.9.4 a Java
+`new X(..)` or `X::new` (a simple name, not `new Outer.X(..)`) first
+names a member type of the enclosing classes, innermost out, as the
+compiler does: one the class declares, else one an in-repo supertype
+declares (an interface's nested record), else the class itself when it
+is called `X`. A class with a supertype outside the repo stops the
+search, since that type may declare an `X` dekko can't see, and a
+construction inside an anonymous class body is left to the ladder.
+Since 1.9.5 a bare Java call `m(..)` names the methods of the nearest
+enclosing class that has a method called `m`, declared or inherited
+from an in-repo supertype, narrowed by argument count: one fit is the
+target, and several make the ambiguous row list only those. A class
+with a supertype outside the repo stops the search when it has no
+`m` of its own, and so does a name a class has without a symbol for
+it (`equals` and `Object`'s other methods, an enum's `values()`, a
+record's zero-argument accessor); a call inside an anonymous class
+body is left to the ladder. Since 1.9.6 a bare Java call whose pick is
+no method of an enclosing class (own or inherited from an in-repo
+supertype) and that no import in the file binds is counted external:
+Java has no other way to name it, so `getProject()` in a class
+extending Gradle's `DefaultTask` is `DefaultTask`'s, not the one
+repo class's that happens to declare it. A class whose supertype
+clause names an in-repo type that couldn't be read (a Kotlin class,
+say) keeps the pick. A
+low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

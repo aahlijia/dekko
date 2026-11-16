@@ -6697,6 +6697,72 @@ def test_rust_flatten_denylisted_without_structural_evidence(
     assert "crates/text/src/text.rs::Edit.flatten" not in resolved
 
 
+_TREE_MAP_RS = (
+    "pub struct TreeMap;\n"
+    "impl TreeMap {\n"
+    "    pub fn contains_key(&self, k: &u32) -> bool { true }\n}\n"
+)
+
+
+def test_rust_std_only_names_send_a_lone_pick_external(
+    tmp_path: Path,
+) -> None:
+    # `m` is an untyped local (really a std `HashMap`); the repo's one
+    # `contains_key` must not take the call on name alone.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/tree/src/tree_map.rs": _TREE_MAP_RS,
+            "crates/tree/src/lookup.rs": (
+                "pub fn check() -> bool {\n"
+                "    let m = make();\n"
+                "    m.contains_key(&1)\n}\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get("crates/tree/src/lookup.rs::check", [])
+    assert "crates/tree/src/tree_map.rs::TreeMap.contains_key" not in resolved
+    assert any(e.callee == "m.contains_key" for e in graph.external)
+
+
+def test_rust_std_only_names_dont_apply_outside_rust(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "store.py": (
+                "class Store:\n    def get_mut(self, k):\n        return k\n"
+            ),
+            "use.py": (
+                "def run():\n    m = make()\n    return m.get_mut(1)\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get("use.py::run", [])
+    assert resolved == ["store.py::Store.get_mut"]
+
+
+def test_rust_std_only_names_a_typed_receiver_still_resolves(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/tree/src/tree_map.rs": _TREE_MAP_RS,
+            "crates/tree/src/holder.rs": (
+                "use crate::tree_map::TreeMap;\n"
+                "pub struct Holder {\n    tree: TreeMap,\n}\n"
+                "impl Holder {\n"
+                "    pub fn has(&self) -> bool {\n"
+                "        self.tree.contains_key(&1)\n    }\n}\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get("crates/tree/src/holder.rs::Holder.has", [])
+    assert "crates/tree/src/tree_map.rs::TreeMap.contains_key" in resolved
+
+
 # More checks on the declared-type receiver rule.
 
 

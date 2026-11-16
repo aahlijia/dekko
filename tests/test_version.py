@@ -1,8 +1,9 @@
-"""Guard: the version is declared in four places and must agree.
+"""Guard: the version is declared in six places and must agree.
 
-A release bump has to touch pyproject.toml, both plugin manifests, and
-uv.lock together. This test fails loudly when they drift, which is the
-mistake that has slipped through before.
+A release bump has to touch pyproject.toml, the four plugin manifests
+(Claude Code's plugin.json and marketplace.json, Codex's and Cursor's
+plugin.json), and uv.lock together. This test fails loudly when they
+drift, which is the mistake that has slipped through before.
 """
 
 import json
@@ -47,6 +48,12 @@ def test_declared_versions_agree() -> None:
             "integrations/claude/.claude-plugin/marketplace.json",
             "metadata",
             "version",
+        ),
+        "codex plugin.json": _json_version(
+            "integrations/claude/.codex-plugin/plugin.json", "version"
+        ),
+        "cursor plugin.json": _json_version(
+            "integrations/claude/.cursor-plugin/plugin.json", "version"
         ),
         "uv.lock": _uvlock_version(),
     }

@@ -643,6 +643,10 @@ CPP = LanguageSpec(
 (class_specifier
   name: (type_identifier) @classname
   body: (field_declaration_list)) @classdef
+
+(alias_declaration name: (type_identifier) @classname) @classdef
+
+(type_definition declarator: (type_identifier) @classname) @classdef
 """,
     # ``new_expression``'s type alternation leaves out primitive and
     # sized types (``new int[5]``): they construct no class.
@@ -800,7 +804,8 @@ _JS_REFERENCE_BASE = """
 # no separate pattern. A subscript (``cmd["dyn"]``) stays out: the
 # key is a string, not a name.
 _JS_READ_QUERY = """
-(member_expression property: (property_identifier) @read) @site
+(member_expression
+  property: [(property_identifier) (private_property_identifier)] @read) @site
 (object_pattern (shorthand_property_identifier_pattern) @read)
 (pair_pattern key: (property_identifier) @read)
 """
@@ -931,7 +936,7 @@ _JS_THIS_ASSIGN_FIELD = """
 _JS_FIELD_QUERY = (
     """
 (field_definition
-  property: (property_identifier) @name
+  property: [(property_identifier) (private_property_identifier)] @name
   value: (_)? @init) @field
 """
     + _JS_THIS_ASSIGN_FIELD
@@ -943,7 +948,7 @@ _JS_FIELD_QUERY = (
 _TS_FIELD_QUERY = (
     """
 (public_field_definition
-  name: (property_identifier) @name
+  name: [(property_identifier) (private_property_identifier)] @name
   type: (type_annotation)? @type
   value: (_)? @init) @field
 
@@ -979,7 +984,7 @@ JAVASCRIPT = LanguageSpec(
   parameters: (formal_parameters) @params) @def
 
 (method_definition
-  name: (property_identifier) @name
+  name: [(property_identifier) (private_property_identifier)] @name
   parameters: (formal_parameters) @params) @def
 
 (variable_declarator
@@ -1100,7 +1105,7 @@ _TS_DEFINITIONS = """
   return_type: (type_annotation)? @ret) @def
 
 (method_definition
-  name: (property_identifier) @name
+  name: [(property_identifier) (private_property_identifier)] @name
   parameters: (formal_parameters) @params
   return_type: (type_annotation)? @ret) @def
 
@@ -1827,7 +1832,7 @@ def exception_handling_supported(language: str) -> bool:
 # logic is discarded automatically -- every file re-parses once on the
 # next non-``--full`` ``dekko map`` run -- rather than requiring users
 # to know to pass ``--full`` themselves.
-_HEADER_DISPATCH_HEURISTIC_VERSION = 1
+_HEADER_DISPATCH_HEURISTIC_VERSION = 2
 
 # Bumped whenever ``extractor._heritage_rust_impl``'s subject-recovery
 # logic changes: an ``impl Trait
@@ -1897,6 +1902,11 @@ _CPP_USING_VERSION = 1
 # prototypes (``FileMap.cpp_decls``). The same kind of tree walk.
 _CPP_DECLS_VERSION = 1
 
+# Bump when ``extractor._mask_attribute_macros`` changes which C/C++
+# macro invocations it blanks out before the parse. Text rewriting
+# outside any query, so the spec loop below can't see it.
+_CPP_ATTRIBUTE_MACRO_VERSION = 3
+
 # Bump when the Tier-2 engine (``extractor_generic.py``) changes what
 # it yields for an unchanged row. The rows themselves are hashed below,
 # so editing one needs no bump.
@@ -1926,14 +1936,43 @@ _JAVA_NEW_QUALIFIER_VERSION = 1
 
 # Bump when ``extractor._collect_definitions`` changes when a Java
 # record's header stands for its canonical constructor (the body
-# declaring one drops it), or ``extractor._jvm_visibility`` changes the
+# declaring one drops it) or how it is numbered among the record's
+# other constructors, or ``extractor._jvm_visibility`` changes the
 # access that header constructor gets. Code outside the query.
-_JAVA_RECORD_CANONICAL_VERSION = 1
+_JAVA_RECORD_CANONICAL_VERSION = 2
 
 # Bump when ``extractor._java_constructor_ref_type`` changes which
 # ``X::new`` heads name a type (simple, generic, ``Outer.X``) and which
 # it skips (arrays, package paths). Read off the node outside the query.
 _JAVA_CTOR_REF_VERSION = 1
+
+# Bump when ``extractor._java_typed_arg_kind`` changes which Java
+# construction arguments take a kind from their declared type (the
+# scopes ``_java_declared_type`` walks, the type-to-kind table). Code
+# outside the query.
+_JAVA_TYPED_ARG_VERSION = 1
+
+# Bump when ``extractor._java_in_anonymous_body`` changes which Java
+# calls and references it marks as inside an anonymous class body
+# (``RawCall.anonymous``). Code outside the query.
+_JAVA_ANONYMOUS_BODY_VERSION = 1
+
+# Bump when ``extractor._java_receiver_type`` changes which Java calls
+# get the declared type of their parameter or local receiver, or of
+# their chain's head (``RawCall.receiver_type``). Code outside the
+# query.
+_JAVA_RECEIVER_TYPE_VERSION = 2
+
+# Bump when ``extractor._java_receiver_init`` changes which Java local
+# receivers record the class they are built from
+# (``RawCall.receiver_init``). Code outside the query.
+_JAVA_RECEIVER_INIT_VERSION = 1
+
+# Bump when ``extractor._cpp_local_types`` or ``_cpp_receiver_type``
+# change which C++ local declarations give a call's receiver a type
+# (``RawCall.receiver_type``): the declarations read, ``auto`` with a
+# cast, which declaration wins. Code outside the query loop below.
+_CPP_LOCAL_TYPE_VERSION = 1
 
 # Bump when ``extractor._collect_kotlin_calls`` changes the ``RawCall``
 # it builds from a Kotlin ``f<T>(x)`` misparsed as a comparison (its
@@ -1962,10 +2001,14 @@ def spec_fingerprint() -> str:
     ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``,
     ``_CPP_CONSTRUCTION_VERSION``, ``_CPP_QUALIFIED_PATH_VERSION``,
     ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION``,
+    ``_CPP_ATTRIBUTE_MACRO_VERSION``,
     ``_TIER2_ENGINE_VERSION``, ``_PY_IMPORT_REBIND_VERSION``,
     ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION``,
     ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``,
-    ``_JAVA_CTOR_REF_VERSION``, ``_KOTLIN_GENERIC_CALL_VERSION`` and
+    ``_JAVA_CTOR_REF_VERSION``, ``_JAVA_TYPED_ARG_VERSION``,
+    ``_JAVA_ANONYMOUS_BODY_VERSION``, ``_JAVA_RECEIVER_TYPE_VERSION``,
+    ``_JAVA_RECEIVER_INIT_VERSION``, ``_CPP_LOCAL_TYPE_VERSION``,
+    ``_KOTLIN_GENERIC_CALL_VERSION`` and
     ``_RUST_USE_SCOPE_VERSION``, which
     each cover one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
@@ -1992,6 +2035,7 @@ def spec_fingerprint() -> str:
         f"cpp_qualified_path={_CPP_QUALIFIED_PATH_VERSION}",
         f"cpp_using={_CPP_USING_VERSION}",
         f"cpp_decls={_CPP_DECLS_VERSION}",
+        f"cpp_attribute_macro={_CPP_ATTRIBUTE_MACRO_VERSION}",
         f"tier2_engine={_TIER2_ENGINE_VERSION}",
         f"py_import_rebind={_PY_IMPORT_REBIND_VERSION}",
         f"call_arg_count={_CALL_ARG_COUNT_VERSION}",
@@ -1999,6 +2043,11 @@ def spec_fingerprint() -> str:
         f"java_new_qualifier={_JAVA_NEW_QUALIFIER_VERSION}",
         f"java_record_canonical={_JAVA_RECORD_CANONICAL_VERSION}",
         f"java_ctor_ref={_JAVA_CTOR_REF_VERSION}",
+        f"java_typed_arg={_JAVA_TYPED_ARG_VERSION}",
+        f"java_anonymous_body={_JAVA_ANONYMOUS_BODY_VERSION}",
+        f"java_receiver_type={_JAVA_RECEIVER_TYPE_VERSION}",
+        f"java_receiver_init={_JAVA_RECEIVER_INIT_VERSION}",
+        f"cpp_local_type={_CPP_LOCAL_TYPE_VERSION}",
         f"kotlin_generic_call={_KOTLIN_GENERIC_CALL_VERSION}",
         f"rust_use_scope={_RUST_USE_SCOPE_VERSION}",
     ]

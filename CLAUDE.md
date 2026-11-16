@@ -2,28 +2,9 @@
 
 Project context for Claude Code (and other agents) working in this repo.
 
-## What this project is
+## Getting oriented
 
-**dekko** is a fast, offline, dependency-free static code map generator and
-codebase indexer for LLM coding agents. It parses a repo once with
-tree-sitter (no model tokens spent parsing) into `MAP.md` (human-readable)
-and `map.json` (machine-readable), then answers targeted structural
-questions — "who calls this function," "what does this file contain,"
-"what tests does this change impact" — without an agent reading whole
-files or grepping blind. It ships three ways: a CLI (`dekko`), a Claude
-Code `/map` plugin + MCP server, and Cline MCP support.
-
-Source lives under `src/dekko/`, split into subpackages by role:
-`core/` (parsing primitives — model, extractor, grammars, languages,
-walker, resolver), `render/` (MAP.md/JSON/HTML/lean/export
-rendering), `analysis/` (read-side commands — query, outline, search,
-affected, trace, unused, stats, summary, workset, contextpack, diff,
-relevance, ambiguous, deps, sanity), `daemon/` (the daemon process and
-its transport), `integrations/` (cli, server, hooks, cline, orient,
-claude_md, doctor), `storage/` (on-disk caches/locks/notes/ledger under
-`.dekko/`), and a handful of modules with no subpackage-specific home
-(`classify.py`, `textutil.py`, `source.py`, `repo_ops.py`) staying
-directly under `src/dekko/`. `dekko outline src/dekko/<subpackage>/<file>.py` or
+`dekko outline src/dekko/<subpackage>/<file>.py` or
 `dekko query symbol <name>` are cheaper ways to get oriented in this
 codebase than reading whole files — dekko is a good tool for exploring
 its own source. See `README.md` and `docs/` (`docs/install.md`,

@@ -1,7 +1,8 @@
 """Tree-sitter extraction: source file → symbols, raw calls, imports."""
 
+import bisect
 import re
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -49,6 +50,8 @@ _CLASSDEF_KIND: dict[str, str] = {
     "trait_item": "trait",
     "type_alias_declaration": "type_alias",
     "type_item": "type_alias",
+    "alias_declaration": "type_alias",
+    "type_definition": "type_alias",
 }
 
 
@@ -92,6 +95,8 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     """
     try:
         source = (root / rel).read_bytes()
+        if spec.name in ("c", "cpp"):
+            source = _mask_attribute_macros(source)
         parser = Parser(get_grammar(spec.grammar))
         tree = parser.parse(source)
     except (OSError, ValueError) as exc:
@@ -198,9 +203,146 @@ def looks_like_cpp_header(source: bytes) -> bool:
         tree.
     """
     parser = Parser(get_grammar("cpp"))
-    tree = parser.parse(source)
+    tree = parser.parse(_mask_attribute_macros(source))
     matches = _run_query("cpp", _CPP_HEADER_MARKER_QUERY, tree.root_node)
     return bool(matches)
+
+
+# A deprecation macro invoked with string literals only
+# (``ABSL_DEPRECATED("Use X.")``, ``TFLITE_DEPRECATED(...)``, the
+# message possibly split across lines), or with no argument at all
+# (``using Status ABSL_DEPRECATE_AND_INLINE() = ::absl::Status;``). Its
+# expansion is an attribute and nothing else, but tree-sitter doesn't
+# know the macro: with a long enough message it gives up on the whole
+# enclosing class and reads the rest of the file one namespace level
+# too high, and the empty form turns an alias into an assignment. A
+# ``#define`` of the macro and a call with a non-string argument don't
+# match.
+_ATTRIBUTE_MACRO = re.compile(
+    rb'\b[A-Z][A-Z0-9_]*_DEPRECATED\(\s*(?:"(?:[^"\\\n]|\\.)*"\s*)*\)'
+    rb"|\b[A-Z][A-Z0-9_]*_DEPRECATE_AND_INLINE\(\s*\)"
+)
+# An attribute macro between ``class``/``struct``/``union`` and the
+# real name (``class TF_LOCKABLE Sqlite : ..``, ``struct TF_PACKED H
+# {``, ``class TF_CAPABILITY("mutex") mutex {``). tree-sitter takes the
+# macro for the name and reads the rest as a function. C++ can't put a
+# type there, so an ALL-CAPS name with an underscore, followed by a
+# name and then ``final``, ``:`` or ``{``, is a macro; the underscore
+# keeps a short ALL-CAPS class name (``class RNG {``) out. Group 1 is
+# the macro.
+_CLASS_MACRO = re.compile(
+    rb"\b(?:class|struct|union)\s+"
+    rb"([A-Z][A-Z0-9]*_[A-Z0-9_]*(?:\([^()\n]*\))?)"
+    rb"\s+(?=[A-Za-z_]\w*\s*(?:final\b\s*)?[:{])"
+)
+# A thread-safety annotation macro (``TF_LOCKS_EXCLUDED``,
+# ``ABSL_EXCLUSIVE_LOCKS_REQUIRED``, ``TF_NO_THREAD_SAFETY_ANALYSIS``,
+# ...). Only the lock and guard vocabulary: other trailing macros
+# (``TF_MUST_USE_RESULT``, ``TF_ATTRIBUTE_NOINLINE``) parse fine.
+_LOCK_MACRO_NAME = (
+    rb"(?:TF|ABSL)_[A-Z0-9_]*"
+    rb"(?:LOCK|GUARDED_BY|ACQUIRE|RELEASE|CAPABILITY|THREAD_SAFETY)"
+    rb"[A-Z0-9_]*"
+)
+# Words every lock or guard macro name contains: a file with none of
+# them skips the scan.
+_LOCK_WORDS = (
+    b"LOCK",
+    b"GUARDED_BY",
+    b"ACQUIRE",
+    b"RELEASE",
+    b"CAPABILITY",
+    b"THREAD_SAFETY",
+)
+# One or more lock annotations after a member's parameter list and its
+# qualifiers, before the body, ``;``, ``= 0`` or another qualifier.
+# tree-sitter reads the macro call as the declarator, so the member
+# comes out named ``TF_LOCKS_EXCLUDED``. Group 2 is the macros; the
+# qualifiers in group 1 stay.
+_LOCK_ANNOTATION = re.compile(
+    rb"\)((?:\s*(?:const|volatile|noexcept|override|final|&&|&))*)"
+    rb"((?:\s*" + _LOCK_MACRO_NAME + rb"(?:\s*\((?:[^()]|\([^()]*\))*\))?)+)"
+    rb"(?=\s*(?:[;{=:]|override\b|final\b|->|const\b))"
+)
+# A guard on a field (``size_t n_ TF_GUARDED_BY(mu_) = 0;``): it follows
+# a name, not a ``)``, so it's matched on its own.
+_GUARD_ANNOTATION = re.compile(
+    rb"\b(?:TF|ABSL)_(?:PT_)?(?:GUARDED_BY|ACQUIRED_AFTER|ACQUIRED_BEFORE)"
+    rb"\s*\((?:[^()]|\([^()]*\))*\)"
+)
+# A preprocessor directive with its continuation lines. A ``#define``
+# body is left alone: blanking an annotation there changes what the
+# parser makes of the macro and can swallow the next definition.
+_DIRECTIVE = re.compile(rb"^[ \t]*#(?:[^\n]*\\\n)*[^\n]*", re.M)
+_NOT_NEWLINE = re.compile(rb"[^\n]")
+
+
+def _blank(text: bytes) -> bytes:
+    """``text`` with every byte but a newline turned into a space."""
+    return _NOT_NEWLINE.sub(b" ", text)
+
+
+def _blank_group(m: re.Match[bytes]) -> bytes:
+    """A match with its group 1 blanked and the rest kept as written."""
+    start = m.start(1) - m.start(0)
+    end = m.end(1) - m.start(0)
+    whole = m.group(0)
+    return whole[:start] + _blank(whole[start:end]) + whole[end:]
+
+
+def _mask_attribute_macros(source: bytes) -> bytes:
+    """Blank out every attribute-only macro invocation in C/C++ source.
+
+    The preprocessor step dekko doesn't run, for the macro shapes whose
+    expansion is only an attribute and which break the parse: the
+    deprecation family, a macro between ``class`` and its name, and the
+    thread-safety annotations after a member's parameter list or on a
+    field. Each masked byte becomes a space and newlines stay, so every
+    offset and line number in the parse tree is the same as in the file.
+
+    Args:
+        source: Raw file bytes.
+
+    Returns:
+        ``source`` with each macro replaced by whitespace of the same
+        length.
+    """
+    masked = _ATTRIBUTE_MACRO.sub(lambda m: _blank(m.group(0)), source)
+    return _mask_lock_annotations(_CLASS_MACRO.sub(_blank_group, masked))
+
+
+def _mask_lock_annotations(source: bytes) -> bytes:
+    """``source`` with its thread-safety annotations blanked out.
+
+    Annotations inside a preprocessor directive are kept as written.
+    """
+    if not any(word in source for word in _LOCK_WORDS):
+        return source
+
+    starts: list[int] = []
+    ends: list[int] = []
+    for m in _DIRECTIVE.finditer(source):
+        starts.append(m.start())
+        ends.append(m.end())
+
+    def in_directive(pos: int) -> bool:
+        i = bisect.bisect_right(starts, pos) - 1
+        return i >= 0 and pos < ends[i]
+
+    def annotation(m: re.Match[bytes]) -> bytes:
+        if in_directive(m.start()):
+            return m.group(0)
+        start = m.start(2) - m.start(0)
+        whole = m.group(0)
+        return whole[:start] + _blank(whole[start:])
+
+    def guard(m: re.Match[bytes]) -> bytes:
+        if in_directive(m.start()):
+            return m.group(0)
+        return _blank(m.group(0))
+
+    masked = _LOCK_ANNOTATION.sub(annotation, source)
+    return _GUARD_ANNOTATION.sub(guard, masked)
 
 
 # ---------------------------------------------------------------------
@@ -210,39 +352,29 @@ def looks_like_cpp_header(source: bytes) -> bool:
 def _collect_definitions(
     spec: LanguageSpec, root: Node, rel: str
 ) -> list[tuple[Node, Symbol]]:
-    """Find every function/method/class definition in the tree."""
+    """Find every function/method/class definition in the tree.
+
+    Same-qualname symbols are numbered (``#2``, ``#3``) in source
+    order, with one exception: a Java record's canonical constructor
+    read off its header or a compact constructor is numbered after the
+    record's declared constructors. Those shapes became symbols after
+    the declared ones had ids, and notes are keyed by id, so a new
+    definition shape must take the next free number rather than
+    renumber a symbol an older release already named.
+    """
     matches = _run_query(spec.grammar, spec.definition_query, root)
     defs: list[tuple[Node, Symbol]] = []
+    # Canonical constructors numbered last: (slot in ``defs``, node,
+    # builder).
+    canonical: list[tuple[int, Node, Callable[[], Symbol]]] = []
     seen: dict[str, int] = {}
     for _, caps in matches:
         class_name = _one(caps, "classname")
 
         if class_name is not None:
-            def_node = _one(caps, "classdef")
-
-            if def_node is None:
-                continue
-
-            kind_node = _one(caps, "classkind")
-            kind_type = (
-                kind_node.type if kind_node is not None else def_node.type
-            )
-            kind = (
-                _kotlin_class_kind(def_node)
-                if spec.name == "kotlin"
-                else _CLASSDEF_KIND.get(kind_type, "class")
-            )
-            sym = _make_symbol(
-                spec,
-                rel,
-                def_node,
-                _text(class_name),
-                kind,
-                params=_tuple_struct_fields(def_node),
-                returns=_rust_alias_target(def_node),
-                seen=seen,
-            )
-            defs.append((def_node, sym))
+            found_type = _type_definition(spec, rel, caps, class_name, seen)
+            if found_type is not None:
+                defs.append(found_type)
             continue
 
         var_def = _one(caps, "vardef")
@@ -274,48 +406,90 @@ def _collect_definitions(
             defs.append((var_def, sym))
             continue
 
-        name_node = _one(caps, "name")
-        def_node = _one(caps, "def")
+        found = _function_builder(spec, rel, caps, seen)
 
-        if name_node is None or def_node is None:
+        if found is None:
             continue
 
-        if _is_record_header(def_node) and _record_declares_canonical(
-            def_node.parent
-        ):
+        def_node, build = found
+
+        if _is_canonical_constructor(def_node):
+            canonical.append((len(defs), def_node, build))
             continue
 
-        params_node = _one(caps, "params")
+        defs.append((def_node, build()))
 
-        if _looks_like_c_macro_invocation(
-            spec.name, _text(name_node), params_node
-        ) or _is_deleted_function(def_node):
-            continue
-
-        ret_node = _one(caps, "ret")
-        params = _definition_params(
-            spec.param_style, params_node, _one(caps, "recv")
-        )
-
-        returns = None
-
-        if ret_node is not None:
-            returns = _text(ret_node).lstrip(":").strip() or None
-
-        sym = _make_symbol(
-            spec,
-            rel,
-            def_node,
-            _definition_name(spec.name, name_node),
-            "function",
-            params=params,
-            returns=returns,
-            seen=seen,
-            receiver=_receiver_container(_one(caps, "recv")),
-        )
-        defs.append((def_node, sym))
+    # Each slot was taken before the earlier canonical constructors
+    # went back in, so it moves up by how many of them precede it.
+    for shift, (slot, def_node, build) in enumerate(canonical):
+        defs.insert(slot + shift, (def_node, build()))
 
     return defs
+
+
+def _function_builder(
+    spec: LanguageSpec,
+    rel: str,
+    caps: dict[str, list[Node]],
+    seen: dict[str, int],
+) -> tuple[Node, Callable[[], Symbol]] | None:
+    """A function definition match's node and a builder for its
+    symbol, or ``None`` for a match that defines no symbol.
+
+    The symbol is built by calling the builder, which takes its ``#N``
+    from ``seen`` at that moment; ``_collect_definitions`` decides when.
+    """
+    name_node = _one(caps, "name")
+    def_node = _one(caps, "def")
+
+    if name_node is None or def_node is None:
+        return None
+
+    if _is_record_header(def_node) and _record_declares_canonical(
+        def_node.parent
+    ):
+        return None
+
+    params_node = _one(caps, "params")
+
+    if _looks_like_c_macro_invocation(
+        spec.name, _text(name_node), params_node
+    ) or _is_deleted_function(def_node):
+        return None
+
+    ret_node = _one(caps, "ret")
+    params = _definition_params(
+        spec.param_style, params_node, _one(caps, "recv")
+    )
+
+    returns = None
+
+    if ret_node is not None:
+        returns = _text(ret_node).lstrip(":").strip() or None
+
+    build = partial(
+        _make_symbol,
+        spec,
+        rel,
+        def_node,
+        _definition_name(spec.name, name_node),
+        "function",
+        params=params,
+        returns=returns,
+        seen=seen,
+        receiver=_receiver_container(_one(caps, "recv")),
+    )
+    return def_node, build
+
+
+def _is_canonical_constructor(def_node: Node) -> bool:
+    """Whether a definition is a Java record's canonical constructor
+    in a shape that has no declared parameter list of its own: the
+    record header, or a compact constructor."""
+    return (
+        def_node.type == "compact_constructor_declaration"
+        or _is_record_header(def_node)
+    )
 
 
 def _definition_name(language: str, name_node: Node) -> str:
@@ -374,9 +548,10 @@ def _is_record_header(def_node: Node) -> bool:
     )
 
 
-# A type annotation inside a Java parameter's type text
-# (``java.lang.@Nullable String``, ``String @NonNull []``).
-_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(\([^)]*\))?\s*")
+# A type annotation inside a Java type text (``java.lang.@Nullable
+# String``, ``String @NonNull []``, ``new @A Foo()``). Readers drop the
+# whitespace it leaves themselves.
+_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(?:\([^)]*\))?")
 
 
 def _record_declares_canonical(record: Node) -> bool:
@@ -831,6 +1006,10 @@ def _is_exported(language: str, def_node: Node) -> bool:
     if language == "kotlin":
         return not _kotlin_restricted(def_node)
     if language in ("javascript", "typescript", "tsx"):
+        name = def_node.child_by_field_name("name")
+        if name is not None and name.type == "private_property_identifier":
+            return False
+
         return _ancestor_is(def_node, "export_statement", depth=4)
     return False
 
@@ -1619,6 +1798,9 @@ def _collect_calls(
         else []
     )
     calls: list[RawCall] = []
+    # Pattern variable names per Java function (``_java_pattern_names``).
+    patterns: dict[int, frozenset[str]] = {}
+    cpp_locals = _CppLocals(spec, root)
     for _, caps in _run_query(spec.grammar, spec.call_query, root):
         callee = _one(caps, "callee")
         if callee is None:
@@ -1641,12 +1823,13 @@ def _collect_calls(
         if call is None:
             continue
         _tag_bound(spec, call, callee, bindings)
+        _tag_call_scope(spec, call, callee, cpp_locals, patterns)
         if (
             spec.name == "java"
             and call_node is not None
             and call_node.type == "object_creation_expression"
         ):
-            call.arg_kinds = _java_arg_kinds(args_node)
+            call.arg_kinds = _java_arg_kinds(args_node, patterns)
         calls.append(call)
         made = _cpp_factory_type(callee) if spec.name == "cpp" else None
         if made is not None:
@@ -1717,6 +1900,33 @@ def _callee_head(text: str) -> str:
     return _CALLEE_JOINERS.split(text, maxsplit=1)[0]
 
 
+# The nodes whose ``class_body`` declares a Java anonymous class.
+_JAVA_ANONYMOUS_OWNERS = frozenset(
+    {"object_creation_expression", "enum_constant"}
+)
+
+
+def _java_in_anonymous_body(node: Node) -> bool:
+    """Whether ``node`` sits inside a Java anonymous class body.
+
+    ``new Foo() { .. }`` and an enum constant with a body declare a
+    class whose supertype dekko doesn't record. Anything inside one, at
+    any depth (a local class declared in one of its methods too), is in
+    a scope the resolver can't read (``RawCall.anonymous``).
+    """
+    parent = node.parent
+    while parent is not None:
+        owner = parent.parent
+        if (
+            parent.type == "class_body"
+            and owner is not None
+            and owner.type in _JAVA_ANONYMOUS_OWNERS
+        ):
+            return True
+        parent = owner
+    return False
+
+
 def _tag_bound(
     spec: LanguageSpec,
     call: RawCall,
@@ -1728,6 +1938,271 @@ def _tag_bound(
         return
     claims = bindings.get(_callee_head(call.text))
     call.bound = _bound_kind(spec, node, claims)
+
+
+def _tag_call_scope(
+    spec: LanguageSpec,
+    call: RawCall,
+    node: Node,
+    cpp_locals: "_CppLocals",
+    patterns: dict[int, frozenset[str]],
+) -> None:
+    """Set what a call's language reads off the scope it sits in.
+
+    Java: whether it is inside an anonymous class body
+    (``RawCall.anonymous``), and the declared type of a receiver that
+    is a parameter or a local (``RawCall.receiver_type``). C++: the
+    declared type of a local receiver head.
+    """
+    if spec.name == "java":
+        call.anonymous = _java_in_anonymous_body(node)
+        call.receiver_type = _java_receiver_type(call, node, patterns)
+        call.receiver_init = _java_receiver_init(call, node)
+    elif spec.name == "cpp" and call.bound == "local" and call.receiver:
+        call.receiver_type = cpp_locals.receiver_type(call, node)
+
+
+def _java_receiver_type(
+    call: RawCall,
+    node: Node,
+    patterns: dict[int, frozenset[str]],
+) -> str | None:
+    """The type a Java call's receiver, or its chain's head, is declared
+    with.
+
+    A plain-name receiver bound to a parameter or a local
+    (``config.getMaxRequestSize()`` on ``MultipartConfigElement
+    config``); a field's type is read by the resolver's walk. For a
+    chain (``ds.getConnection().getMetaData().getURL()``), the type of
+    its head, a declared name or ``this.x``, when no call in the chain
+    takes an argument (``_java_chain_head_type``).
+    """
+    obj = node.child_by_field_name("object")
+    if obj is None:
+        return None
+    if obj.type != "identifier":
+        return _java_chain_head_type(obj, patterns)
+    if call.bound not in ("param", "local"):
+        return None
+
+    return _java_declared_type(obj, patterns)
+
+
+def _java_chain_head_type(
+    obj: Node,
+    patterns: dict[int, frozenset[str]],
+) -> str | None:
+    """The declared type of a Java chain's head, if every call is bare.
+
+    ``ds.getConnection().getMetaData()`` gives ``ds``'s type, and
+    ``this.flyway.getConfiguration()`` the field's. A call with
+    arguments ends it: a generic method can return a type its
+    arguments name (``template.findOne(q, Entry.class)``), and the
+    receiver text the resolver walks has no arguments left to tell.
+    """
+    while obj.type in ("method_invocation", "field_access"):
+        args = obj.child_by_field_name("arguments")
+        if args is not None and args.named_child_count:
+            return None
+        inner = obj.child_by_field_name("object")
+        if inner is None:
+            return None
+        if obj.type == "field_access" and inner.type == "this":
+            return _java_this_field_type(obj)
+        obj = inner
+    if obj.type != "identifier":
+        return None
+
+    return _java_declared_type(obj, patterns)
+
+
+# A ``new X(..)`` / ``new a.B<T>(..)`` initializer: ``X`` / ``a.B``.
+_JAVA_NEW_INIT = re.compile(r"^new\s+([A-Za-z_][\w.]*)\s*(?:<[^()]*>)?\s*\(")
+
+
+def _java_receiver_init(call: RawCall, node: Node) -> str | None:
+    """The class a Java local receiver is built from where declared.
+
+    ``Resource res = new OriginTrackedResource(..); res.getURL()``
+    gives ``OriginTrackedResource``. Read from the nearest enclosing
+    block that initializes the name before the call; an initializer
+    other than ``new X(..)``, or none, is ``None``.
+    """
+    if call.bound != "local":
+        return None
+    obj = node.child_by_field_name("object")
+    if obj is None or obj.type != "identifier":
+        return None
+    name, pos = _text(obj), obj.start_byte
+    scope = obj
+    while scope.parent is not None:
+        scope = scope.parent
+        if scope.type not in ("block", "constructor_body"):
+            continue
+        value = _java_block_local_value(scope, name, pos)
+        if value is None:
+            continue
+        if value.type != "object_creation_expression":
+            # ``new Props().getPool()`` builds a ``Props``, not the
+            # local's value.
+            return None
+        found = _JAVA_NEW_INIT.match(_text(value))
+
+        return found.group(1) if found else None
+
+    return None
+
+
+def _java_block_local_value(block: Node, name: str, pos: int) -> Node | None:
+    """The value a local declaration in ``block`` before ``pos`` gives
+    ``name``, or ``None``."""
+    for statement in block.named_children:
+        if statement.start_byte >= pos:
+            break
+        if statement.type != "local_variable_declaration":
+            continue
+        for declarator in statement.children_by_field_name("declarator"):
+            bound = declarator.child_by_field_name("name")
+            value = declarator.child_by_field_name("value")
+            if (
+                bound is not None
+                and value is not None
+                and _text(bound) == name
+            ):
+                return value
+
+    return None
+
+
+# One C++ local declaration: (declaration start byte, scope start byte,
+# scope end byte, declared type or ``None`` when it says nothing).
+_LocalType = tuple[int, int, int, str | None]
+
+
+class _CppLocals:
+    """A C++ file's local declarations, read on the first call that
+    needs them (``_cpp_local_types``)."""
+
+    def __init__(self, spec: LanguageSpec, root: Node) -> None:
+        self._spec = spec
+        self._root = root
+        self._table: dict[str, list[_LocalType]] | None = None
+
+    def receiver_type(self, call: RawCall, node: Node) -> str | None:
+        """The declared type of ``call``'s local receiver head."""
+        if self._table is None:
+            self._table = _cpp_local_types(self._spec, self._root)
+
+        return _cpp_receiver_type(self._table, call, node)
+
+
+# Where C++ declares a typed local, and its scope's captures.
+_CPP_LOCAL_TYPE_QUERY = """
+(declaration type: (_) @type) @decl
+(for_range_loop type: (_) @type) @range
+"""
+
+# Casts whose template argument is the type of what they hand back.
+_CPP_CASTS = frozenset(
+    {
+        "static_cast",
+        "dynamic_cast",
+        "reinterpret_cast",
+        "const_cast",
+        "cast",
+        "dyn_cast",
+        "cast_or_null",
+        "dyn_cast_or_null",
+        "down_cast",
+        "cast_if_present",
+        "dyn_cast_if_present",
+    }
+)
+
+
+def _cpp_local_types(
+    spec: LanguageSpec, root: Node
+) -> dict[str, list[_LocalType]]:
+    """Every C++ local declaration in the file, keyed by name.
+
+    A declaration outside every function and block scope is a global,
+    not a local, and is left out (the binding pass leaves it out too).
+    A range ``for`` binds its name in the loop.
+    """
+    scopes = spec.binding_function_scopes + spec.binding_block_scopes
+    out: dict[str, list[_LocalType]] = {}
+    for _, caps in _run_query(spec.grammar, _CPP_LOCAL_TYPE_QUERY, root):
+        type_node = _one(caps, "type")
+        range_loop = _one(caps, "range")
+        decl = range_loop or _one(caps, "decl")
+        if type_node is None or decl is None:
+            continue
+        scope = (
+            range_loop
+            if range_loop is not None
+            else _scope_above(decl.parent, scopes)
+        )
+        if scope is None:
+            continue
+        written = _text(type_node)
+        for declarator in decl.children_by_field_name("declarator"):
+            typ = _cpp_declared_type(written, declarator)
+            for ident in _pattern_identifiers(declarator):
+                out.setdefault(_text(ident), []).append(
+                    (decl.start_byte, scope.start_byte, scope.end_byte, typ)
+                )
+    return out
+
+
+def _cpp_declared_type(written: str, declarator: Node) -> str | None:
+    """The type one C++ declarator gives its name, or ``None``.
+
+    ``auto`` says nothing, unless the initializer is a cast
+    (``auto t = llvm::cast<T>(v)``), whose template argument is the
+    type.
+    """
+    if written != "auto":
+        return written
+    if declarator.type != "init_declarator":
+        return None
+
+    return _cpp_cast_target(declarator.child_by_field_name("value"))
+
+
+def _cpp_cast_target(init: Node | None) -> str | None:
+    """``T`` of an initializer ``[ns::]cast<T>(..)``, else ``None``."""
+    if init is None or init.type != "call_expression":
+        return None
+    fn = init.child_by_field_name("function")
+    while fn is not None and fn.type == "qualified_identifier":
+        fn = fn.child_by_field_name("name")
+    if fn is None or fn.type != "template_function":
+        return None
+    name = fn.child_by_field_name("name")
+    args = fn.child_by_field_name("arguments")
+    if name is None or args is None or _text(name) not in _CPP_CASTS:
+        return None
+
+    return _text(args)[1:-1].strip() or None
+
+
+def _cpp_receiver_type(
+    local_types: dict[str, list[_LocalType]], call: RawCall, node: Node
+) -> str | None:
+    """The declared type of a C++ call's local receiver head.
+
+    The nearest declaration of the head before the call, in a scope
+    the call sits in, decides; a declaration that says nothing
+    (``auto x = f()``) shadows an outer typed one.
+    """
+    at = node.start_byte
+    best: _LocalType | None = None
+    for entry in local_types.get(_callee_head(call.text), ()):
+        start, scope_start, scope_end, _ = entry
+        if start < at and scope_start <= at < scope_end:
+            if best is None or start > best[0]:
+                best = entry
+    return best[3] if best is not None else None
 
 
 def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
@@ -2418,11 +2893,16 @@ _JAVA_ARG_KIND_BY_NODE = {
 }
 
 
-def _java_arg_kinds(args_node: Node | None) -> tuple[str, ...] | None:
+def _java_arg_kinds(
+    args_node: Node | None,
+    patterns: dict[int, frozenset[str]],
+) -> tuple[str, ...] | None:
     """What each argument of a Java construction visibly is.
 
     Args:
         args_node: The construction's argument list, if any.
+        patterns: Pattern variable names per function, filled as
+            functions are met (``_java_pattern_names``).
 
     Returns:
         One kind per argument (see ``RawCall.arg_kinds``), or ``None``
@@ -2431,7 +2911,9 @@ def _java_arg_kinds(args_node: Node | None) -> tuple[str, ...] | None:
     if args_node is None:
         return None
     kinds = tuple(
-        _java_arg_kind(a) for a in args_node.named_children if not a.is_extra
+        _java_typed_arg_kind(a, patterns)
+        for a in args_node.named_children
+        if not a.is_extra
     )
     if all(k == "?" for k in kinds):
         return None
@@ -2465,6 +2947,358 @@ def _java_arg_kind(arg: Node) -> str:
             return "new:" + made.strip()
 
     return "?"
+
+
+def _java_typed_arg_kind(
+    arg: Node,
+    patterns: dict[int, frozenset[str]],
+) -> str:
+    """One Java argument's kind, reading a name as its declared type.
+
+    A literal's kind stands. A plain name, or ``this.x``, takes the
+    kind its declaration's type implies (``_java_kind_of_type``): a
+    ``String`` parameter rules out what a string literal rules out.
+    Anything else (a call, a field chain, a cast) stays ``?``.
+    """
+    kind = _java_arg_kind(arg)
+    if kind != "?":
+        return kind
+    text = None
+    if arg.type == "identifier":
+        text = _java_declared_type(arg, patterns)
+    elif arg.type == "field_access":
+        text = _java_this_field_type(arg)
+
+    return _java_kind_of_type(text) if text else "?"
+
+
+# The literal kind a declared Java type passes as (see ``_JAVA_ACCEPTS``
+# in the resolver): boxing and unboxing give a box the set its
+# primitive's literal has.
+_JAVA_KIND_BY_TYPE = {
+    "String": "string",
+    "Class": "class",
+    "boolean": "bool",
+    "Boolean": "bool",
+    "int": "int",
+    "Integer": "int",
+    "char": "char",
+    "Character": "char",
+}
+# Declared types with no literal table: their widening sets differ from
+# ``int``'s, and a wrong set would rule out a right overload.
+_JAVA_UNTABLED_TYPES = frozenset(
+    {
+        "var",
+        "long",
+        "short",
+        "byte",
+        "float",
+        "double",
+        "Long",
+        "Short",
+        "Byte",
+        "Float",
+        "Double",
+    }
+)
+
+
+def _java_kind_of_type(text: str) -> str:
+    """The ``RawCall.arg_kinds`` entry a declared Java type implies.
+
+    A tabled type reads as its literal's kind, any other reference type
+    ``Foo`` as ``type:Foo``. An array, a varargs element, a type
+    variable and an untabled primitive or box are ``?``.
+    """
+    text = re.sub(r"\s+", "", _JAVA_TYPE_ANNOTATION.sub("", text))
+    if "[" in text or "..." in text:
+        return "?"
+    base = re.sub(r"<.*", "", text).rsplit(".", 1)[-1]
+    if not base or base in _JAVA_UNTABLED_TYPES:
+        return "?"
+    if len(base) <= 2 and base.isupper():
+        return "?"
+
+    return _JAVA_KIND_BY_TYPE.get(base, "type:" + base)
+
+
+# Nodes whose pattern variables can shadow a name inside them.
+_JAVA_FUNCTIONS = frozenset(
+    {
+        "method_declaration",
+        "constructor_declaration",
+        "compact_constructor_declaration",
+        "lambda_expression",
+    }
+)
+
+
+def _java_declared_type(
+    ident: Node,
+    patterns: dict[int, frozenset[str]],
+) -> str | None:
+    """The type text a Java name's declaration writes, or ``None``.
+
+    Walks out from the name and stops at the first scope that declares
+    it (``_JAVA_SCOPES``): a local declared before it, a loop, catch or
+    resource variable, a parameter, a field of an enclosing type in
+    the same file. Not found (an inherited field, a static import), or
+    declared with no usable type (an untyped lambda parameter, an array
+    declarator, a union catch), is ``None``. So is a name that is also
+    a pattern variable in any function the walk passed through: which
+    one a use means depends on flow dekko doesn't follow.
+    """
+    name, pos = _text(ident), ident.start_byte
+    functions: list[Node] = []
+    node = ident
+    while node.parent is not None:
+        node = node.parent
+        if node.type in _JAVA_FUNCTIONS:
+            functions.append(node)
+        scope = _JAVA_SCOPES.get(node.type)
+        got = scope(node, name, pos) if scope is not None else None
+        if got is None:
+            continue
+        if not got or any(
+            name in _java_pattern_names(fn, patterns) for fn in functions
+        ):
+            return None
+
+        return got
+
+    return None
+
+
+def _java_this_field_type(access: Node) -> str | None:
+    """The declared type of the field ``this.x`` names, or ``None``."""
+    obj = access.child_by_field_name("object")
+    field = access.child_by_field_name("field")
+    if obj is None or field is None or obj.type != "this":
+        return None
+    body = access.parent
+    while body is not None and body.type not in _JAVA_FIELD_BODIES:
+        body = body.parent
+    if body is None:
+        return None
+
+    return _java_body_type(body, _text(field), access.start_byte) or None
+
+
+def _java_pattern_names(
+    fn: Node,
+    patterns: dict[int, frozenset[str]],
+) -> frozenset[str]:
+    """Every pattern variable a Java function binds (``o instanceof
+    Foo f``, ``case Point(var x, ..)``), collected once per function."""
+    names = patterns.get(fn.id)
+    if names is not None:
+        return names
+    found: set[str] = set()
+    stack = [fn]
+    while stack:
+        node = stack.pop()
+        if node.type == "instanceof_expression":
+            bound = node.child_by_field_name("name")
+            if bound is not None:
+                found.add(_text(bound))
+        elif node.type in ("type_pattern", "record_pattern_component"):
+            found.update(
+                _text(c) for c in node.named_children if c.type == "identifier"
+            )
+        stack.extend(node.named_children)
+    names = patterns[fn.id] = frozenset(found)
+
+    return names
+
+
+def _java_declarator_type(decl: Node, name: str) -> str | None:
+    """The type a local or field declaration gives ``name``.
+
+    Returns:
+        The declared type's text; ``""`` when ``name`` is declared with
+        no usable type (``String s[]``); ``None`` when ``decl`` doesn't
+        declare it.
+    """
+    for declarator in decl.children_by_field_name("declarator"):
+        bound = declarator.child_by_field_name("name")
+        if bound is None or _text(bound) != name:
+            continue
+        if any(c.type == "dimensions" for c in declarator.children):
+            return ""
+        type_node = decl.child_by_field_name("type")
+        return _text(type_node) if type_node is not None else ""
+
+    return None
+
+
+def _java_param_type(params: Node | None, name: str) -> str | None:
+    """The type a parameter list gives ``name``: text, ``""`` for an
+    array or varargs parameter, ``None`` when it has no such name."""
+    if params is None:
+        return None
+    for param in params.named_children:
+        if param.type == "spread_parameter":
+            if _java_spread_param(param).name == name:
+                return ""
+            continue
+        if param.type != "formal_parameter":
+            continue
+        bound = param.child_by_field_name("name")
+        if bound is None or _text(bound) != name:
+            continue
+        if any(c.type == "dimensions" for c in param.children):
+            return ""
+        type_node = param.child_by_field_name("type")
+        return _text(type_node) if type_node is not None else ""
+
+    return None
+
+
+def _java_block_type(node: Node, name: str, pos: int) -> str | None:
+    """A local declared in a block's statements before ``pos``."""
+    for statement in node.named_children:
+        if statement.start_byte >= pos:
+            break
+        if statement.type == "local_variable_declaration":
+            got = _java_declarator_type(statement, name)
+            if got is not None:
+                return got
+
+    return None
+
+
+def _java_case_group_type(node: Node, name: str, pos: int) -> str | None:
+    """A local declared in this ``case`` group, or an earlier one of
+    the same old-style ``switch``: its scope is the whole switch block
+    from the declaration on, not just its own group."""
+    group: Node | None = node
+    while group is not None:
+        if group.type == "switch_block_statement_group":
+            got = _java_block_type(group, name, pos)
+            if got is not None:
+                return got
+        group = group.prev_named_sibling
+
+    return None
+
+
+def _java_for_type(node: Node, name: str, pos: int) -> str | None:
+    """A variable a ``for`` loop's init declares."""
+    for init in node.children_by_field_name("init"):
+        if init.type == "local_variable_declaration":
+            got = _java_declarator_type(init, name)
+            if got is not None:
+                return got
+
+    return None
+
+
+def _java_named_type(node: Node, name: str, pos: int) -> str | None:
+    """An enhanced-``for`` variable or a try-with-resources resource:
+    one ``name`` and one ``type`` field on the node itself."""
+    bound = node.child_by_field_name("name")
+    if bound is None or _text(bound) != name:
+        return None
+    type_node = node.child_by_field_name("type")
+
+    return _text(type_node) if type_node is not None else ""
+
+
+def _java_resources_type(node: Node, name: str, pos: int) -> str | None:
+    """A try-with-resources resource declaring ``name``."""
+    resources = node.child_by_field_name("resources")
+    if resources is None:
+        return None
+    for resource in resources.named_children:
+        if resource.type == "resource":
+            got = _java_named_type(resource, name, pos)
+            if got is not None:
+                return got
+
+    return None
+
+
+def _java_catch_type(node: Node, name: str, pos: int) -> str | None:
+    """A catch parameter: its type, ``""`` for a union ``A | B``."""
+    for param in node.named_children:
+        if param.type != "catch_formal_parameter":
+            continue
+        bound = param.child_by_field_name("name")
+        if bound is None or _text(bound) != name:
+            continue
+        types = [c for c in param.named_children if c.type == "catch_type"]
+        text = _text(types[0]) if types else ""
+        return "" if "|" in text else text
+
+    return None
+
+
+def _java_lambda_type(node: Node, name: str, pos: int) -> str | None:
+    """A lambda parameter: its type when written, ``""`` when not."""
+    params = node.child_by_field_name("parameters")
+    if params is None:
+        return None
+    if params.type == "identifier":
+        return "" if _text(params) == name else None
+    if params.type == "inferred_parameters":
+        names = {_text(c) for c in params.named_children}
+        return "" if name in names else None
+
+    return _java_param_type(params, name)
+
+
+def _java_function_type(node: Node, name: str, pos: int) -> str | None:
+    """A method's or constructor's parameter."""
+    return _java_param_type(node.child_by_field_name("parameters"), name)
+
+
+def _java_compact_type(node: Node, name: str, pos: int) -> str | None:
+    """A compact constructor's parameters: its record's components."""
+    body = node.parent
+    record = body.parent if body is not None else None
+    if record is None or record.type != "record_declaration":
+        return None
+
+    return _java_param_type(record.child_by_field_name("parameters"), name)
+
+
+def _java_body_type(node: Node, name: str, pos: int) -> str | None:
+    """A field of a type body, or a record component from inside the
+    record's body."""
+    for member in node.named_children:
+        if member.type in ("field_declaration", "constant_declaration"):
+            got = _java_declarator_type(member, name)
+            if got is not None:
+                return got
+    owner = node.parent
+    if owner is not None and owner.type == "record_declaration":
+        return _java_param_type(owner.child_by_field_name("parameters"), name)
+
+    return None
+
+
+# Type bodies whose fields a name inside them can mean.
+_JAVA_FIELD_BODIES = frozenset(
+    {"class_body", "enum_body_declarations", "interface_body"}
+)
+# The Java scopes that can declare a name, by node type, each returning
+# the declared type's text, ``""`` (declared, no usable type) or
+# ``None`` (not declared here).
+_JAVA_SCOPES: dict[str, Callable[[Node, str, int], str | None]] = {
+    "block": _java_block_type,
+    "constructor_body": _java_block_type,
+    "switch_block_statement_group": _java_case_group_type,
+    "for_statement": _java_for_type,
+    "enhanced_for_statement": _java_named_type,
+    "try_with_resources_statement": _java_resources_type,
+    "catch_clause": _java_catch_type,
+    "lambda_expression": _java_lambda_type,
+    "method_declaration": _java_function_type,
+    "constructor_declaration": _java_function_type,
+    "compact_constructor_declaration": _java_compact_type,
+    **dict.fromkeys(_JAVA_FIELD_BODIES, _java_body_type),
+}
 
 
 def _java_is_string_concat(node: Node) -> bool:
@@ -2675,6 +3509,7 @@ def _collect_refs(
                         path=rel,
                         name=type_name,
                         line=ctor_ref.start_point[0] + 1,
+                        anonymous=_java_in_anonymous_body(ctor_ref),
                     )
                 )
             continue
@@ -2692,6 +3527,9 @@ def _collect_refs(
                 name=name,
                 line=ref_node.start_point[0] + 1,
                 bound=_bound_kind(spec, ref_node, bindings.get(name)),
+                anonymous=(
+                    spec.name == "java" and _java_in_anonymous_body(ref_node)
+                ),
             )
         )
     return refs
@@ -3602,7 +4440,6 @@ def _callee_java(node: Node) -> tuple[str, str, str | None] | None:
     return None
 
 
-_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(?:\([^)]*\))?")
 _JAVA_TYPE_ARGUMENTS = re.compile(r"<[^<>]*>")
 
 
@@ -4795,6 +5632,125 @@ def _tuple_struct_fields(def_node: Node) -> list[Param]:
         Param(name=str(i), type=_text(field_type))
         for i, field_type in enumerate(body.children_by_field_name("type"))
     ]
+
+
+_CPP_TAG_SPECIFIERS = (
+    "struct_specifier",
+    "class_specifier",
+    "union_specifier",
+    "enum_specifier",
+)
+
+
+def _cpp_alias_target(def_node: Node, name: str) -> str | None:
+    """What a C++ ``using X = Y;`` or ``typedef Y X;`` names, or
+    ``None`` for one the walk can't use.
+
+    An alias has no members of its own, so the walk reads a call on
+    one through to its target, kept in ``returns`` like a Rust alias's.
+    Three shapes give it nothing to read: an alias inside a function
+    body (no scope a qualname can name), an anonymous ``typedef struct
+    {..} X;``, and ``typedef struct X {..} X;``, the C idiom, which
+    names the struct itself (recorded, the alias would come first and
+    push the struct's id to ``X#2``). The whole target is compared, not
+    its last segment, so ``using Status = ::absl::Status;`` is kept.
+    """
+    node = def_node.parent
+    while node is not None:
+        if node.type in ("function_definition", "lambda_expression"):
+            return None
+        node = node.parent
+    target = def_node.child_by_field_name("type")
+    if target is None:
+        return None
+    if target.type in _CPP_TAG_SPECIFIERS:
+        tag = target.child_by_field_name("name")
+        if tag is None:
+            return None
+        target = tag
+    text = _text(target)
+    if text.strip() == name:
+        return None
+    return text
+
+
+def _type_definition(
+    spec: LanguageSpec,
+    rel: str,
+    caps: dict[str, list[Node]],
+    class_name: Node,
+    seen: dict[str, int],
+) -> tuple[Node, Symbol] | None:
+    """The type symbol one definition-query match declares, or ``None``
+    for a match with no definition node or a C/C++ alias the walk
+    can't read (``_cpp_alias_target``)."""
+    def_node = _one(caps, "classdef")
+    if def_node is None:
+        return None
+    params = _tuple_struct_fields(def_node)
+    returns = _rust_alias_target(def_node)
+    if def_node.type in ("alias_declaration", "type_definition"):
+        returns = _cpp_alias_target(def_node, _text(class_name))
+        if returns is None:
+            return None
+        params = _cpp_alias_template_params(def_node)
+    kind_node = _one(caps, "classkind")
+    kind_type = kind_node.type if kind_node is not None else def_node.type
+    kind = (
+        _kotlin_class_kind(def_node)
+        if spec.name == "kotlin"
+        else _CLASSDEF_KIND.get(kind_type, "class")
+    )
+    sym = _make_symbol(
+        spec,
+        rel,
+        def_node,
+        _text(class_name),
+        kind,
+        params=params,
+        returns=returns,
+        seen=seen,
+    )
+
+    return def_node, sym
+
+
+def _cpp_alias_template_params(def_node: Node) -> list[Param]:
+    """An alias template's parameters, by name, in order.
+
+    ``template <typename T> using Ptr = std::unique_ptr<T, Del<T>>;``
+    gives ``T``, so the walk can read ``Ptr<Engine>`` as
+    ``std::unique_ptr<Engine, Del<Engine>>``. The list stops at a
+    parameter pack, whose arguments can't be matched one to one. Empty
+    for a plain alias.
+    """
+    parent = def_node.parent
+    if parent is None or parent.type != "template_declaration":
+        return []
+    plist = parent.child_by_field_name("parameters")
+    if plist is None:
+        return []
+    params: list[Param] = []
+    for decl in plist.named_children:
+        if decl.type.startswith("variadic_"):
+            break
+        name = decl.child_by_field_name("name") or decl.child_by_field_name(
+            "declarator"
+        )
+        if name is None:
+            name = next(
+                (
+                    c
+                    for c in decl.named_children
+                    if c.type == "type_identifier"
+                ),
+                None,
+            )
+        if name is None or name.type not in ("type_identifier", "identifier"):
+            break
+        params.append(Param(name=_text(name), type=None))
+
+    return params
 
 
 def _rust_alias_target(def_node: Node) -> str | None:

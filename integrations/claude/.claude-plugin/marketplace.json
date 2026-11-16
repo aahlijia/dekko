@@ -5,8 +5,8 @@
     "email": "aahlijia@gmail.com"
   },
   "metadata": {
-    "description": "dekko — static code map generator for Claude Code",
-    "version": "1.9.0"
+    "description": "dekko: static code map generator for coding agents",
+    "version": "1.10.0b1"
   },
   "plugins": [
     {

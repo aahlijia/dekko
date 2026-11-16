@@ -114,7 +114,11 @@ class Symbol:
             (``#2``, ``#3``, ...) in definition order, keeping every
             symbol's id unique within the map even though ``path``
             and ``qualname`` alone can't tell them apart (see
-            ``extractor._make_symbol``'s ``seen`` dict). Notes,
+            ``extractor._make_symbol``'s ``seen`` dict). A Java
+            record's canonical constructor (header or compact) is
+            numbered after its declared constructors, so an upgrade
+            that starts extracting a new shape never renumbers an
+            existing symbol. Notes,
             call-graph edges, and every other id-keyed structure key
             off this already-disambiguated id, not off the bare
             ``path::qualname`` form.
@@ -228,8 +232,11 @@ class RawCall:
             never treated as "zero arguments written."
         arg_kinds: What each written argument visibly is, one entry
             per argument (``string``, ``class``, ``bool``, ``int``,
-            ``char``, ``null``, ``new:<Type>``, ``lambda``, or ``?``
-            for anything an expression's text can't tell). Set only
+            ``char``, ``null``, ``new:<Type>``, ``lambda``,
+            ``type:<Type>``, or ``?`` for anything an expression's text
+            can't tell). A plain name or ``this.x`` takes the kind its
+            declared type implies: ``String s`` is ``string``, ``File
+            f`` is ``type:File``. Set only
             for a Java construction with at least one argument that
             isn't ``?``; ``None`` otherwise. Read by
             ``resolver._pick_constructor`` to rule out an overload
@@ -242,6 +249,34 @@ class RawCall:
             a bare name that is a parameter or a local is not a field of
             the enclosing type, and a bare call to a parameter is not a
             call to a repo function of that name.
+        anonymous: Whether the call sits inside a Java anonymous class
+            body (``new Foo() { .. }``, an enum constant with a body),
+            at any depth. That class's supertype isn't recorded, so the
+            resolver can't read the scope a simple name is looked up
+            in there. Always ``False`` outside Java.
+        receiver_type: The type the receiver's head was declared with,
+            as written. C++: when that head is a local (``bound ==
+            "local"``: ``mlir::ShapedType``, ``const OpContext*``), or
+            the target of a cast it was initialized from (``auto t =
+            cast<T>(..)`` records ``T``). Java: when the receiver is one
+            plain name bound to a parameter or a local
+            (``MultipartConfigElement``, ``Map<String, String>``,
+            ``var``), or the head of a chain whose calls take no
+            arguments (``ds`` in ``ds.getConnection().getMetaData()
+            .getURL()``, or ``this.x``). ``None`` when the declaration
+            says nothing (``auto x = f()``, an untyped lambda
+            parameter), the head is neither, or the language doesn't
+            record it (only C++ and Java do).
+            Read by the resolver's receiver walk, like a typed
+            parameter.
+        receiver_init: Java only: the class a local receiver is built
+            from where it is declared (``Resource res = new
+            OriginTrackedResource(..)`` records
+            ``OriginTrackedResource``), without type arguments.
+            ``None`` for any other initializer, a parameter, or another
+            language. The resolver reads it when ``receiver_type`` is
+            outside the repo: an in-repo class built right there is
+            what the call reaches.
     """
 
     caller_id: str | None
@@ -253,6 +288,9 @@ class RawCall:
     arg_count: int | None = None
     arg_kinds: tuple[str, ...] | None = None
     bound: str | None = None
+    anonymous: bool = False
+    receiver_type: str | None = None
+    receiver_init: str | None = None
 
 
 @dataclass
@@ -292,6 +330,8 @@ class RawRef:
             in the extractor on purpose: whether a bound reference
             still earns an edge (a pytest fixture parameter does) is a
             question about the *target*, which only the resolver has.
+        anonymous: Whether the reference sits inside a Java anonymous
+            class body; see ``RawCall.anonymous``.
     """
 
     caller_id: str | None
@@ -301,6 +341,7 @@ class RawRef:
     line: int = 0
     arg_count: int | None = None
     bound: str | None = None
+    anonymous: bool = False
 
 
 @dataclass

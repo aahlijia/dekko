@@ -4,7 +4,9 @@ Rust has no overloads, default arguments or optional parameters, so a
 dot-call needs a ``self`` method taking the written count, a bare call
 can't reach a method, and a ``Type::method(obj, ..)`` path writes
 ``self`` too. A pick that breaks one of those is skipped and the
-ladder runs again without it.
+ladder runs again without it. A dot-call tied with a same-file free
+function of its name, which it can't call, takes the repo's one method
+of the name that takes ``self``.
 """
 
 from pathlib import Path
@@ -271,3 +273,363 @@ def test_other_languages_keep_a_mismatched_pick(tmp_path: Path) -> None:
     )
     assert _pairs(graph, "app.py::Editor.use_it") == {"app.py::Editor.tidy"}
     assert _pairs(graph, "app.ts::Panel.useIt") == {"app.ts::Panel.tidy"}
+
+
+_DELETE = (
+    "pub async fn delete(id: u8) {}\n"
+    "pub struct D;\n"
+    "impl D {\n"
+    "    pub fn delete(&self, ix: u8) {}\n"
+    "}\n"
+    "fn make() -> D { D }\n"
+)
+
+
+def test_a_dot_call_tie_with_a_same_file_function_takes_the_method(
+    tmp_path: Path,
+) -> None:
+    # The free ``delete`` can't be what ``d.delete(1)`` means, and the
+    # repo has one ``delete`` that takes ``self``.
+    graph = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": _DELETE
+            + "pub fn use_it() {\n    let d = make();\n    d.delete(1);\n}\n"
+        },
+    )
+    assert _pairs(graph, _USE_IT) == {
+        "src/lib.rs::make",
+        "src/lib.rs::D.delete",
+    }
+    assert _ambiguous_for(graph, _USE_IT) == {}
+
+
+def test_a_dot_call_tie_through_a_closure_parameter_takes_the_method(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": _DELETE
+            + "fn run(f: impl Fn(&D)) { f(&make()) }\n"
+            + "pub fn use_it() {\n    run(|this| this.delete(1));\n}\n"
+        },
+    )
+    assert "src/lib.rs::D.delete" in _pairs(graph, _USE_IT)
+    assert "delete" not in _ambiguous_for(graph, _USE_IT)
+
+
+def test_a_dot_call_tie_reaches_a_method_in_another_file(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "src/db.rs": (
+                "pub struct Db;\n"
+                "impl Db {\n"
+                "    pub fn decline_call(&self, x: u8) {}\n"
+                "}\n"
+                "pub fn open() -> Db { Db }\n"
+            ),
+            "src/lib.rs": (
+                "mod db;\n"
+                "pub fn decline_call(x: u8) {\n"
+                "    let db = db::open();\n"
+                "    db.decline_call(x);\n"
+                "}\n"
+            ),
+        },
+    )
+    assert "src/db.rs::Db.decline_call" in _pairs(
+        graph, "src/lib.rs::decline_call"
+    )
+
+
+def test_two_methods_of_the_name_keep_the_tie(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "src/git.rs": (
+                "pub struct Branch;\n"
+                "impl Branch {\n"
+                "    pub fn name(&self) -> u8 { 0 }\n"
+                "}\n"
+            ),
+            "src/lib.rs": (
+                "mod git;\n"
+                "pub struct Entry;\n"
+                "impl Entry {\n"
+                "    pub fn name(&self) -> u8 { 0 }\n"
+                "}\n"
+                'pub fn name() -> &\'static str { "x" }\n'
+                "fn get() -> u8 { 0 }\n"
+                "pub fn use_it() {\n"
+                "    let branch = get();\n"
+                "    branch.name();\n"
+                "}\n"
+            ),
+        },
+    )
+    assert "src/lib.rs::Entry.name" not in _pairs(graph, _USE_IT)
+    assert set(_ambiguous_for(graph, _USE_IT)["name"]) == {
+        "src/lib.rs::Entry.name",
+        "src/git.rs::Branch.name",
+    }
+
+
+def test_a_typed_parameter_receiver_is_not_narrowed(tmp_path: Path) -> None:
+    # ``term`` is declared ``&Term``, an outside type: the typed-parameter
+    # rung already found ``Term`` owns no ``lines`` in the repo.
+    graph = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": (
+                "use foreign::Term;\n"
+                "pub struct Bounds;\n"
+                "impl Bounds {\n"
+                "    pub fn lines(&self) -> usize { 0 }\n"
+                "}\n"
+                "pub fn lines(term: &Term) -> usize {\n"
+                "    term.lines()\n"
+                "}\n"
+            ),
+        },
+    )
+    assert "src/lib.rs::Bounds.lines" not in _pairs(graph, "src/lib.rs::lines")
+
+
+def test_no_same_file_blocker_leaves_the_tie(tmp_path: Path) -> None:
+    # Without a same-file function to rule out, a lone in-repo method
+    # proves nothing: ``m`` here is a std map.
+    graph = _graph(
+        tmp_path,
+        {
+            "src/tree.rs": (
+                "pub struct TreeMap;\n"
+                "impl TreeMap {\n"
+                "    pub fn values(&self) -> u8 { 0 }\n"
+                "}\n"
+            ),
+            "src/util.rs": "pub fn values() -> u8 { 0 }\n",
+            "src/lib.rs": (
+                "mod tree;\nmod util;\n"
+                "fn get() -> u8 { 0 }\n"
+                "pub fn use_it() {\n"
+                "    let m = get();\n"
+                "    m.values();\n"
+                "}\n"
+            ),
+        },
+    )
+    before = _pairs(graph, _USE_IT)
+    assert "src/tree.rs::TreeMap.values" not in before
+
+
+def test_the_one_method_still_needs_the_count(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": _DELETE
+            + "pub fn use_it() {\n    let d = make();\n    d.delete();\n}\n"
+        },
+    )
+    assert _pairs(graph, _USE_IT) == {"src/lib.rs::make"}
+    assert _externals(graph, _USE_IT) == {"d.delete"}
+
+
+def test_a_path_call_is_not_narrowed(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "src/lib.rs": _DELETE
+            + "pub fn use_it() {\n"
+            + "    let d = make();\n    D::delete(&d, 1);\n}\n"
+        },
+    )
+    assert "src/lib.rs::D.delete" in _pairs(graph, _USE_IT)
+
+
+def _crate(name: str, body: str) -> dict[str, str]:
+    return {
+        f"crates/{name}/Cargo.toml": (
+            f'[package]\nname = "{name}"\n\n[lib]\npath = "src/{name}.rs"\n'
+        ),
+        f"crates/{name}/src/{name}.rs": body,
+    }
+
+
+_SHARED_RNG = _crate(
+    "sched",
+    "pub struct SharedRng;\n"
+    "impl SharedRng {\n"
+    "    pub fn random_range(&mut self, r: u8) -> u8 {\n"
+    "        r\n"
+    "    }\n"
+    "}\n",
+)
+
+
+def test_a_parameter_of_an_outside_type_is_external(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _SHARED_RNG
+        | _crate(
+            "app",
+            "use rand::rngs::StdRng;\n"
+            "pub fn roll(mut rng: StdRng) -> u8 {\n"
+            "    rng.random_range(9)\n"
+            "}\n",
+        ),
+    )
+    caller = "crates/app/src/app.rs::roll"
+    assert _pairs(graph, caller) == set()
+    assert _externals(graph, caller) == {"rng.random_range"}
+
+
+def test_a_parameter_of_an_outside_path_type_is_external(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "util",
+            "pub struct SanitizedPath;\n"
+            "impl SanitizedPath {\n"
+            "    pub fn to_path_buf(&self) -> u8 {\n"
+            "        0\n"
+            "    }\n"
+            "}\n",
+        )
+        | _crate(
+            "app",
+            "pub fn own(p: &std::path::Path) -> u8 {\n"
+            "    p.to_path_buf()\n"
+            "}\n",
+        ),
+    )
+    caller = "crates/app/src/app.rs::own"
+    assert _pairs(graph, caller) == set()
+    assert _externals(graph, caller) == {"p.to_path_buf"}
+
+
+def test_a_self_typed_parameter_is_not_foreign(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "tree",
+            "pub struct Tree;\n"
+            "impl Tree {\n"
+            "    pub fn size(&self) -> usize {\n"
+            "        0\n"
+            "    }\n"
+            "    pub fn merge(&mut self, source: &mut Self) -> usize {\n"
+            "        source.size()\n"
+            "    }\n"
+            "}\n",
+        ),
+    )
+    caller = "crates/tree/src/tree.rs::Tree.merge"
+    assert _pairs(graph, caller) == {"crates/tree/src/tree.rs::Tree.size"}
+
+
+def test_a_repo_trait_on_an_outside_type_keeps_its_edge(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "win",
+            "use windows::Win32::Foundation::LPARAM;\n"
+            "pub trait HiLo {\n"
+            "    fn hi(&self) -> u16;\n"
+            "}\n"
+            "impl HiLo for LPARAM {\n"
+            "    fn hi(&self) -> u16 {\n"
+            "        0\n"
+            "    }\n"
+            "}\n",
+        )
+        | _crate(
+            "app",
+            "use windows::Win32::Foundation::LPARAM;\n"
+            "pub fn high(lparam: LPARAM) -> u16 {\n"
+            "    lparam.hi()\n"
+            "}\n",
+        ),
+    )
+    caller = "crates/app/src/app.rs::high"
+    assert _externals(graph, caller) == set()
+    assert _pairs(graph, caller) | set(_ambiguous_for(graph, caller))
+
+
+def test_an_outside_import_shadowing_a_repo_type_abstains(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "gpui",
+            "pub struct Context;\n"
+            "impl Context {\n"
+            "    pub fn emit(&mut self, e: u8) {}\n"
+            "}\n",
+        )
+        | _crate(
+            "graph",
+            "use gpui::*;\n"
+            "pub struct View;\n"
+            "impl View {\n"
+            "    pub fn ping(&mut self, cx: &mut Context) {\n"
+            "        cx.emit(1);\n"
+            "    }\n"
+            "}\n"
+            "mod tests {\n"
+            "    use anyhow::Context;\n"
+            "}\n",
+        ),
+    )
+    caller = "crates/graph/src/graph.rs::View.ping"
+    assert _pairs(graph, caller) == {"crates/gpui/src/gpui.rs::Context.emit"}
+
+
+def test_an_in_repo_parameter_type_is_unchanged(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "geo",
+            "pub struct Pixels;\n"
+            "impl Pixels {\n"
+            "    pub fn abs(&self) -> Pixels {\n"
+            "        Pixels\n"
+            "    }\n"
+            "}\n",
+        )
+        | _crate(
+            "app",
+            "use geo::Pixels;\n"
+            "pub fn size(p: &Pixels) -> Pixels {\n"
+            "    p.abs()\n"
+            "}\n",
+        ),
+    )
+    caller = "crates/app/src/app.rs::size"
+    assert _pairs(graph, caller) == {"crates/geo/src/geo.rs::Pixels.abs"}
+
+
+def test_a_module_path_named_like_a_parameter_keeps_its_edge(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "zlog",
+            "mod filter;\n"
+            "pub fn process(filter: Option<String>) {\n"
+            "    filter::init_filter(1);\n"
+            "}\n",
+        )
+        | {"crates/zlog/src/filter.rs": "pub fn init_filter(n: u8) {}\n"},
+    )
+    caller = "crates/zlog/src/zlog.rs::process"
+    assert _pairs(graph, caller) == {"crates/zlog/src/filter.rs::init_filter"}

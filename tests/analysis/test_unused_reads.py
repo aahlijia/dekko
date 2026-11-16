@@ -284,3 +284,45 @@ def test_sanity_unused_discloses_property_reads(
     doc = json.loads(capsys.readouterr().out)
     assert doc["property_reads"]["count"] == 1
     assert doc["property_reads"]["sites"] == ["help.ts:3"]
+
+
+# --- ES private members -------------------------------------------------
+
+
+def _private(name: str, path: str) -> Symbol:
+    return Symbol(
+        id=f"{path}::Shell.{name}",
+        name=name,
+        qualname=f"Shell.{name}",
+        kind="method",
+        path=path,
+        language="typescript",
+    )
+
+
+def _read_by(reader: str, name: str) -> dict[str, list[ReadSite]]:
+    return {name: [ReadSite(reader=reader, name=name, lines=[9])]}
+
+
+def test_private_handler_read_in_its_own_file_is_used() -> None:
+    """``this.#onExit.bind(this)``: passed by reference, never called."""
+    priv = _private("#onExit", "shell.ts")
+    idx = _index(
+        [priv], reads_by_name=_read_by("shell.ts::Shell.run", "#onExit")
+    )
+    assert unused.find_unused(idx, ()) == []
+    assert not unused.unused_status(idx, priv).flagged
+
+
+def test_private_member_read_elsewhere_is_not_a_use() -> None:
+    priv = _private("#onExit", "shell.ts")
+    idx = _index(
+        [priv], reads_by_name=_read_by("other.ts::Other.go", "#onExit")
+    )
+    assert unused.find_unused(idx, ()) == [priv]
+    assert not unused._has_property_read(priv, idx)
+
+
+def test_unread_private_member_is_flagged() -> None:
+    priv = _private("#dead", "shell.ts")
+    assert unused.find_unused(_index([priv]), ()) == [priv]

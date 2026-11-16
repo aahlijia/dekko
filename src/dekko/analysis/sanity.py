@@ -85,6 +85,7 @@ Two design decisions worth calling out:
 import io
 import json
 import re
+import shlex
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -3079,7 +3080,7 @@ def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
         ``skipped_pathological`` safety-cap disclosures.
     """
     cmd = _grep_command(bare_name)
-    command_text = " ".join(cmd)
+    command_text = _grep_command_text(bare_name)
     stdout, error = _run_grep_process(root, cmd)
     if error is not None:
         return GrepSweepResult([], command_text, error)
@@ -3094,6 +3095,15 @@ def _grep_command(bare_name: str) -> list[str]:
         cmd += ["--exclude-dir", d]
     cmd += ["--", bare_name, "."]
     return cmd
+
+
+def _grep_command_text(bare_name: str) -> str:
+    """``_grep_command`` as a line a reader can paste into a shell.
+
+    Quoted, so a name a shell treats specially (an ES private
+    ``#name`` would start a comment) survives the paste.
+    """
+    return shlex.join(_grep_command(bare_name))
 
 
 def _run_grep_process(root: Path, cmd: list[str]) -> tuple[str, str | None]:
@@ -3305,7 +3315,7 @@ def _run_grep_planned(
     ``command_text`` stays the single-target command, the one a reader
     can rerun. Stops grepping once the line cap is past.
     """
-    command_text = " ".join(_grep_command(bare_name))
+    command_text = _grep_command_text(bare_name)
     raw_lines: list[str | None] = []
     batch: list[str] = []
     size = 0

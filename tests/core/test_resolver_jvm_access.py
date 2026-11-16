@@ -165,7 +165,7 @@ def _caller(package: str, cls: str) -> str:
     return (
         f"package {package};\n"
         f"public class {cls} {{\n"
-        '    void go(Object h) { h.tidy("x"); }\n'
+        '    void go() { var h = make(); h.tidy("x"); }\n'
         "}\n"
     )
 
@@ -212,7 +212,7 @@ _NESTED = (
     "        public void ping() { }\n"
     "        static class Deeper { public void deep() { } }\n"
     "    }\n"
-    "    void use(Object i) { i.ping(); i.deep(); }\n"
+    "    void use() { var i = make(); i.ping(); i.deep(); }\n"
     "}\n"
 )
 
@@ -227,7 +227,7 @@ def test_a_member_of_a_private_type_is_reached_from_its_own_file_only(
             f"{_MAIN}/Away.java": (
                 "package app;\n"
                 "public class Away {\n"
-                "    void go(Object x) { x.ping(); x.deep(); }\n"
+                "    void go() { var x = make(); x.ping(); x.deep(); }\n"
                 "}\n"
             ),
         },
@@ -253,7 +253,7 @@ def test_a_member_of_a_package_private_type_stays_in_its_package(
             f"{_OTHER}/Far.java": (
                 "package other;\n"
                 "public class Far {\n"
-                "    void go(Object h) { h.hide(); }\n"
+                "    void go() { var h = make(); h.hide(); }\n"
                 "}\n"
             ),
         },
@@ -279,7 +279,7 @@ def test_an_interface_method_without_a_modifier_is_public(
             f"{_OTHER}/Far.java": (
                 "package other;\n"
                 "public class Far {\n"
-                '    void go(Object a) { a.serve("x"); }\n'
+                '    void go() { var a = make(); a.serve("x"); }\n'
                 "}\n"
             ),
         },

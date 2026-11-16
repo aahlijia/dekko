@@ -819,3 +819,98 @@ def test_a_one_segment_path_to_a_same_file_impl_of_std_is_std(
         ),
     )
     assert _callees(graph, _RUN) == {"crates/app/src/app.rs::util.from"}
+
+
+# A dot-call's pick lives in the caller's crate or one it depends on,
+# directly or not: a value of a type can't exist in a crate whose
+# dependency graph doesn't contain the type's crate.
+
+_BUILDER = (
+    "pub struct HttpRequestBuilder;\n"
+    "impl HttpRequestBuilder {\n"
+    "    pub fn header(self, k: &str) -> Self {\n"
+    "        self\n"
+    "    }\n"
+    "}\n"
+)
+_CALLS_HEADER = 'pub fn run() {\n    let r = make();\n    r.header("k");\n}\n'
+_HEADER = "crates/api/src/api.rs::HttpRequestBuilder.header"
+
+
+def _dep_crate(name: str, root: str, deps: str = "") -> dict[str, str]:
+    """A zed-style crate (``src/<name>.rs`` as the lib root) with
+    ``deps`` appended to its manifest."""
+    return {
+        f"crates/{name}/Cargo.toml": (
+            f'[package]\nname = "{name}"\n\n[lib]\npath = "src/{name}.rs"\n'
+            + deps
+        ),
+        f"crates/{name}/src/{name}.rs": root,
+    }
+
+
+def test_a_dot_call_cant_reach_an_undepended_crate(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {**_dep_crate("api", _BUILDER), **_dep_crate("app", _CALLS_HEADER)},
+    )
+    assert _callees(graph, "crates/app/src/app.rs::run") == set()
+    assert "r.header" in _externals(graph, "crates/app/src/app.rs::run")
+
+
+def test_a_dot_call_reaches_a_transitive_dependency(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            **_dep_crate("api", _BUILDER),
+            **_dep_crate(
+                "mid", "", '\n[dependencies]\napi = { path = "../api" }\n'
+            ),
+            **_dep_crate(
+                "app",
+                _CALLS_HEADER,
+                "\n[dependencies]\nmid.workspace = true\n",
+            ),
+        },
+    )
+    assert _callees(graph, "crates/app/src/app.rs::run") == {_HEADER}
+
+
+def test_a_dot_call_dev_dependencies_count(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            **_dep_crate("api", _BUILDER),
+            **_dep_crate(
+                "app", "", '\n[dev-dependencies]\napi = { path = "../api" }\n'
+            ),
+            "crates/app/tests/x.rs": _CALLS_HEADER,
+        },
+    )
+    assert _callees(graph, "crates/app/tests/x.rs::run") == {_HEADER}
+
+
+def test_a_duplicate_crate_name_reaches_both(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            **_dep_crate("api", _BUILDER),
+            # A lint fixture declaring the same crate name elsewhere.
+            "tooling/fixtures/api/Cargo.toml": '[package]\nname = "api"\n',
+            "tooling/fixtures/api/src/lib.rs": "pub fn helper() {}\n",
+            **_dep_crate(
+                "app",
+                _CALLS_HEADER,
+                "\n[dependencies]\napi.workspace = true\n",
+            ),
+        },
+    )
+    assert _callees(graph, "crates/app/src/app.rs::run") == {_HEADER}
+
+
+def test_a_file_under_no_manifest_is_not_judged(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {**_dep_crate("api", _BUILDER), "scripts/run.rs": _CALLS_HEADER},
+    )
+    assert _callees(graph, "scripts/run.rs::run") == {_HEADER}

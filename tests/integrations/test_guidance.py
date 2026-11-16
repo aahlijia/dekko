@@ -1,0 +1,411 @@
+"""Guard rails for the agent guidance dekko ships.
+
+One copy of the skills, the usage policy and the orientation preamble
+serves every client (Claude Code, Codex, ...), so these tests keep that
+text loadable by each client and free of wording only one of them can
+act on. They also pin the trigger phrases each skill's ``description``
+carried before it was made agent-neutral: a client decides whether to
+use a skill from its description, so dropping a phrase can quietly make
+a skill fire less often.
+"""
+
+import json
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+from dekko.integrations import orient, policy_md
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BUNDLE = REPO_ROOT / "integrations" / "claude"
+SKILL_ROOTS = (BUNDLE / "skills", BUNDLE / "skills-codex")
+CODEX_MANIFEST = BUNDLE / ".codex-plugin" / "plugin.json"
+CURSOR_MANIFEST = BUNDLE / ".cursor-plugin" / "plugin.json"
+# Cursor's published plugin manifest schema, vendored from
+# github.com/cursor/plugins (schemas/plugin.schema.json) at commit
+# e5136d82418d2db3165ea1050d17577cd618cc05.
+CURSOR_SCHEMA = REPO_ROOT / "tests/fixtures/cursor/plugin.schema.json"
+# Cursor warns about a skill description past this many characters.
+CURSOR_MAX_DESCRIPTION = 1024
+# What the wheel must carry for Codex and Cursor to load the bundle:
+# their manifests, their MCP server files, and the skills only they
+# list.
+PLUGIN_BUNDLE_PARTS = (
+    ".codex-plugin",
+    "codex.mcp.json",
+    "skills-codex",
+    ".cursor-plugin",
+    "cursor.mcp.json",
+)
+
+# The plugin namespace Codex qualifies a plugin skill with (``dekko:x``).
+PLUGIN_NAME = "dekko"
+MAX_NAME = 64
+MAX_QUALIFIED_NAME = 129
+
+# Text that only makes sense on one client: a client-specific tool
+# prefix, a client-only environment variable, or a behavior (the
+# ``ask`` confirmation prompt) another client doesn't have.
+CLIENT_ONLY_TOKENS = (
+    "mcp__plugin_dekko_dekko__",
+    "CLAUDE_PROJECT_DIR",
+    "CLAUDE_PLUGIN_ROOT",
+    "pause for confirmation",
+)
+
+# Phrases each description matched on before the wording went neutral.
+# Additions next to them are fine; removing or rewording one is not.
+TRIGGER_PHRASES: dict[str, tuple[str, ...]] = {
+    "dekko-daemon": (
+        "Start dekko's background daemon",
+        "many bare `dekko` CLI commands via Bash",
+        "several dekko CLI invocations in a row on the same repo",
+        "a long refactor loop",
+        "a batch of query/search/outline calls",
+        "a hook/script context",
+        "reparsing map.json from scratch",
+    ),
+    "dekko-debug": (
+        "Work a stack trace, exception, or error report",
+        "Trigger when given a traceback, an exception type or message, "
+        "a failing test's error",
+        '"why does X raise"',
+        '"who handles this error"',
+        '"how does control get from A to B"',
+        '"where is this env var read"',
+    ),
+    "dekko-delegate": (
+        "Brief a subagent with dekko's map before dispatching it",
+        "Trigger before any Agent/Task tool call, Workflow `agent()`, "
+        "teammate message, or scripted `claude -p` run",
+        "that will explore, review, implement, or test in such a repo",
+    ),
+    "dekko-notes": (
+        "Read and write dekko's symbol-anchored notes",
+        "Trigger every time you pull a symbol's context (query_symbol, "
+        "get_context_pack, dekko query/context)",
+        "right after a non-obvious change",
+        "right after any rename/move/signature edit",
+    ),
+    "dekko-orient": (
+        "Use dekko's tools instead of grep/Read whenever a repo has a "
+        ".dekko/ directory",
+        "Trigger before any Grep/Glob/Read of a source file",
+        "before a `grep`/`rg`/`find`/`cat` in Bash",
+        '"find/locate/understand this symbol,"',
+        '"what does this file/dir contain,"',
+        '"who calls this,"',
+        '"what will this change break,"',
+        '"which tests should I run" impulse',
+    ),
+    "dekko-refactor": (
+        "List every site a rename, move, or signature change must touch "
+        "before editing",
+        "Trigger when about to rename a function, method, class or type",
+        "rename or move a file or module",
+        "change a parameter list or return type",
+        "move a symbol between files",
+        "remove a symbol",
+        "and again after those edits, before running tests",
+    ),
+    "dekko-review-context": (
+        "Give a code-review or PR-description flow a structural head start",
+        "Trigger when the user asks for a PR description, a pre-merge "
+        "summary, or invokes a code-review flow (`/code-review`, "
+        "`/review`, or an equivalent)",
+    ),
+    "dekko-verify": (
+        "Sanity-check a suspiciously low or zero call-graph result from "
+        "dekko (get_callers, get_callees, find_usages, impacted_tests, "
+        "unused)",
+        'before concluding "no callers" or "dead code,"',
+        "Trigger whenever such a result looks surprising",
+        "before deleting/renaming a symbol based on a zero-caller result",
+        "when the repo mixes languages/has any unsupported-language files",
+        "when an (external)/(unresolved) label lands on a name you're "
+        "confident is first-party code",
+    ),
+}
+
+
+def _skill_files() -> list[Path]:
+    """Every ``SKILL.md`` under the skill roots that exist."""
+    return sorted(
+        path
+        for root in SKILL_ROOTS
+        if root.is_dir()
+        for path in root.glob("*/SKILL.md")
+    )
+
+
+def _guidance_files() -> list[Path]:
+    """Every Markdown file a client loads from a skill directory."""
+    return sorted(
+        path
+        for root in SKILL_ROOTS
+        if root.is_dir()
+        for path in root.glob("*/*.md")
+    )
+
+
+def _frontmatter(path: Path) -> dict[str, str]:
+    """The ``key: value`` pairs of a skill's leading ``---`` block.
+
+    Skill frontmatter here is flat, one key per line, so a line split
+    is enough; no YAML dependency is needed.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert lines and lines[0] == "---", f"{path} has no frontmatter"
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        if line == "---":
+            return fields
+
+        key, sep, value = line.partition(":")
+        if sep:
+            fields[key.strip()] = value.strip()
+
+    pytest.fail(f"{path} frontmatter is never closed")
+
+
+def _id(path: Path) -> str:
+    """A short test id: the skill's directory and file name."""
+    return f"{path.parent.name}/{path.name}"
+
+
+def test_every_shipped_skill_is_found() -> None:
+    names = {path.parent.name for path in _skill_files()}
+
+    assert set(TRIGGER_PHRASES) <= names
+
+
+@pytest.mark.parametrize("path", _skill_files(), ids=_id)
+def test_skill_frontmatter_fits_every_client(path: Path) -> None:
+    fields = _frontmatter(path)
+    name = fields.get("name") or path.parent.name
+
+    assert fields.get("description"), "description must be non-empty"
+    assert fields.get("name") == path.parent.name
+    assert len(fields["description"]) <= CURSOR_MAX_DESCRIPTION
+    assert len(name) <= MAX_NAME
+    assert len(f"{PLUGIN_NAME}:{name}") <= MAX_QUALIFIED_NAME
+
+
+@pytest.mark.parametrize("path", _guidance_files(), ids=_id)
+def test_skill_text_has_no_client_only_tokens(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    found = [token for token in CLIENT_ONLY_TOKENS if token in text]
+
+    assert not found, f"{_id(path)} names client-only text: {found}"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [policy_md._POLICY_BODY, orient._PREAMBLE],
+    ids=["policy", "preamble"],
+)
+def test_standing_guidance_has_no_client_only_tokens(text: str) -> None:
+    found = [token for token in CLIENT_ONLY_TOKENS if token in text]
+
+    assert not found, f"client-only text: {found}"
+
+
+@pytest.mark.parametrize(
+    ("skill", "phrase"),
+    [
+        (skill, phrase)
+        for skill, phrases in TRIGGER_PHRASES.items()
+        for phrase in phrases
+    ],
+)
+def test_description_keeps_its_trigger_phrases(
+    skill: str,
+    phrase: str,
+) -> None:
+    description = _frontmatter(BUNDLE / "skills" / skill / "SKILL.md")[
+        "description"
+    ]
+
+    assert phrase in description
+
+
+def _codex_manifest_paths() -> list[str]:
+    """Every bundle path the Codex manifest names."""
+    manifest = json.loads(CODEX_MANIFEST.read_text(encoding="utf-8"))
+    paths: list[str] = []
+    for key in ("skills", "mcpServers", "hooks", "apps"):
+        value = manifest.get(key)
+        if isinstance(value, str):
+            paths.append(value)
+        elif isinstance(value, list):
+            paths.extend(v for v in value if isinstance(v, str))
+
+    return paths
+
+
+def test_codex_manifest_names_its_skills_and_mcp_server() -> None:
+    paths = _codex_manifest_paths()
+
+    assert "./skills/" in paths
+    assert "./skills-codex/" in paths
+    assert "./codex.mcp.json" in paths
+
+
+@pytest.mark.parametrize("path", _codex_manifest_paths())
+def test_codex_manifest_path_is_dot_relative_and_exists(path: str) -> None:
+    # Codex silently ignores a manifest path that doesn't start with
+    # ``./``, so a bare ``skills/`` would install cleanly and load
+    # nothing.
+    assert path.startswith("./")
+    assert (BUNDLE / path).exists()
+
+
+def test_codex_mcp_server_has_no_cwd() -> None:
+    # Codex expands no ``${VAR}`` in a plugin's MCP config and resolves
+    # a relative ``cwd`` against the plugin's cache dir; with no
+    # ``cwd`` it starts the server in the session's directory, which is
+    # the repo dekko should serve.
+    config = json.loads(
+        (BUNDLE / "codex.mcp.json").read_text(encoding="utf-8")
+    )
+    server = config["mcpServers"]["dekko"]
+
+    assert server["command"] == "dekko"
+    assert server["args"] == ["serve", "--mcp"]
+    assert "cwd" not in server
+
+
+def test_codex_only_skills_are_found() -> None:
+    names = {path.parent.name for path in _skill_files()}
+
+    assert {
+        "dekko-map",
+        "dekko-impact",
+        "dekko-doctor",
+        "dekko-sanity",
+    } <= names
+
+
+def _cursor_manifest() -> dict:
+    """The parsed Cursor manifest."""
+    return json.loads(CURSOR_MANIFEST.read_text(encoding="utf-8"))
+
+
+def _cursor_manifest_paths() -> list[str]:
+    """Every bundle path the Cursor manifest names."""
+    if not CURSOR_MANIFEST.is_file():
+        return []
+
+    manifest = _cursor_manifest()
+    paths: list[str] = []
+    for key in ("skills", "commands", "agents", "rules", "hooks"):
+        value = manifest.get(key)
+        if isinstance(value, str):
+            paths.append(value)
+        elif isinstance(value, list):
+            paths.extend(v for v in value if isinstance(v, str))
+
+    if isinstance(manifest.get("mcpServers"), str):
+        paths.append(manifest["mcpServers"])
+
+    return paths
+
+
+def test_cursor_manifest_names_its_skills_and_mcp_server() -> None:
+    manifest = _cursor_manifest()
+
+    assert manifest["name"] == PLUGIN_NAME
+    assert manifest["skills"] == ["./skills/", "./skills-codex/"]
+    # An empty list turns off Cursor's default ``commands/`` discovery:
+    # the Claude command files there use shell pre-execution, which
+    # Cursor doesn't run.
+    assert manifest["commands"] == []
+    assert manifest["mcpServers"] == "./cursor.mcp.json"
+
+
+def test_cursor_manifest_lists_some_paths() -> None:
+    assert len(_cursor_manifest_paths()) >= 3
+
+
+@pytest.mark.parametrize("path", _cursor_manifest_paths())
+def test_cursor_manifest_path_is_dot_relative_and_exists(path: str) -> None:
+    assert path.startswith("./")
+    assert (BUNDLE / path).exists()
+
+
+def test_cursor_manifest_fits_the_published_schema() -> None:
+    schema = json.loads(CURSOR_SCHEMA.read_text(encoding="utf-8"))
+    manifest = _cursor_manifest()
+
+    assert set(manifest) <= set(schema["properties"])
+    assert set(schema["required"]) <= set(manifest)
+    assert re.fullmatch(
+        schema["properties"]["name"]["pattern"],
+        manifest["name"],
+    )
+
+
+def test_cursor_mcp_server_passes_the_workspace_root() -> None:
+    # With no ``cwd`` Cursor starts the server wherever its own process
+    # runs, which in the IDE isn't the project, so the root goes in
+    # ``args``, a field Cursor expands ``${workspaceFolder}`` in.
+    config = json.loads(
+        (BUNDLE / "cursor.mcp.json").read_text(encoding="utf-8")
+    )
+    server = config["mcpServers"]["dekko"]
+
+    assert server["command"] == "dekko"
+    assert server["args"] == [
+        "serve",
+        "--mcp",
+        "--root",
+        "${workspaceFolder}",
+    ]
+    assert "cwd" not in server
+
+
+def test_bundle_has_no_symlinks() -> None:
+    # Codex copies the plugin into its cache and skips symlinks, and
+    # Cursor's local plugin install is a copy too, so a linked file
+    # would be missing from the installed copy.
+    links = [p for p in BUNDLE.rglob("*") if p.is_symlink()]
+
+    assert links == []
+
+
+@pytest.mark.parametrize("part", PLUGIN_BUNDLE_PARTS)
+def test_wheel_ships_the_plugin_bundle(part: str) -> None:
+    pyproject = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"][
+        "force-include"
+    ]
+    source = f"integrations/claude/{part}"
+
+    assert include.get(source) == f"dekko/_plugin/{part}"
+    assert (REPO_ROOT / source).exists()
+
+
+@pytest.mark.parametrize("skill", ["dekko-orient", "dekko-delegate"])
+def test_skill_names_cursors_mcp_route(skill: str) -> None:
+    # Cursor's model reaches MCP tools through one generic tool that
+    # takes a server and a tool name, not a prefixed tool per server.
+    text = (BUNDLE / "skills" / skill / "SKILL.md").read_text("utf-8")
+
+    assert "server `dekko`" in text
+
+
+def test_delegate_description_names_cursor_headless_runs() -> None:
+    description = _frontmatter(
+        BUNDLE / "skills" / "dekko-delegate" / "SKILL.md"
+    )["description"]
+
+    assert "`agent -p`" in description

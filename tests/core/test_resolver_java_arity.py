@@ -88,7 +88,7 @@ def test_a_same_file_method_the_count_cant_call_is_external(
             f"{_MAIN}/Box.java": _class(
                 "Box",
                 "    void m(int a, int b) { }\n"
-                "    void go(Object x) { x.m(1); }\n",
+                "    void go() { var x = make(); x.m(1); }\n",
             ),
         },
     )
@@ -107,9 +107,9 @@ def test_varargs_take_any_count_from_the_fixed_minimum(
                 "Box",
                 "    void m(String... a) { }\n"
                 "    void n(int a, String... b) { }\n"
-                "    void zero(Object x) { x.m(); x.n(); }\n"
-                '    void one(Object x) { x.m("a"); x.n(1); }\n'
-                '    void three(Object x) { x.m("a", "b", "c"); }\n',
+                "    void zero() { var x = make(); x.m(); x.n(); }\n"
+                '    void one() { var x = make(); x.m("a"); x.n(1); }\n'
+                '    void three() { var x = make(); x.m("a", "b", "c"); }\n',
             ),
         },
     )
@@ -131,7 +131,7 @@ _TOOL = _class(
 
 
 def _user(body: str) -> str:
-    return _class("User", f"    void go(Object t) {{ {body} }}\n")
+    return _class("User", f"    void go() {{ var t = make(); {body} }}\n")
 
 
 def test_one_class_overloads_are_picked_by_count(tmp_path: Path) -> None:
@@ -183,7 +183,8 @@ def test_a_jdk_method_name_on_a_receiver_is_no_overload_pick(
     tmp_path: Path,
 ) -> None:
     """One class owning every in-repo ``add`` is no reason
-    ``list.add(x)`` means it; inside the class, ``this.add(x)`` does."""
+    ``list.add(x)`` means it: a ``List`` parameter is outside the repo,
+    so the call is external. Inside the class, ``this.add(x)`` does."""
     graph = _graph(
         tmp_path,
         {
@@ -200,7 +201,8 @@ def test_a_jdk_method_name_on_a_receiver_is_no_overload_pick(
     edges = _edges(graph)
     assert (f"{bag}.self", f"{bag}.add") in edges
     assert not [p for p in edges if p[0] == f"{_MAIN}/User.java::User.go"]
-    assert [f"{bag}.add", f"{bag}.add#2"] in _rows(graph, "add")
+    assert not _rows(graph, "add")
+    assert (f"{_MAIN}/User.java::User.go", "list.add") in _external(graph)
 
 
 def test_an_ambiguous_row_lists_what_the_call_could_mean(

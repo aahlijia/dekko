@@ -1036,7 +1036,7 @@ JVM_ACCESS_SRC = {
     "src/main/java/app/User.java": (
         "package app;\n"
         "public class User {\n"
-        '    void go(Object h) { h.tidy("x"); }\n'
+        '    void go() { var h = make(); h.tidy("x"); }\n'
         "}\n"
     ),
     "src/main/java/app/Other.java": "package app;\npublic class Other { }\n",
@@ -1100,7 +1100,7 @@ JAVA_OVERLOAD_SRC = {
     "src/main/java/app/User.java": (
         "package app;\n"
         "public class User {\n"
-        '    void go(Object h) { h.tidy("x"); }\n'
+        '    void go() { var h = make(); h.tidy("x"); }\n'
         "}\n"
     ),
     "src/main/java/app/Other.java": "package app;\npublic class Other { }\n",
@@ -1530,3 +1530,101 @@ def test_cache_root_checks_the_resolved_trees_config(
 
     assert _build_from(other, root) is None
     assert _build(root) is not None
+
+
+_RUST_DOT_SRC = {
+    "src/lib.rs": (
+        "mod other;\n"
+        "pub async fn delete(id: u8) {}\n"
+        "pub struct D;\n"
+        "impl D {\n"
+        "    pub fn delete(&self, ix: u8) {}\n"
+        "}\n"
+        "fn make() -> D {\n"
+        "    D\n"
+        "}\n"
+        "pub fn use_it() {\n"
+        "    let d = make();\n"
+        "    d.delete(1);\n"
+        "}\n"
+    ),
+    "src/other.rs": "pub struct E;\n",
+}
+_RUST_DOT_SECOND = (
+    "pub struct E;\nimpl E {\n    pub fn delete(&self, ix: u8) {}\n}\n"
+)
+
+
+@pytest.mark.parametrize("before", ["one", "two"])
+def test_a_second_self_method_elsewhere_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    # A dot-call tie with a same-file free function narrows to the
+    # repo's one ``delete(&self)``. Another file gaining (or losing) a
+    # second one has to re-resolve the caller, whose file didn't change.
+    source = dict(_RUST_DOT_SRC)
+    after = _RUST_DOT_SECOND
+    if before == "two":
+        source["src/other.rs"] = _RUST_DOT_SECOND
+        after = _RUST_DOT_SRC["src/other.rs"]
+    root = make_mapped_repo(source)
+    (root / "src/other.rs").write_text(after)
+    assert _fired(root)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = full["ids"]
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    pair = ("src/lib.rs::use_it", "src/lib.rs::D.delete")
+    assert (pair in edges) == (before == "two")
+
+
+_RUST_SRC = {
+    "crates/api/Cargo.toml": (
+        '[package]\nname = "api"\n\n[lib]\npath = "src/api.rs"\n'
+    ),
+    "crates/api/src/api.rs": (
+        "pub struct Builder;\n"
+        "impl Builder {\n"
+        "    pub fn header(self, k: &str) -> Self {\n"
+        "        self\n"
+        "    }\n"
+        "}\n"
+    ),
+    "crates/app/Cargo.toml": (
+        '[package]\nname = "app"\n\n[lib]\npath = "src/app.rs"\n'
+    ),
+    "crates/app/src/app.rs": (
+        'pub fn run() {\n    let r = make();\n    r.header("k");\n}\n'
+    ),
+}
+
+
+def test_a_new_cargo_dependency_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_RUST_SRC)
+    assert "crates/api/src/api.rs::Builder.header" not in _callee_ids(root)
+
+    manifest = root / "crates/app/Cargo.toml"
+    manifest.write_text(
+        manifest.read_text() + '\n[dependencies]\napi = { path = "../api" }\n'
+    )
+    # A manifest-only edit takes the unchanged-tree fast path, so touch
+    # a source file the call doesn't involve to get a real run.
+    other = root / "crates/api/src/api.rs"
+    other.write_text(other.read_text() + "// touched\n")
+    assert _build(root) is None
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert "crates/api/src/api.rs::Builder.header" in _callee_ids(root)
+
+    _map(root, "--full")
+    assert _graph_json(root) == incremental
