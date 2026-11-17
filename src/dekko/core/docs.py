@@ -17,7 +17,7 @@ from pathlib import Path
 
 from dekko.core import languages, tier2
 from dekko.core import resolver as resolver_mod
-from dekko.core.model import FileMap, Symbol
+from dekko.core.model import TYPE_KINDS, FileMap, Symbol
 from dekko.core.walker import DOC_EXTENSIONS
 
 
@@ -497,12 +497,6 @@ NOISE_NAMES = (
     | frozenset({"clone", "iter_mut"})
 )
 
-# Symbol kinds a ``Type.member`` head can name; a missing member is only
-# reported stale when the head is one of these, or a module.
-_TYPE_KINDS = frozenset(
-    {"class", "interface", "struct", "enum", "trait", "type", "protocol"}
-)
-
 # Members every type has through the language itself (``Foo.class``,
 # ``Foo.prototype``), never a missing member.
 _LANGUAGE_MEMBERS = frozenset(
@@ -595,6 +589,35 @@ class _Tables:
     symbols_in: dict[str, list[Symbol]]
     dir_exts: dict[str, set[str]]
     line_counts: dict[str, int] = field(default_factory=dict)
+
+
+def build_doc_index(
+    root: Path, doc_paths: list[str], files: list[FileMap]
+) -> DocIndex:
+    """Parse every doc and resolve its references against ``files``.
+
+    Args:
+        root: Repository root.
+        doc_paths: Repo-relative docs, as ``walker.discover_docs`` found
+            them.
+        files: Every mapped code file.
+
+    Returns:
+        The doc index; a doc that can't be read is skipped.
+    """
+    sections: list[DocSection] = []
+    candidates: list[list[Candidate]] = []
+    read: list[str] = []
+    for path in doc_paths:
+        try:
+            text = (root / path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        found, groups = parse_doc(path, text)
+        sections += found
+        candidates += groups
+        read.append(path)
+    return resolve_docs(root, sections, candidates, files, read)
 
 
 def resolve_docs(
@@ -932,7 +955,7 @@ def _known_type(t: _Tables, parts: list[str]) -> Symbol | None:
     types = [
         s
         for s in _symbols_named(t, head)
-        if s.kind in _TYPE_KINDS and not s.test
+        if s.kind in TYPE_KINDS and not s.test
     ]
     return types[0] if len(types) == 1 else None
 

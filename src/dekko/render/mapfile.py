@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from functools import cache, cached_property
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ from typing import Any
 from dekko import selfcheck
 from dekko.core import languages, walker
 from dekko.classify import is_test_path
+from dekko.core.docs import DocDangling, DocLink, DocSection
 from dekko.core.model import (
     CallGraph,
     CatchSite,
@@ -865,6 +866,15 @@ class MapIndex:
             one consumer, ``unused``'s dispatch check, asks "is this
             flagged symbol's name read anywhere"; never an adjacency
             table, since a read is not an edge (``model.RawRead``).
+        doc_sections: Every indexed doc's heading sections.
+        doc_links: Resolved doc-to-code references; ``section`` indexes
+            ``doc_sections``.
+        doc_dangling: Doc references that point at nothing any more.
+        doc_links_by_target: Symbol id or file path → ``doc_links``
+            indexes (an ambiguous link is filed under each candidate).
+        doc_links_by_doc: Doc path → its ``doc_links`` indexes.
+        has_doc_index: Whether the map was built by a dekko that
+            indexes docs (false for older maps and in-memory indexes).
         type_uses: Every parameter/return annotation on a
             function-shaped node that is not a symbol, repo-wide
             (empty for maps written before the section existed) —
@@ -962,6 +972,12 @@ class MapIndex:
     env_reads_by_key: dict[str, list[EnvRead]] = field(default_factory=dict)
     reads_by_name: dict[str, list[ReadSite]] = field(default_factory=dict)
     type_uses: list[TypeUse] = field(default_factory=list)
+    doc_sections: list[DocSection] = field(default_factory=list)
+    doc_links: list[DocLink] = field(default_factory=list)
+    doc_dangling: list[DocDangling] = field(default_factory=list)
+    doc_links_by_target: dict[str, list[int]] = field(default_factory=dict)
+    doc_links_by_doc: dict[str, list[int]] = field(default_factory=dict)
+    has_doc_index: bool = False
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
@@ -1095,6 +1111,7 @@ class MapIndex:
         _filter_module_graph(self, out)
         _filter_throws_catches(self, out, by_id)
         _filter_env_reads(self, out)
+        _filter_docs(self, out, by_id)
         _filter_reads(self, out, by_id)
         out.type_uses = [t for t in self.type_uses if not is_test_path(t.path)]
         out.hidden_test_symbols = {
@@ -1288,6 +1305,48 @@ def _filter_env_reads(src: "MapIndex", out: "MapIndex") -> None:
         kept = [r for r in reads if not is_test_path(r.path)]
         if kept:
             out.env_reads_by_key[key] = kept
+
+
+def _filter_docs(
+    src: "MapIndex", out: "MapIndex", by_id: dict[str, Symbol]
+) -> None:
+    """Fill ``out``'s doc fields from ``src``: docs under test paths and
+    references to test code dropped.
+
+    ``doc_sections`` is shared as-is so link ``section`` indexes stay
+    valid; a test doc's sections are only unreachable, through no link.
+    """
+    out.has_doc_index = src.has_doc_index
+    out.doc_sections = src.doc_sections
+    out.doc_links = [
+        kept
+        for link in src.doc_links
+        if not is_test_path(src.doc_sections[link.section].path)
+        and (kept := _prod_doc_link(link, by_id)) is not None
+    ]
+    out.doc_dangling = [
+        d
+        for d in src.doc_dangling
+        if not is_test_path(src.doc_sections[d.section].path)
+    ]
+    _index_doc_links(out)
+
+
+def _prod_doc_link(link: DocLink, by_id: dict[str, Symbol]) -> DocLink | None:
+    """``link`` with its test-code targets removed, or ``None`` if none
+    is left."""
+
+    def prod(target: str) -> bool:
+        if "::" in target:
+            return target in by_id
+        return not is_test_path(target)
+
+    if not link.candidates:
+        return link if prod(link.target) else None
+    kept = tuple(c for c in link.candidates if prod(c))
+    if not kept:
+        return None
+    return replace(link, candidates=kept)
 
 
 def _filter_reads(
@@ -1687,6 +1746,7 @@ def load_map(root: Path) -> MapIndex | None:
     _load_module_graph(index, doc, ids)
     _load_throws_catches(index, doc, ids)
     _load_env_reads(index, doc)
+    _load_docs(index, doc)
     _load_reads(index, doc, ids)
     _load_type_uses(index, doc)
     return index
@@ -1861,6 +1921,42 @@ def _load_env_reads(index: MapIndex, doc: dict) -> None:
             line=d.get("line", 0),
         )
         index.env_reads_by_key.setdefault(read.key, []).append(read)
+
+
+def _load_docs(index: MapIndex, doc: dict) -> None:
+    """Fill ``index``'s doc fields from a parsed ``map.json`` doc.
+
+    Maps written before docs were indexed have none of the keys; their
+    ``has_doc_index`` stays false so a doc query can say so instead of
+    answering "no docs".
+    """
+    if "doc_sections" not in doc:
+        return
+    index.has_doc_index = True
+    index.doc_sections = [
+        _from_known(DocSection, d) for d in doc.get("doc_sections", [])
+    ]
+    index.doc_links = [
+        _from_known(
+            DocLink, {**d, "candidates": tuple(d.get("candidates", ()))}
+        )
+        for d in doc.get("doc_links", [])
+    ]
+    index.doc_dangling = [
+        _from_known(DocDangling, d) for d in doc.get("doc_dangling", [])
+    ]
+    _index_doc_links(index)
+
+
+def _index_doc_links(index: MapIndex) -> None:
+    """Rebuild the by-target and by-doc lookups from ``doc_links``."""
+    index.doc_links_by_target = {}
+    index.doc_links_by_doc = {}
+    for i, link in enumerate(index.doc_links):
+        for target in link.candidates or (link.target,):
+            index.doc_links_by_target.setdefault(target, []).append(i)
+        doc = index.doc_sections[link.section].path
+        index.doc_links_by_doc.setdefault(doc, []).append(i)
 
 
 def _load_type_uses(index: MapIndex, doc: dict) -> None:
