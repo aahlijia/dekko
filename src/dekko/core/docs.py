@@ -903,6 +903,10 @@ def _is_missing(
         return False
     if any(p in t.docs or (t.root / p).exists() for p in options):
         return False
+    if "." not in raw.rsplit("/", 1)[-1]:
+        # A link with no extension is a docs-site route (``../perf/gpu``
+        # for ``gpu.md``, or a generated API page), not a file path.
+        return False
     if cand.kind != "link":
         # ``./x`` names a base the doc doesn't give, and dot-dirs
         # (``.github/``, ``.vscode/``) are conventions docs cite for
@@ -938,10 +942,15 @@ def _emit_path(
         _emit(index, at, cand, paths, tier)
         return
     path = paths[0]
+    # Only a path written exactly, in a link or inline code, is judged by
+    # its line: a guessed file or a traceback in a code block isn't
+    # this repo's file at that line.
+    judged = tier == EXTRACTED and cand.kind in ("link", "span")
     if line > _line_count(t, path):
-        _dangle(index, at, cand, "past-end", None)
+        if judged:
+            _dangle(index, at, cand, "past-end", None)
         return
-    moved = _moved(t, cand, path, line)
+    moved = _moved(t, cand, path, line) if judged else None
     if moved is not None:
         _dangle(index, at, cand, "moved", moved)
         return
@@ -1000,7 +1009,9 @@ def _resolve_qualified(
     key = cand.text.replace("::", ".")
     symbols = scope.symbols(t.by_qualname_suffix.get(key, []))
     if symbols:
-        _emit(index, at, cand, [s.id for s in symbols], EXTRACTED)
+        sure = _owner_is_unique(t, key, cand.text, scope)
+        tier = EXTRACTED if sure else INFERRED
+        _emit(index, at, cand, [s.id for s in symbols], tier)
         return
     parts = key.split(".")
     modules = scope.paths(t.modules.get("/".join(parts), []))
@@ -1008,10 +1019,10 @@ def _resolve_qualified(
         langs = [t.languages.get(p, "") for p in modules]
         _emit(index, at, cand, modules, _module_tier(cand.text, langs))
         return
-    members = scope.symbols(_module_members(t, parts))
+    members, one_module = _module_members(t, parts, scope)
     if members:
         langs = [s.language for s in members]
-        tier = _module_tier(cand.text, langs)
+        tier = _module_tier(cand.text, langs) if one_module else INFERRED
         _emit(index, at, cand, [s.id for s in members], tier)
         return
     owner = _known_type(t, parts)
@@ -1022,8 +1033,41 @@ def _resolve_qualified(
     line = next((f.line for f in owner.fields if f.name == parts[-1]), None)
     if line is not None:
         _emit(index, at, cand, [owner.id], EXTRACTED, line)
-    elif cand.kind == "span" and parts[-1] not in _LANGUAGE_MEMBERS:
+    elif cand.kind == "span" and _could_be_a_member(parts[-1]):
         _dangle(index, at, cand, "no-member", None)
+
+
+def _owner_is_unique(t: _Tables, key: str, text: str, scope: _Scope) -> bool:
+    """Whether ``owner.member``'s owner names one thing for certain.
+
+    Two ``Interpreter`` types (Swift and Java, say) make the one that
+    defines ``resizeInput`` a guess: the other can inherit it, which the
+    map doesn't follow. A dotted owner must also be a type or a module:
+    ``data.shape`` in a snippet is a variable's attribute, even when a
+    namespace ``data`` happens to hold a ``shape``. A ``::`` path is
+    written through namespaces on purpose and needs no type.
+    """
+    owner = key.rsplit(".", 1)[0]
+    types = [
+        s
+        for s in scope.symbols(_symbols_named(t, owner))
+        if s.kind in TYPE_KINDS
+    ]
+    if len(types) > 1:
+        return False
+    if types or "::" in text:
+        return True
+    modules = scope.paths(t.modules.get(owner.replace(".", "/"), []))
+    return len(modules) == 1
+
+
+def _could_be_a_member(name: str) -> bool:
+    """Whether a missing ``Type.name`` member counts as stale.
+
+    Language-given members (``class``, ``prototype``) and UPPER_CASE
+    constants and enum values, which the map doesn't record, never do.
+    """
+    return name not in _LANGUAGE_MEMBERS and not name.isupper()
 
 
 def _module_tier(text: str, languages: list[str]) -> str:
@@ -1037,20 +1081,30 @@ def _module_tier(text: str, languages: list[str]) -> str:
     return EXTRACTED if fits else INFERRED
 
 
-def _module_members(t: _Tables, parts: list[str]) -> list[Symbol]:
-    """``a.b.name`` as module ``a/b`` plus a symbol in it, longest first."""
+def _module_members(
+    t: _Tables, parts: list[str], scope: _Scope
+) -> tuple[list[Symbol], bool]:
+    """``a.b.name`` as module ``a/b`` plus a symbol in it, longest first.
+
+    Returns:
+        The matching symbols, and whether the module path named one
+        file (with two ``def_function`` modules, picking the one that
+        defines the name is a guess).
+    """
     for split in range(len(parts) - 1, 0, -1):
-        modules = t.modules.get("/".join(parts[:split]), [])
+        modules = scope.paths(t.modules.get("/".join(parts[:split]), []))
         member = ".".join(parts[split:])
-        found = [
-            s
-            for path in modules
-            for s in t.symbols_in.get(path, [])
-            if s.qualname.replace("::", ".") == member
-        ]
+        found = scope.symbols(
+            [
+                s
+                for path in modules
+                for s in t.symbols_in.get(path, [])
+                if s.qualname.replace("::", ".") == member
+            ]
+        )
         if found:
-            return found
-    return []
+            return found, len(modules) == 1
+    return [], False
 
 
 def _known_type(t: _Tables, parts: list[str]) -> Symbol | None:

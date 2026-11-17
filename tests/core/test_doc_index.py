@@ -772,3 +772,90 @@ def test_an_enum_variant_is_not_a_missing_member(tmp_path: Path) -> None:
     index = _resolve_in(files, tmp_path, "# S\n`Kind::Global`\n")
 
     assert index.dangling == []
+
+
+def test_an_extensionless_link_is_a_site_route(tmp_path: Path) -> None:
+    files = _repo(tmp_path)
+    (tmp_path / "docs" / "perf").mkdir(parents=True)
+    (tmp_path / "docs" / "perf" / "gpu.md").write_text("# GPU\n")
+    text = "# S\n[gpu](perf/gpu) and [api](../src/pkg/Generated)\n"
+    sections, cands = parse_doc("docs/guide.md", text)
+
+    index = resolve_docs(
+        tmp_path, sections, cands, files, ["docs/guide.md", "docs/perf/gpu.md"]
+    )
+
+    assert index.dangling == []
+
+
+def test_a_member_of_a_type_named_in_two_places_is_inferred(
+    tmp_path: Path,
+) -> None:
+    files = _repo(tmp_path)
+    files[2].symbols += [
+        _sym("src/pkg/other.py", "Interpreter", 13, 18, "class"),
+        _sym("src/pkg/other.py", "Interpreter.resize", 14, 15, "method"),
+    ]
+    files[0].symbols.append(
+        _sym("src/pkg/walker.py", "Interpreter", 31, 39, "class")
+    )
+    sections, cands = parse_doc("a.md", "# S\n`Interpreter.resize`\n")
+
+    index = resolve_docs(tmp_path, sections, cands, files, ["a.md"])
+
+    assert [(x.text, x.tier) for x in index.links] == [
+        ("Interpreter.resize", "INFERRED")
+    ]
+
+
+def test_line_checks_need_an_exact_link_or_inline_path(tmp_path: Path) -> None:
+    text = (
+        '# S\n```\n  File "other.py", line 400\n  at src/pkg/other.py:400\n'
+        "```\n`other.py:400`\n"
+    )
+
+    assert _resolve(tmp_path, text).dangling == []
+
+
+def test_constant_members_never_dangle(tmp_path: Path) -> None:
+    index = _resolve(tmp_path, "# S\n`MapIndex.CATEGORY_MASK`\n")
+
+    assert index.dangling == []
+
+
+def test_a_dotted_name_through_a_namespace_is_inferred(tmp_path: Path) -> None:
+    files = _repo(tmp_path)
+    shape = _sym("src/pkg/other.py", "gpu.data.shape", 13, 14)
+    files[2].symbols.append(shape)
+    sections, cands = parse_doc(
+        "a.md", "# S\n`data.shape` and `gpu::data::shape`\n"
+    )
+
+    index = resolve_docs(tmp_path, sections, cands, files, ["a.md"])
+
+    assert {(x.text, x.tier) for x in index.links} == {
+        ("data.shape", "INFERRED"),
+        ("gpu::data::shape", "EXTRACTED"),
+    }
+
+
+def test_a_member_of_a_module_named_twice_is_inferred(tmp_path: Path) -> None:
+    files = _repo(tmp_path)
+    for rel in ("src/a/walker.py", "src/b/walker.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x\n" * 5)
+    files.append(
+        FileMap(
+            "src/a/walker.py",
+            "python",
+            symbols=[_sym("src/a/walker.py", "function", 1, 2)],
+        )
+    )
+    files.append(FileMap("src/b/walker.py", "python"))
+    sections, cands = parse_doc("a.md", "# S\n`walker.function`\n")
+
+    index = resolve_docs(tmp_path, sections, cands, files, ["a.md"])
+
+    assert [(x.text, x.tier) for x in index.links] == [
+        ("walker.function", "INFERRED")
+    ]
