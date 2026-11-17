@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from contextlib import redirect_stdout
 
 from dekko.classify import is_test_path, relevance_key
+from dekko.analysis.communities import louvain
 from dekko.render.mapfile import (
     MapIndex,
     callee_segments,
@@ -4202,18 +4203,13 @@ def _run_file(
     return EXIT_OK, _emit_lines([_sym_line(s) for s in symbols], budget, limit)
 
 
-# ``cohesion``'s weak-signal disclosure (the note: line is
-# load-bearing, not decorative). Always printed, in both text and
-# JSON output, never dropped by budget/limit capping — this is what
-# keeps a connectivity view from being misread as real "which
-# functions belong together" clustering, which this action does not
-# implement.
+# ``cohesion``'s weak-signal disclosure. Always printed, in both text
+# and JSON output, never dropped by budget/limit capping: a file's own
+# calls are a thin basis for clustering, and the reader should know.
 _COHESION_NOTE = (
-    "note: this groups symbols that are mutually reachable, not "
-    "symbols that are tightly coupled vs. loosely coupled — a file "
-    "that's one connected component (the common case) gets no useful "
-    'split suggestion from this view. Real "which functions belong '
-    'together" clustering is not implemented.'
+    "note: groups come from this file's own calls and references only; "
+    "calls from other files and shared state don't count, so treat a "
+    "split as a hint, not a verdict."
 )
 
 
@@ -4253,53 +4249,15 @@ def _intra_file_edges(index: MapIndex, path: str) -> list[tuple[str, str]]:
     return edges
 
 
-def connected_components(
-    ids: list[str], edges: list[tuple[str, str]]
-) -> list[set[str]]:
-    """Union-Find over an intra-file edge list. O(E * alpha(V)).
-
-    Every id in ``ids`` gets its own component even with zero edges —
-    the result always partitions the full id set, not just the ids
-    that happen to appear in ``edges``, so a symbol with no intra-file
-    edges still shows up as its own size-1 component rather than being
-    silently dropped.
-
-    Args:
-        ids: Every symbol id to partition (typically a file's full
-            symbol set, in definition order).
-        edges: ``(src, dst)`` pairs to union together.
-
-    Returns:
-        Every connected component as a set of member ids.
-    """
-    parent = {i: i for i in ids}
-
-    def find(x: str) -> str:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for a, b in edges:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    groups: dict[str, set[str]] = {}
-    for i in ids:
-        groups.setdefault(find(i), set()).add(i)
-    return list(groups.values())
-
-
 def _cohesion_groups(
     ids: list[str], edges: list[tuple[str, str]]
 ) -> tuple[list[list[str]], list[str]]:
-    """Split a file's connected components into clusters and isolates.
+    """Cluster a file's symbols, setting aside the ones with no edges.
 
-    A component of size 1 is, by construction, a symbol with zero
-    intra-file edges (any edge would have unioned it with another
-    symbol) — so no separate "has no edges" check is needed to
-    classify it as isolated.
+    Louvain over the intra-file edges, one unit of weight per edge, so
+    two tight groups joined by one call come out as two groups. A
+    group of one is a symbol with no intra-file edges: Louvain never
+    leaves a connected symbol alone.
 
     Args:
         ids: Every symbol id in the file, in definition order.
@@ -4314,7 +4272,11 @@ def _cohesion_groups(
         id, in definition order.
     """
     order = {sid: i for i, sid in enumerate(ids)}
-    components = connected_components(ids, edges)
+    weights: dict[tuple[str, str], int] = {}
+    for a, b in edges:
+        key = (a, b) if a < b else (b, a)
+        weights[key] = weights.get(key, 0) + 1
+    components = louvain(ids, weights)
     clusters = sorted(
         (sorted(c, key=order.__getitem__) for c in components if len(c) > 1),
         key=lambda c: (-len(c), order[c[0]]),
@@ -4357,13 +4319,10 @@ def _run_cohesion(
     limit: int,
     budget: int | None,
 ) -> tuple[int, Meter | None]:
-    """Execute the cohesion action: intra-file connected-components.
+    """Execute the cohesion action: cluster one file's symbols.
 
-    A deliberately weak signal, not real clustering — see
-    ``_COHESION_NOTE``. Groups a file's symbols by
-    mutual reachability over intra-file calls/references only; a file
-    that's fully connected (the common case) yields one big cluster
-    and no useful split suggestion.
+    Louvain over intra-file calls/references only, a weak signal (see
+    ``_COHESION_NOTE``): calls from other files don't count.
 
     Args:
         index: Loaded map index.
@@ -4404,10 +4363,10 @@ def _run_cohesion(
 
     header = (
         f"dekko: {len(ids)} symbols, {len(edges)} intra-file edges "
-        "(weak signal — connectivity only, not clustering)"
+        "(weak signal — this file's own calls only)"
     )
     rows = [
-        f"  connected component {n} ({len(c)} symbols): "
+        f"  group {n} ({len(c)} symbols): "
         + ", ".join(names_by_id[i] for i in c)
         for n, c in enumerate(clusters, start=1)
     ]
@@ -4423,7 +4382,7 @@ def _run_cohesion(
         print(row)
     print(_COHESION_NOTE)
     if budget and meter.tokens > budget:
-        # fit_to_budget never splits mid-row (a connected component is
+        # fit_to_budget never splits mid-row (a group is
         # reported whole or not at all -- see the module's own "never
         # split mid-row" convention), so a budget tighter than even
         # the first kept row's own cost is silently exceeded with no
