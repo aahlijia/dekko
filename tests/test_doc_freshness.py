@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from conftest import RepoFactory
 
+from dekko.core import walker
 from dekko.integrations import cli
 from dekko.render import mapfile
 
@@ -109,3 +110,24 @@ def test_a_doc_only_edit_is_not_an_unchanged_map_run(
     index = mapfile.load_map(root)
     assert index.doc_links[0].text == "run_app"
     assert _freshness(root).fresh
+
+
+def test_freshness_lists_the_repo_files_once(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The code and doc scans share one `git ls-files`: on a large repo
+    # each listing costs hundreds of milliseconds per read command.
+    root = make_mapped_repo(SOURCES)
+    index = mapfile.load_map(root)
+    assert index is not None
+    calls: list[Path] = []
+    real = walker._git_files
+
+    def counting(where: Path) -> list[str] | None:
+        calls.append(where)
+        return real(where)
+
+    monkeypatch.setattr(walker, "_git_files", counting)
+
+    assert mapfile.check_freshness(root, index).fresh
+    assert len(calls) == 1

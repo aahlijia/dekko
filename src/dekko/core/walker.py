@@ -205,6 +205,16 @@ def _walk_files(root: Path) -> list[str]:
     return found
 
 
+def list_files(root: Path) -> list[str]:
+    """Every candidate file: ``git ls-files``, else a filesystem walk.
+
+    Pass the result as ``candidates`` when one caller runs both
+    ``discover`` and ``discover_docs``, so the repo is listed once.
+    """
+    found = _git_files(root)
+    return found if found is not None else _walk_files(root)
+
+
 def _join(rel_dir: str, name: str) -> str:
     """Join a relative POSIX dir (possibly ``.``) and a name."""
     if rel_dir in ("", "."):
@@ -285,9 +295,7 @@ def find_config_files(root: Path, basenames: frozenset[str]) -> list[str]:
         Sorted repo-relative POSIX paths of every matching file outside
         a noise/vendored directory.
     """
-    candidates = _git_files(root)
-    if candidates is None:
-        candidates = _walk_files(root)
+    candidates = list_files(root)
 
     found: list[str] = []
     for rel in candidates:
@@ -423,9 +431,7 @@ def discover(
         files) are still omitted with no entry here.
     """
     if candidates is None:
-        candidates = _git_files(root)
-        if candidates is None:
-            candidates = _walk_files(root)
+        candidates = list_files(root)
 
     prefix = None
     if subpath:
@@ -486,9 +492,7 @@ def discover_docs(
         Sorted repo-relative doc paths.
     """
     if candidates is None:
-        candidates = _git_files(root)
-        if candidates is None:
-            candidates = _walk_files(root)
+        candidates = list_files(root)
     prefix = Path(subpath).as_posix().strip("/") if subpath else None
     ignore_spec = _load_dekkoignore(root)
 

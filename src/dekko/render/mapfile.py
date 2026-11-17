@@ -2334,6 +2334,7 @@ def _content_freshness(root: Path, prov: dict) -> Freshness:
             "max_file_size", walker.DEFAULT_MAX_FILE_SIZE
         ),
         "follow_symlinks": prov.get("follow_symlinks", False),
+        "candidates": walker.list_files(root),
     }
     recorded_stat: dict[str, list[int]] = prov.get("stat", {})
     seen_stat: dict[str, list[int]] = {}
