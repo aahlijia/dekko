@@ -4070,6 +4070,7 @@ def _run_symbol(
         and fan_out == 0
         and not referenced_by
     )
+    hits, total = docs_mod.top_hits(index, [sym.id], _CARD_DOCS)
     if as_json:
         doc = _sym_card_json(
             index,
@@ -4082,6 +4083,8 @@ def _run_symbol(
             type_zero_fan,
             notes,
         )
+        if hits:
+            doc["docs"] = [_card_doc_json(h) for h in hits]
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
     _print_sym_card_text(
@@ -4095,7 +4098,23 @@ def _run_symbol(
         sym_notes,
         overload_ties(index, sym) if ambig_in else None,
     )
+    if hits:
+        print(f"  docs: {docs_mod.docs_line(hits, total)}")
     return EXIT_OK, None
+
+
+# Doc sections a symbol card lists before folding the rest into a count.
+_CARD_DOCS = 3
+
+
+def _card_doc_json(hit: docs_mod.SectionHit) -> dict:
+    s = hit.section
+    return {
+        "path": s.path,
+        "line": s.line,
+        "heading": s.heading,
+        "tier": hit.tier,
+    }
 
 
 def _locate_file(index: MapIndex, target: str) -> tuple[str | None, int]:

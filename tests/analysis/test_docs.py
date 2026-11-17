@@ -320,3 +320,126 @@ def test_docs_is_routed_through_the_daemon() -> None:
     from dekko.daemon import daemon
 
     assert "docs" in daemon._DAEMON_ELIGIBLE
+
+
+# --- docs: lines in symbol cards and context packs --------------------------
+
+
+def test_symbol_card_lists_doc_sections(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = _run(
+        capsys, "query", "symbol", "MapIndex.load", "--root", str(repo)
+    )
+
+    assert "  docs: README.md:1 App, docs/guide.rst:5 Loading" in out
+
+
+def test_symbol_card_docs_in_json(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = _run(
+        capsys,
+        "query",
+        "symbol",
+        "MapIndex.load",
+        "--root",
+        str(repo),
+        "--json",
+    )
+
+    docs = json.loads(out)["docs"]
+    assert docs[0] == {
+        "path": "README.md",
+        "line": 1,
+        "heading": "App",
+        "tier": "EXTRACTED",
+    }
+
+
+def test_symbol_card_has_no_docs_line_without_docs(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = _run(
+        capsys, "query", "symbol", "helper_only_in_code", "--root", str(repo)
+    )
+
+    assert "docs:" not in out
+
+
+def test_symbol_card_caps_doc_sections(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    extra = "".join(f"\n## Part {i}\n\nUse `discover`.\n" for i in range(4))
+    (repo / "docs" / "more.md").write_text("# More\n" + extra)
+    assert cli.main(["map", str(repo), "--quiet"]) == 0
+
+    _, out, _ = _run(
+        capsys, "query", "symbol", "discover", "--root", str(repo)
+    )
+
+    (line,) = [x for x in out.splitlines() if x.startswith("  docs:")]
+    assert line.count(",") == 2
+    assert line.endswith("more")
+
+
+def test_context_pack_lists_doc_sections(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = _run(capsys, "context", "MapIndex.load", "--root", str(repo))
+
+    assert "  docs: README.md:1 App, docs/guide.rst:5 Loading" in out
+
+
+def test_context_pack_docs_in_json(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = _run(
+        capsys, "context", "MapIndex.load", "--root", str(repo), "--json"
+    )
+
+    assert json.loads(out)["docs"] == [
+        "README.md:1 App",
+        "docs/guide.rst:5 Loading",
+    ]
+
+
+def test_a_tight_budget_drops_docs_before_neighbors(repo: Path) -> None:
+    from dekko.analysis import contextpack
+    from dekko.render.mapfile import load_map
+
+    index = load_map(repo)
+    (sym,) = index.symbols_by_qualname["MapIndex.load"]
+    pack = contextpack.build_pack(index, sym, hops=1, all_imports=True)
+    pack.entries = [
+        contextpack.PackEntry(
+            index.symbols_by_qualname["discover"][0], 1, "caller"
+        )
+    ]
+    docs, pack.docs = pack.docs, []
+    budget = contextpack._estimate_tokens(pack)
+    pack.docs = docs
+
+    contextpack.trim_to_budget(index, pack, budget)
+
+    assert pack.docs == []
+    assert len(pack.entries) == 1
+
+
+def test_workset_pack_lists_doc_sections(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = _run(
+        capsys, "workset", "--symbol", "MapIndex.load", "--root", str(repo)
+    )
+
+    assert "docs: README.md:1 App" in out
+
+
+def test_mcp_query_symbol_carries_docs(repo: Path) -> None:
+    from dekko.integrations import server
+
+    ctx = server.Context(default_root=repo, no_regen=False)
+    text = server._relation_tool(ctx, "symbol", {"symbol": "MapIndex.load"})
+
+    assert "docs: README.md:1 App" in text

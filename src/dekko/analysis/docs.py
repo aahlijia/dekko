@@ -101,6 +101,33 @@ def _links_per_section(index: MapIndex) -> dict[tuple[str, int], int]:
     return counts
 
 
+def top_hits(
+    index: MapIndex, targets: list[str], n: int
+) -> tuple[list[SectionHit], int]:
+    """The ``n`` best sections naming ``targets``, and how many there are.
+
+    Empty on a map that predates the doc index.
+    """
+    if not index.has_doc_index:
+        return [], 0
+    hits = sections_naming(index, targets)
+    return hits[:n], len(hits)
+
+
+def hit_label(hit: SectionHit) -> str:
+    """``path:line heading``, the compact form a ``docs:`` line lists."""
+    s = hit.section
+    return f"{s.path}:{s.line} {s.heading}"
+
+
+def docs_line(hits: list[SectionHit], total: int) -> str:
+    """The ``docs:`` line body: labels, then ``+N more`` past them."""
+    text = ", ".join(hit_label(h) for h in hits)
+    if total > len(hits):
+        text += f" +{total - len(hits)} more"
+    return text
+
+
 def file_targets(index: MapIndex, path: str) -> list[str]:
     """A file's own path, then every symbol defined in it."""
     return [path, *(s.id for s in index.symbols_by_path.get(path, []))]
