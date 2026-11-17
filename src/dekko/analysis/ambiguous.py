@@ -40,7 +40,7 @@ the repo symbol. Such calls resolve "successfully" and never appear
 here at all, however inflated the resulting fan-in — this report's
 "0 ambiguous sites" cannot be read as "resolution is trustworthy" on
 its own; cross-check a suspiciously high fan-in with ``dekko sanity``.
-``_is_noise_call``'s denylists (``_BUILTIN_METHOD_NAMES``,
+``_is_noise_call``'s denylists (``BUILTIN_METHOD_NAMES``,
 ``_CHAIN_BUILDER_METHOD_NAMES``, ``_RUST_STD_METHOD_NAMES``,
 ``_JAVA_ASSERTION_METHOD_NAMES``, ``_BUILDER_METHOD_NAMES``, and, for
 a C/C++ call, ``_CPP_STD_METHOD_NAMES``) catch known instances of this

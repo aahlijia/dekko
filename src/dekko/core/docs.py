@@ -9,10 +9,15 @@ such as "run" or "new" can't turn into links.
 """
 
 import bisect
+import posixpath
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from dekko.core import languages, tier2
+from dekko.core import resolver as resolver_mod
+from dekko.core.model import FileMap, Symbol
 from dekko.core.walker import DOC_EXTENSIONS
 
 
@@ -467,3 +472,476 @@ def _looks_like_path(token: str) -> bool:
 def _blank_paths(m: re.Match[str]) -> str:
     """Blank out a path token so its dotted file name isn't a name."""
     return " " * len(m.group(0)) if _looks_like_path(m.group(1)) else m[0]
+
+
+# --- resolution -----------------------------------------------------------
+
+EXTRACTED = "EXTRACTED"
+INFERRED = "INFERRED"
+AMBIGUOUS = "AMBIGUOUS"
+
+# A name with more homes than this tells a reader nothing; it is dropped
+# rather than listed.
+MAX_CANDIDATES = 5
+
+# A bare name shorter than this is unique only by luck.
+MIN_BARE_LENGTH = 4
+
+# Names too generic to read as a reference to this repo's code even
+# when the repo happens to define one: language builtins and ambient
+# globals the resolver already treats as noise, plus a few method names
+# every codebase has.
+NOISE_NAMES = (
+    resolver_mod.AMBIENT_GLOBAL_NAMES
+    | resolver_mod.BUILTIN_METHOD_NAMES
+    | frozenset({"clone", "iter_mut"})
+)
+
+# Symbol kinds a ``Type.member`` head can name; a missing member is only
+# reported stale when the head is one of these, or a module.
+_TYPE_KINDS = frozenset(
+    {"class", "interface", "struct", "enum", "trait", "type", "protocol"}
+)
+
+# Members every type has through the language itself (``Foo.class``,
+# ``Foo.prototype``), never a missing member.
+_LANGUAGE_MEMBERS = frozenset(
+    {"class", "new", "prototype", "constructor", "this", "super", "self"}
+)
+
+# Index files that stand for their directory as a module, by extension.
+_PACKAGE_STEMS = {
+    "py": "/__init__",
+    "rs": "/mod",
+    "js": "/index",
+    "jsx": "/index",
+    "mjs": "/index",
+    "ts": "/index",
+    "tsx": "/index",
+}
+
+
+@dataclass(frozen=True)
+class DocLink:
+    """A resolved reference from a doc section to code.
+
+    Attributes:
+        section: Index of the section in the doc index's ``sections``.
+        line: 1-based line in the doc.
+        text: The reference as normalized by parsing.
+        kind: ``span``, ``fence``, ``link`` or ``prose``.
+        tier: ``EXTRACTED``, ``INFERRED`` or ``AMBIGUOUS``.
+        target: Symbol id or file path; empty when ``AMBIGUOUS``.
+        target_line: The line a ``path:LINE`` reference named, if any.
+        candidates: The symbol ids or paths an ``AMBIGUOUS`` reference
+            could mean.
+    """
+
+    section: int
+    line: int
+    text: str
+    kind: str
+    tier: str
+    target: str
+    target_line: int | None = None
+    candidates: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DocDangling:
+    """A doc reference that no longer points at anything.
+
+    Attributes:
+        section: Index of the section in ``sections``.
+        line: 1-based line in the doc.
+        text: The reference as normalized by parsing.
+        kind: ``span``, ``fence`` or ``link``.
+        why: ``missing`` (no such path), ``past-end`` (line past the
+            file's end), ``no-member`` (a known type or module lacks the
+            member) or ``moved`` (a link's line no longer holds the
+            symbol its text names).
+        now: For ``moved``, where that symbol is now (``path:line``).
+    """
+
+    section: int
+    line: int
+    text: str
+    kind: str
+    why: str
+    now: str | None = None
+
+
+@dataclass
+class DocIndex:
+    """Every indexed doc section with its resolved and dangling refs."""
+
+    sections: list[DocSection] = field(default_factory=list)
+    links: list[DocLink] = field(default_factory=list)
+    dangling: list[DocDangling] = field(default_factory=list)
+
+
+@dataclass
+class _Tables:
+    """Lookups over the mapped code, built once per resolution pass."""
+
+    root: Path
+    paths: set[str]
+    docs: set[str]
+    top_level: set[str]
+    by_qualname_suffix: dict[str, list[Symbol]]
+    by_name: dict[str, list[Symbol]]
+    by_path_suffix: dict[str, list[str]]
+    modules: dict[str, list[str]]
+    symbols_in: dict[str, list[Symbol]]
+    dir_exts: dict[str, set[str]]
+    line_counts: dict[str, int] = field(default_factory=dict)
+
+
+def resolve_docs(
+    root: Path,
+    sections: list[DocSection],
+    candidates: list[list[Candidate]],
+    files: list[FileMap],
+    doc_paths: list[str],
+) -> DocIndex:
+    """Resolve every section's candidates against the mapped code.
+
+    Args:
+        root: Repository root, for path existence and line counts.
+        sections: Every doc section, in a stable order.
+        candidates: Each section's candidates (same order).
+        files: Every mapped code file.
+        doc_paths: Every indexed doc, so doc-to-doc links are known.
+
+    Returns:
+        The sections with their links and dangling references.
+    """
+    tables = _tables(root, files, doc_paths)
+    index = DocIndex(sections=list(sections))
+    for at, (section, group) in enumerate(zip(sections, candidates)):
+        for cand in group:
+            _resolve_one(tables, at, section.path, cand, index)
+    return index
+
+
+def _tables(root: Path, files: list[FileMap], doc_paths: list[str]) -> _Tables:
+    by_suffix: dict[str, list[Symbol]] = {}
+    by_name: dict[str, list[Symbol]] = {}
+    symbols_in: dict[str, list[Symbol]] = {}
+    for fm in files:
+        symbols_in[fm.path] = fm.symbols
+        for sym in fm.symbols:
+            by_name.setdefault(sym.name, []).append(sym)
+            parts = sym.qualname.replace("::", ".").split(".")
+            for start in range(len(parts) - 1):
+                key = ".".join(parts[start:])
+                by_suffix.setdefault(key, []).append(sym)
+    paths = {fm.path for fm in files}
+    top_level = {p.split("/", 1)[0] for p in (*paths, *doc_paths) if "/" in p}
+    return _Tables(
+        root=root,
+        paths=paths,
+        docs=set(doc_paths),
+        top_level=top_level,
+        by_qualname_suffix=by_suffix,
+        by_name=by_name,
+        by_path_suffix=_suffixes(paths, lambda p: p),
+        modules=_suffixes(paths, _module_of),
+        symbols_in=symbols_in,
+        dir_exts=_dir_extensions((*paths, *doc_paths)),
+    )
+
+
+def _dir_extensions(paths: tuple[str, ...]) -> dict[str, set[str]]:
+    """Each directory → the extensions of the indexed files right in it."""
+    out: dict[str, set[str]] = {}
+    for path in paths:
+        parent, _, name = path.rpartition("/")
+        if "." in name:
+            out.setdefault(parent, set()).add(name.rsplit(".", 1)[1])
+    return out
+
+
+def _module_of(path: str) -> str:
+    """A file's module path: no extension; a package index is its dir."""
+    if "." not in path.rsplit("/", 1)[-1]:
+        return path
+    module, ext = path.rsplit(".", 1)
+    stem = _PACKAGE_STEMS.get(ext)
+    return module.removesuffix(stem) if stem else module
+
+
+def _suffixes(
+    paths: set[str], key: Callable[[str], str]
+) -> dict[str, list[str]]:
+    """Every ``/``-boundary suffix of ``key(path)`` → the paths."""
+    out: dict[str, list[str]] = {}
+    for path in sorted(paths):
+        parts = key(path).split("/")
+        for start in range(len(parts)):
+            out.setdefault("/".join(parts[start:]), []).append(path)
+    return out
+
+
+def _resolve_one(
+    t: _Tables, at: int, doc: str, cand: Candidate, index: DocIndex
+) -> None:
+    if cand.shape == "path":
+        _resolve_path(t, at, doc, cand, index)
+    elif cand.shape == "qualified":
+        _resolve_qualified(t, at, cand, index)
+    else:
+        _resolve_bare(t, at, cand, index)
+
+
+def _emit(
+    index: DocIndex,
+    at: int,
+    cand: Candidate,
+    targets: list[str],
+    tier: str,
+    target_line: int | None = None,
+) -> None:
+    """Record a link for one target, or an ambiguous one for several."""
+    unique = list(dict.fromkeys(targets))
+    if not unique or len(unique) > MAX_CANDIDATES:
+        return
+    ambiguous = len(unique) > 1
+    index.links.append(
+        DocLink(
+            section=at,
+            line=cand.line,
+            text=cand.text,
+            kind=cand.kind,
+            tier=AMBIGUOUS if ambiguous else tier,
+            target="" if ambiguous else unique[0],
+            target_line=target_line,
+            candidates=tuple(unique) if ambiguous else (),
+        )
+    )
+
+
+def _dangle(
+    index: DocIndex, at: int, cand: Candidate, why: str, now: str | None
+) -> None:
+    index.dangling.append(
+        DocDangling(at, cand.line, cand.text, cand.kind, why, now)
+    )
+
+
+# --- paths ----------------------------------------------------------------
+
+
+def _split_lines(text: str) -> tuple[str, int | None]:
+    """``"a.py:10-20"`` → ``("a.py", 10)``; no line → ``None``."""
+    m = re.fullmatch(r"(.*?):(\d+)(?:-\d+)?", text)
+    if m:
+        return m.group(1), int(m.group(2))
+    return text, None
+
+
+def _candidate_paths(doc: str, raw: str) -> list[str]:
+    """Where a path could point: beside the doc, then from the root."""
+    out = []
+    if "/" in doc:
+        out.append(
+            posixpath.normpath(posixpath.join(doc.rsplit("/", 1)[0], raw))
+        )
+    out.append(posixpath.normpath(raw.lstrip("/")))
+    return list(dict.fromkeys(out))
+
+
+def _resolve_path(
+    t: _Tables, at: int, doc: str, cand: Candidate, index: DocIndex
+) -> None:
+    raw, line = _split_lines(cand.text)
+    options = _candidate_paths(doc, raw)
+    hit = next((p for p in options if p in t.paths), None)
+    if hit is not None:
+        _emit_path(t, at, cand, [hit], line, index, EXTRACTED)
+        return
+    matches = _suffix_matches(t, raw)
+    if matches and (len(matches) == 1 or cand.kind != "prose"):
+        # A bare file name is a guess at which file it means.
+        tier = EXTRACTED if "/" in raw else INFERRED
+        _emit_path(t, at, cand, matches, line, index, tier)
+        return
+    if cand.kind in ("link", "span") and _is_missing(t, cand, options, raw):
+        _dangle(index, at, cand, "missing", None)
+
+
+def _suffix_matches(t: _Tables, raw: str) -> list[str]:
+    """Mapped files a partial path or bare file name ends with."""
+    if raw.startswith(".."):
+        return []
+    return t.by_path_suffix.get(posixpath.normpath(raw), [])
+
+
+def _is_missing(
+    t: _Tables, cand: Candidate, options: list[str], raw: str
+) -> bool:
+    """Whether an unresolved path names a file this repo should have.
+
+    A bare file name, a path into an ignored or generated dir, or
+    another project's layout is not this repo's rot. A link counts when
+    its directory exists (read beside its doc, then from the root);
+    inline code, read from the root only, counts when its directory
+    already holds an indexed file of the same kind, the shape a renamed
+    or deleted file leaves behind.
+    """
+    if "/" not in raw:
+        return False
+    if any(p in t.docs or (t.root / p).exists() for p in options):
+        return False
+    if cand.kind != "link":
+        return _has_sibling_kind(t, options[-1])
+    return any(
+        not p.startswith("..")
+        and p.split("/", 1)[0] in t.top_level
+        and (t.root / p).parent.is_dir()
+        for p in options
+    )
+
+
+def _has_sibling_kind(t: _Tables, path: str) -> bool:
+    parent, _, name = path.rpartition("/")
+    if "." not in name:
+        return False
+    return name.rsplit(".", 1)[1] in t.dir_exts.get(parent, set())
+
+
+def _emit_path(
+    t: _Tables,
+    at: int,
+    cand: Candidate,
+    paths: list[str],
+    line: int | None,
+    index: DocIndex,
+    tier: str,
+) -> None:
+    if len(paths) != 1 or line is None:
+        _emit(index, at, cand, paths, tier)
+        return
+    path = paths[0]
+    if line > _line_count(t, path):
+        _dangle(index, at, cand, "past-end", None)
+        return
+    moved = _moved(t, cand, path, line)
+    if moved is not None:
+        _dangle(index, at, cand, "moved", moved)
+        return
+    target = _innermost(t.symbols_in.get(path, []), line)
+    _emit(index, at, cand, [target.id if target else path], tier, line)
+
+
+def _line_count(t: _Tables, path: str) -> int:
+    if path not in t.line_counts:
+        try:
+            data = (t.root / path).read_bytes()
+        except OSError:
+            data = b""
+        t.line_counts[path] = data.count(b"\n") + (
+            1 if data and not data.endswith(b"\n") else 0
+        )
+    return t.line_counts[path]
+
+
+def _innermost(symbols: list[Symbol], line: int) -> Symbol | None:
+    """The smallest symbol whose line range holds ``line``."""
+    holding = [s for s in symbols if s.start_line <= line <= s.end_line]
+    return min(holding, key=lambda s: s.end_line - s.start_line, default=None)
+
+
+def _moved(t: _Tables, cand: Candidate, path: str, line: int) -> str | None:
+    """Where a link's named symbol is now, when its line no longer holds it."""
+    if cand.kind != "link" or not cand.label:
+        return None
+    name = _NAME_RE.fullmatch(cand.label.strip("` "))
+    if name is None:
+        return None
+    named = _symbols_named(t, name.group(1))
+    in_file = [s for s in named if s.path == path]
+    if len(in_file) != 1:
+        return None
+    sym = in_file[0]
+    if sym.start_line <= line <= sym.end_line:
+        return None
+    return f"{path}:{sym.start_line}"
+
+
+def _symbols_named(t: _Tables, text: str) -> list[Symbol]:
+    key = text.replace("::", ".")
+    if "." in key:
+        return t.by_qualname_suffix.get(key, [])
+    return t.by_name.get(key, [])
+
+
+# --- names ----------------------------------------------------------------
+
+
+def _resolve_qualified(
+    t: _Tables, at: int, cand: Candidate, index: DocIndex
+) -> None:
+    key = cand.text.replace("::", ".")
+    symbols = t.by_qualname_suffix.get(key, [])
+    if symbols:
+        _emit(index, at, cand, [s.id for s in symbols], EXTRACTED)
+        return
+    parts = key.split(".")
+    modules = t.modules.get("/".join(parts), [])
+    if modules:
+        _emit(index, at, cand, modules, EXTRACTED)
+        return
+    members = _module_members(t, parts)
+    if members:
+        _emit(index, at, cand, [s.id for s in members], EXTRACTED)
+        return
+    owner = _known_type(t, parts)
+    if owner is None:
+        return
+    line = next((f.line for f in owner.fields if f.name == parts[-1]), None)
+    if line is not None:
+        _emit(index, at, cand, [owner.id], EXTRACTED, line)
+    elif cand.kind == "span" and parts[-1] not in _LANGUAGE_MEMBERS:
+        _dangle(index, at, cand, "no-member", None)
+
+
+def _module_members(t: _Tables, parts: list[str]) -> list[Symbol]:
+    """``a.b.name`` as module ``a/b`` plus a symbol in it, longest first."""
+    for split in range(len(parts) - 1, 0, -1):
+        modules = t.modules.get("/".join(parts[:split]), [])
+        member = ".".join(parts[split:])
+        found = [
+            s
+            for path in modules
+            for s in t.symbols_in.get(path, [])
+            if s.qualname.replace("::", ".") == member
+        ]
+        if found:
+            return found
+    return []
+
+
+def _known_type(t: _Tables, parts: list[str]) -> Symbol | None:
+    """The one non-test in-repo type all but the last segment names.
+
+    Test fixtures define throwaway types (``A``, ``Box``) whose names
+    docs use for other things, so they never anchor a member check.
+    """
+    head = ".".join(parts[:-1])
+    types = [
+        s
+        for s in _symbols_named(t, head)
+        if s.kind in _TYPE_KINDS and not s.test
+    ]
+    return types[0] if len(types) == 1 else None
+
+
+def _resolve_bare(
+    t: _Tables, at: int, cand: Candidate, index: DocIndex
+) -> None:
+    name = cand.text
+    if len(name) < MIN_BARE_LENGTH or name in NOISE_NAMES:
+        return
+    symbols = t.by_name.get(name, [])
+    _emit(index, at, cand, [s.id for s in symbols], INFERRED)
