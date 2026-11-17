@@ -14,6 +14,7 @@ import json
 import sys
 from pathlib import Path
 
+from dekko.analysis import communities
 from dekko.classify import is_test_path
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS
@@ -71,6 +72,7 @@ def _symbols(index: MapIndex) -> dict[str, dict]:
 
 def _files(index: MapIndex) -> list[dict]:
     """Per-file payload (symbol ids only; details live in ``symbols``)."""
+    titles = communities.file_titles(index)
     out = []
     for path, language in index.languages_by_path.items():
         out.append(
@@ -81,6 +83,7 @@ def _files(index: MapIndex) -> list[dict]:
                 "error": index.errors_by_path.get(path) or "",
                 "test": is_test_path(path),
                 "symbols": [s.id for s in index.symbols_by_path.get(path, [])],
+                "community": titles[path][1] if path in titles else "",
             }
         )
     return out
@@ -245,6 +248,8 @@ _JS = """\
 (function () {
   var data = JSON.parse(document.getElementById("dekko-map").textContent);
   var syms = data.symbols;
+  var communityOf = {};
+  data.files.forEach(function (f) { communityOf[f.path] = f.community; });
   var tree = document.getElementById("tree");
   var pane = document.getElementById("pane");
   var search = document.getElementById("search");
@@ -310,9 +315,11 @@ _JS = """\
       return;
     }
     pane.appendChild(el("h2", "mono" + (s.test ? " test" : ""), s.signature));
+    var comm = communityOf[s.path];
     pane.appendChild(
       el("div", "meta",
-        s.kind + " · " + s.path + " · lines " + s.start + "-" + s.end)
+        s.kind + " · " + s.path + " · lines " + s.start + "-" + s.end +
+        (comm ? " · " + comm : ""))
     );
     if (s.doc) pane.appendChild(el("p", "doc", s.doc));
     var cb = relList("called by", s.callers);
@@ -338,7 +345,8 @@ _JS = """\
       d.appendChild(el("div", "muted", "parse error: " + f.error));
     }
     f.symbols.forEach(function (id) { d.appendChild(symItem(id)); });
-    d.setAttribute("data-hay", f.path.toLowerCase());
+    if (f.community) d.title = f.community;
+    d.setAttribute("data-hay", (f.path + " " + f.community).toLowerCase());
     return d;
   }
 

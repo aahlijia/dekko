@@ -704,3 +704,16 @@ def _target_file(index: MapIndex, target: str) -> str | None:
     match, candidates = query.resolve_target(index, target)
     files = {s.path for s in ([match] if match else candidates)}
     return files.pop() if len(files) == 1 else None
+
+
+def file_titles(index: MapIndex) -> dict[str, tuple[int, str]]:
+    """File → ``(id, "community N: label")`` for the listed test-free
+    communities; empty for a map without them."""
+    if not index.has_communities:
+        return {}
+    report = describe(index, tests=False)
+    return {
+        path: (c.id, f"community {c.id}: {c.label}")
+        for c in report.communities
+        for path in c.files
+    }
