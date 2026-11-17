@@ -29,3 +29,6 @@ assets/record-demo.sh
 
 # OS
 .DS_Store
+
+# Local session notes (session-memory plugin)
+.memories/
