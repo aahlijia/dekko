@@ -562,3 +562,11 @@ def test_discover_ignores_docs(tmp_path: Path) -> None:
     _touch(tmp_path / "app.py")
 
     assert discover(tmp_path) == (["app.py"], [])
+
+
+def test_discover_docs_skips_dekkos_own_map_pages(tmp_path: Path) -> None:
+    _touch(tmp_path / "README.md", "# Top\n")
+    _touch(tmp_path / ".dekko/MAP.md", "# Map\n")
+    _touch(tmp_path / ".dekko/map/src.md", "# Page\n")
+
+    assert discover_docs(tmp_path) == ["README.md"]

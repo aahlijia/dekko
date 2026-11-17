@@ -69,6 +69,10 @@ DEFAULT_MAX_FILE_SIZE = 1_000_000
 # requirements files and licenses, none of which have headings.
 DOC_EXTENSIONS = (".md", ".mdx", ".rst")
 
+# dekko's own output dir: its MAP.md pages are generated from the map, so
+# indexing them as docs would link the map to itself.
+_MAP_DIR = ".dekko"
+
 # Heuristic for vendored/minified files that don't follow a `.min.`
 # naming convention (e.g. a vendored `book.js`/`highlight.js` under a
 # docs theme directory). Sampled over just the first few dozen lines,
@@ -487,6 +491,8 @@ def discover_docs(
     docs: list[str] = []
     for rel in sorted(set(candidates)):
         if not rel.lower().endswith(DOC_EXTENSIONS):
+            continue
+        if rel.split("/", 1)[0] == _MAP_DIR:
             continue
         verdict = _path_verdict(
             root, rel, prefix, excludes, ignore_spec, follow_symlinks
