@@ -5,9 +5,9 @@ Guide
 Loading
 -------
 
-Call ``MapIndex.load`` after :func:`discover`.
+Call ``Registry.load`` after :func:`scan_tree`.
 
 Building
 --------
 
-``MapIndex.build`` rebuilds it.
+``Registry.build`` rebuilds it.

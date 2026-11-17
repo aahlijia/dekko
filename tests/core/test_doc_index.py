@@ -621,3 +621,11 @@ def test_a_missing_span_path_needs_a_sibling_of_its_kind(
     text = "# S\n`src/screens/App.tsx` and `src/pkg/App.tsx` and `src/x.py`\n"
 
     assert _resolve(tmp_path, text).dangling == []
+
+
+def test_a_link_written_inside_inline_code_is_code(tmp_path: Path) -> None:
+    text = "# S\nWrite it as `[Pack.build](src/gone.py#L8)` in docs.\n"
+
+    kinds = {c.kind for c in _cands("a.md", text)}
+
+    assert "link" not in kinds

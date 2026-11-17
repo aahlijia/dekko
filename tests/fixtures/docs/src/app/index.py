@@ -1,7 +1,7 @@
 """The loaded map."""
 
 
-class MapIndex:
+class Registry:
     """A loaded map."""
 
     def load(self):
@@ -11,6 +11,6 @@ class MapIndex:
         return 2
 
 
-class Config:
+class Settings:
     def save(self):
         return 3

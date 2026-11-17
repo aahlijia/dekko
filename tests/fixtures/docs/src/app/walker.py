@@ -1,7 +1,7 @@
 """Find files."""
 
 
-def discover(root):
+def scan_tree(root):
     """List files under root."""
     return [root]
 

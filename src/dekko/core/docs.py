@@ -261,9 +261,17 @@ def _md_line_candidates(line: str, num: int) -> list[Candidate]:
     if refdef:
         cands += _link_candidate(refdef.group(2), refdef.group(1), num)
         return cands
-    for m in _MD_LINK_RE.finditer(line):
+    code = [m.span() for m in _MD_SPAN_RE.finditer(line)]
+    links = [
+        m
+        for m in _MD_LINK_RE.finditer(line)
+        if not any(start <= m.start() < end for start, end in code)
+    ]
+    for m in links:
         cands += _link_candidate(m.group(2), m.group(1), num)
-    rest = _MD_LINK_RE.sub(" ", line)
+    rest = line
+    for m in reversed(links):
+        rest = rest[: m.start()] + " " + rest[m.end() :]
     for m in _MD_SPAN_RE.finditer(rest):
         cands += _span_candidates(m.group(2).strip(), num)
     rest = _MD_SPAN_RE.sub(" ", rest)

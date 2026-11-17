@@ -1,8 +1,8 @@
 # App
 
-Start with `MapIndex.load` and `discover`.
+Start with `Registry.load` and `scan_tree`.
 
 ## Layout
 
 The walker lives in [walker](src/app/walker.py#L4).
-Saving goes through `Config.save`.
+Saving goes through `Settings.save`.

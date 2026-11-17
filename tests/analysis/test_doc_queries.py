@@ -34,7 +34,7 @@ def test_docs_for_a_symbol(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     code, out, _ = _run(
-        capsys, "query", "docs", "MapIndex.load", "--root", str(repo)
+        capsys, "query", "docs", "Registry.load", "--root", str(repo)
     )
 
     assert code == 0
@@ -46,7 +46,7 @@ def test_docs_for_a_symbol(
 def test_docs_rank_extracted_before_inferred(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _, out, _ = _run(capsys, "query", "docs", "discover", "--root", str(repo))
+    _, out, _ = _run(capsys, "query", "docs", "scan_tree", "--root", str(repo))
 
     rows = [line for line in out.splitlines() if "  [" in line]
     assert rows[0].startswith("README.md:5  Layout  [EXTRACTED]")
@@ -60,7 +60,7 @@ def test_docs_list_an_ambiguous_mention(
         capsys,
         "query",
         "docs",
-        "src/app/other.py:Config.save",
+        "src/app/other.py:Settings.save",
         "--root",
         str(repo),
     )
@@ -84,11 +84,11 @@ def test_docs_for_a_file(
 
 def test_docs_json(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _, out, _ = _run(
-        capsys, "query", "docs", "MapIndex.load", "--root", str(repo), "--json"
+        capsys, "query", "docs", "Registry.load", "--root", str(repo), "--json"
     )
 
     doc = json.loads(out)
-    assert doc["target"] == "src/app/index.py::MapIndex.load"
+    assert doc["target"] == "src/app/index.py::Registry.load"
     first = doc["sections"][0]
     assert set(first) >= {"path", "line", "heading", "tier", "refs"}
 
@@ -97,13 +97,13 @@ def test_docs_without_tests_drops_test_docs(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, with_tests, _ = _run(
-        capsys, "query", "docs", "tests/test_walker.py", "--root", str(repo)
+        capsys, "query", "docs", "tests/helpers.py", "--root", str(repo)
     )
     code, _, err = _run(
         capsys,
         "query",
         "docs",
-        "tests/test_walker.py",
+        "tests/helpers.py",
         "--root",
         str(repo),
         "--no-tests",
@@ -145,7 +145,7 @@ def test_docs_on_a_map_without_a_doc_index(
     path.write_text(json.dumps(doc))
 
     code, _, err = _run(
-        capsys, "query", "docs", "discover", "--root", str(repo), "--no-regen"
+        capsys, "query", "docs", "scan_tree", "--root", str(repo), "--no-regen"
     )
 
     assert code == 1
@@ -159,7 +159,7 @@ def test_docs_budget_trims_rows(
         capsys,
         "query",
         "docs",
-        "discover",
+        "scan_tree",
         "--root",
         str(repo),
         "--limit",
@@ -180,10 +180,10 @@ def test_refs_of_a_doc(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert code == 0
     assert "App (README.md:1)" in out
     assert (
-        "MapIndex.load -> src/app/index.py::MapIndex.load  [EXTRACTED]" in out
+        "Registry.load -> src/app/index.py::Registry.load  [EXTRACTED]" in out
     )
-    assert "Config.save -> ?" in out
-    assert "src/app/index.py::Config.save" in out
+    assert "Settings.save -> ?" in out
+    assert "src/app/index.py::Settings.save" in out
 
 
 def test_refs_of_one_section_by_heading_or_slug(
@@ -196,8 +196,8 @@ def test_refs_of_one_section_by_heading_or_slug(
         capsys, "query", "refs", "guide.rst#Building", "--root", str(repo)
     )
 
-    assert "MapIndex.build" in by_text
-    assert "MapIndex.load" not in by_text
+    assert "Registry.build" in by_text
+    assert "Registry.load" not in by_text
     assert by_text == by_slug
 
 
@@ -230,7 +230,7 @@ def _plant(root: Path) -> None:
     (root / "docs" / "rot.md").write_text(
         "# Rot\n\n"
         "See [gone](../src/app/gone.py) and `src/app/walker.py:400`.\n"
-        "Call `MapIndex.lod` or [MapIndex.build](../src/app/index.py#L8).\n"
+        "Call `Registry.lod` or [Registry.build](../src/app/index.py#L8).\n"
     )
     assert cli.main(["map", str(root), "--quiet"]) == 0
 
@@ -256,7 +256,7 @@ def test_stale_reports_each_kind_of_rot(
     assert "docs/rot.md" in out
     assert "../src/app/gone.py  (missing)" in out
     assert "src/app/walker.py:400  (past end of file)" in out
-    assert "MapIndex.lod  (no such member)" in out
+    assert "Registry.lod  (no such member)" in out
     assert "../src/app/index.py:8  (moved: now src/app/index.py:10)" in out
     assert "CHANGELOG" not in out
 
@@ -329,7 +329,7 @@ def test_symbol_card_lists_doc_sections(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, out, _ = _run(
-        capsys, "query", "symbol", "MapIndex.load", "--root", str(repo)
+        capsys, "query", "symbol", "Registry.load", "--root", str(repo)
     )
 
     assert "  docs: README.md:1 App, docs/guide.rst:5 Loading" in out
@@ -342,7 +342,7 @@ def test_symbol_card_docs_in_json(
         capsys,
         "query",
         "symbol",
-        "MapIndex.load",
+        "Registry.load",
         "--root",
         str(repo),
         "--json",
@@ -370,12 +370,12 @@ def test_symbol_card_has_no_docs_line_without_docs(
 def test_symbol_card_caps_doc_sections(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    extra = "".join(f"\n## Part {i}\n\nUse `discover`.\n" for i in range(4))
+    extra = "".join(f"\n## Part {i}\n\nUse `scan_tree`.\n" for i in range(4))
     (repo / "docs" / "more.md").write_text("# More\n" + extra)
     assert cli.main(["map", str(repo), "--quiet"]) == 0
 
     _, out, _ = _run(
-        capsys, "query", "symbol", "discover", "--root", str(repo)
+        capsys, "query", "symbol", "scan_tree", "--root", str(repo)
     )
 
     (line,) = [x for x in out.splitlines() if x.startswith("  docs:")]
@@ -386,7 +386,7 @@ def test_symbol_card_caps_doc_sections(
 def test_context_pack_lists_doc_sections(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _, out, _ = _run(capsys, "context", "MapIndex.load", "--root", str(repo))
+    _, out, _ = _run(capsys, "context", "Registry.load", "--root", str(repo))
 
     assert "  docs: README.md:1 App, docs/guide.rst:5 Loading" in out
 
@@ -395,7 +395,7 @@ def test_context_pack_docs_in_json(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, out, _ = _run(
-        capsys, "context", "MapIndex.load", "--root", str(repo), "--json"
+        capsys, "context", "Registry.load", "--root", str(repo), "--json"
     )
 
     assert json.loads(out)["docs"] == [
@@ -409,11 +409,11 @@ def test_a_tight_budget_drops_docs_before_neighbors(repo: Path) -> None:
     from dekko.render.mapfile import load_map
 
     index = load_map(repo)
-    (sym,) = index.symbols_by_qualname["MapIndex.load"]
+    (sym,) = index.symbols_by_qualname["Registry.load"]
     pack = contextpack.build_pack(index, sym, hops=1, all_imports=True)
     pack.entries = [
         contextpack.PackEntry(
-            index.symbols_by_qualname["discover"][0], 1, "caller"
+            index.symbols_by_qualname["scan_tree"][0], 1, "caller"
         )
     ]
     docs, pack.docs = pack.docs, []
@@ -430,7 +430,7 @@ def test_workset_pack_lists_doc_sections(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, out, _ = _run(
-        capsys, "workset", "--symbol", "MapIndex.load", "--root", str(repo)
+        capsys, "workset", "--symbol", "Registry.load", "--root", str(repo)
     )
 
     assert "docs: README.md:1 App" in out
@@ -440,6 +440,6 @@ def test_mcp_query_symbol_carries_docs(repo: Path) -> None:
     from dekko.integrations import server
 
     ctx = server.Context(default_root=repo, no_regen=False)
-    text = server._relation_tool(ctx, "symbol", {"symbol": "MapIndex.load"})
+    text = server._relation_tool(ctx, "symbol", {"symbol": "Registry.load"})
 
     assert "docs: README.md:1 App" in text

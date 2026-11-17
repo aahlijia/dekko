@@ -1,3 +1,3 @@
 # Tests
 
-Run `test_discover`.
+Run `check_scan_tree`.

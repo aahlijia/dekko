@@ -25,7 +25,7 @@ dekko query catches ConfigError --lang java  # ...scoped to one language, cuts c
 dekko query env DATABASE_URL         # every statically-known read site for this env var
 dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
 dekko query cohesion src/app.py      # intra-file connected-components (weak signal, not clustering)
-dekko query docs MapIndex.load       # the doc sections that name a symbol (or a file)
+dekko query docs MapIndex            # the doc sections that name a symbol (or a file)
 dekko query refs README.md#install   # the code a doc, or one of its sections, names
 dekko docs --stale                   # doc references that no longer point at code (exit 0/1)
 dekko context run_map --budget 1500  # minimal context pack for an edit
@@ -1939,7 +1939,7 @@ or "load" in a sentence never turns into a link. Docs follow the same
 dekko's own `.dekko/` pages are skipped.
 
 ```sh
-dekko query docs MapIndex.load       # which sections name this symbol
+dekko query docs MapIndex            # which sections name this symbol
 dekko query docs src/app/walker.py   # ...this file, or anything defined in it
 dekko query refs README.md           # every code reference in a doc, by section
 dekko query refs README.md#install   # ...one section, by heading text or GitHub anchor
@@ -1950,7 +1950,7 @@ Every match has a tier:
 
 | Tier | What matched |
 |---|---|
-| `EXTRACTED` | A path that exists. A `path:LINE` reference (it points at the innermost symbol holding that line). A qualified name (`MapIndex.load`, `tsl::Status`) or dotted module path (`dekko.analysis.trace`) with exactly one home. A field of a known type. |
+| `EXTRACTED` | A path that exists. A `path:LINE` reference (it points at the innermost symbol holding that line). A qualified name (`MapIndex.without_tests`, `tsl::Status`) or dotted module path (`dekko.analysis.trace`) with exactly one home. A field of a known type. |
 | `INFERRED` | A bare name in inline code (`discover`) with one home, at least 4 characters long and not a common builtin. A file name with no folder (`walker.py`) that only one file has. |
 | `AMBIGUOUS` | 2 to 5 possible homes. dekko lists them and picks none. A name with more than 5 is dropped as noise. |
 
@@ -1975,9 +1975,9 @@ docs.
 - `past end of file`: a `path:LINE` reference past the file's last
   line.
 - `no such member`: inline code names a member that an in-repo type
-  doesn't have (`MapIndex.lod`).
+  doesn't have (`Widget.lod` when `Widget` has no `lod`).
 - `moved: now path:LINE`: a line link whose text names a symbol
-  (`[MapIndex.build](src/index.py#L8)`) that isn't at that line any
+  (`[Widget.build](src/widget.py#L8)`) that isn't at that line any
   more.
 
 Paths in prose or code blocks and bare names never count as stale. An
