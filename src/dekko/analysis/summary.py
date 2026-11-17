@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from dekko.core import grammars
-from dekko.analysis import ambiguous, stats
+from dekko.analysis import ambiguous, communities, stats
 from dekko.render.mapfile import (
     MapIndex,
     format_build_scripts,
@@ -28,6 +28,7 @@ from dekko.textutil import dir_of, fit_to_budget, oneline, signature
 _INDEX_STEMS = ("__init__", "mod", "lib", "index")
 _TOP = 5
 _MAX_DIRS = 12
+_MAX_COMMUNITIES = 8
 _MAX_ENTRYPOINTS = 8
 _MAX_HOTSPOTS = 10
 # 2.3: cap on the parse-errors list so an uncapped grammar-gap doesn't
@@ -167,7 +168,25 @@ def compute(index: MapIndex) -> dict:
         "unsupported": (index.provenance or {}).get("unsupported"),
         "build_scripts": (index.provenance or {}).get("build_scripts"),
         "too_large": (index.provenance or {}).get("too_large"),
+        **_communities(index),
     }
+
+
+def _communities(index: MapIndex) -> dict:
+    """The largest communities, or nothing for a map without them."""
+    if not index.has_communities:
+        return {}
+    report = communities.describe(index, tests=False)
+    rows = [
+        {
+            "id": c.id,
+            "label": c.label,
+            "files": len(c.files),
+            "cohesion": c.cohesion,
+        }
+        for c in report.communities[:_MAX_COMMUNITIES]
+    ]
+    return {"communities": rows}
 
 
 def _git_churn(root: Path, window_days: int) -> Counter[str]:
@@ -331,6 +350,13 @@ def render_text(index: MapIndex) -> str:
             f"{d['internal_edges']}+{d['cross_edges']}  "
             f"{d['path']}/{suffix}"
         )
+    if doc.get("communities"):
+        lines.append("communities (largest first):")
+        lines += [
+            f"  #{c['id']} {c['label']}  {c['files']} files, "
+            f"cohesion {c['cohesion']:.2f}"
+            for c in doc["communities"]
+        ]
     _append_ranked(lines, "load-bearing (fan-in):", doc["top_fan_in"])
     _append_ranked(lines, "orchestrators (fan-out):", doc["top_fan_out"])
     if doc["largest_files"]:
