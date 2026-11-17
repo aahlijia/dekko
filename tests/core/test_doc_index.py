@@ -629,3 +629,45 @@ def test_a_link_written_inside_inline_code_is_code(tmp_path: Path) -> None:
     kinds = {c.kind for c in _cands("a.md", text)}
 
     assert "link" not in kinds
+
+
+def _with_fixture(tmp_path: Path) -> list[FileMap]:
+    files = _repo(tmp_path)
+    fixture = tmp_path / "tests/fixtures/lib.rs"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text("x\n" * 9)
+    point = _sym("tests/fixtures/lib.rs", "Point.new", 1, 3, "method")
+    point.test = True
+    files.append(FileMap("tests/fixtures/lib.rs", "rust", symbols=[point]))
+    return files
+
+
+def test_names_in_a_non_test_doc_skip_test_code(tmp_path: Path) -> None:
+    files = _with_fixture(tmp_path)
+    text = "# S\n`Point.new` and `new_point_thing` and `lib.rs`\n"
+    sections, cands = parse_doc("CHANGELOG.md", text)
+
+    index = resolve_docs(tmp_path, sections, cands, files, ["CHANGELOG.md"])
+
+    assert index.links == []
+
+
+def test_exact_paths_into_tests_still_resolve(tmp_path: Path) -> None:
+    files = _with_fixture(tmp_path)
+    sections, cands = parse_doc("README.md", "# S\n`tests/fixtures/lib.rs`\n")
+
+    index = resolve_docs(tmp_path, sections, cands, files, ["README.md"])
+
+    assert [x.target for x in index.links] == ["tests/fixtures/lib.rs"]
+
+
+def test_a_doc_under_tests_can_name_test_code(tmp_path: Path) -> None:
+    files = _with_fixture(tmp_path)
+    doc = "tests/fixtures/README.md"
+    sections, cands = parse_doc(doc, "# S\n`Point.new`\n")
+
+    index = resolve_docs(tmp_path, sections, cands, files, [doc])
+
+    assert [x.target for x in index.links] == [
+        "tests/fixtures/lib.rs::Point.new"
+    ]

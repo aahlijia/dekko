@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dekko.classify import is_test_path
 from dekko.core import languages, tier2
 from dekko.core import resolver as resolver_mod
 from dekko.core.model import TYPE_KINDS, FileMap, Symbol
@@ -717,12 +718,30 @@ def _suffixes(
 def _resolve_one(
     t: _Tables, at: int, doc: str, cand: Candidate, index: DocIndex
 ) -> None:
+    # Test fixtures define throwaway names (``Point.new``, ``lib.rs``)
+    # that docs elsewhere use for other projects' code, so only a doc
+    # that lives with the tests may name test code; exact paths still
+    # resolve from anywhere.
+    scope = _Scope(allow_tests=is_test_path(doc))
     if cand.shape == "path":
-        _resolve_path(t, at, doc, cand, index)
+        _resolve_path(t, at, doc, cand, index, scope)
     elif cand.shape == "qualified":
-        _resolve_qualified(t, at, cand, index)
+        _resolve_qualified(t, at, cand, index, scope)
     else:
-        _resolve_bare(t, at, cand, index)
+        _resolve_bare(t, at, cand, index, scope)
+
+
+@dataclass(frozen=True)
+class _Scope:
+    """Which matches a doc may make by name."""
+
+    allow_tests: bool
+
+    def symbols(self, found: list[Symbol]) -> list[Symbol]:
+        return [s for s in found if self.allow_tests or not s.test]
+
+    def paths(self, found: list[str]) -> list[str]:
+        return [p for p in found if self.allow_tests or not is_test_path(p)]
 
 
 def _emit(
@@ -783,7 +802,12 @@ def _candidate_paths(doc: str, raw: str) -> list[str]:
 
 
 def _resolve_path(
-    t: _Tables, at: int, doc: str, cand: Candidate, index: DocIndex
+    t: _Tables,
+    at: int,
+    doc: str,
+    cand: Candidate,
+    index: DocIndex,
+    scope: _Scope,
 ) -> None:
     raw, line = _split_lines(cand.text)
     options = _candidate_paths(doc, raw)
@@ -791,7 +815,7 @@ def _resolve_path(
     if hit is not None:
         _emit_path(t, at, cand, [hit], line, index, EXTRACTED)
         return
-    matches = _suffix_matches(t, raw)
+    matches = scope.paths(_suffix_matches(t, raw))
     if matches and (len(matches) == 1 or cand.kind != "prose"):
         # A bare file name is a guess at which file it means.
         tier = EXTRACTED if "/" in raw else INFERRED
@@ -911,19 +935,19 @@ def _symbols_named(t: _Tables, text: str) -> list[Symbol]:
 
 
 def _resolve_qualified(
-    t: _Tables, at: int, cand: Candidate, index: DocIndex
+    t: _Tables, at: int, cand: Candidate, index: DocIndex, scope: _Scope
 ) -> None:
     key = cand.text.replace("::", ".")
-    symbols = t.by_qualname_suffix.get(key, [])
+    symbols = scope.symbols(t.by_qualname_suffix.get(key, []))
     if symbols:
         _emit(index, at, cand, [s.id for s in symbols], EXTRACTED)
         return
     parts = key.split(".")
-    modules = t.modules.get("/".join(parts), [])
+    modules = scope.paths(t.modules.get("/".join(parts), []))
     if modules:
         _emit(index, at, cand, modules, EXTRACTED)
         return
-    members = _module_members(t, parts)
+    members = scope.symbols(_module_members(t, parts))
     if members:
         _emit(index, at, cand, [s.id for s in members], EXTRACTED)
         return
@@ -969,10 +993,10 @@ def _known_type(t: _Tables, parts: list[str]) -> Symbol | None:
 
 
 def _resolve_bare(
-    t: _Tables, at: int, cand: Candidate, index: DocIndex
+    t: _Tables, at: int, cand: Candidate, index: DocIndex, scope: _Scope
 ) -> None:
     name = cand.text
     if len(name) < MIN_BARE_LENGTH or name in NOISE_NAMES:
         return
-    symbols = t.by_name.get(name, [])
+    symbols = scope.symbols(t.by_name.get(name, []))
     _emit(index, at, cand, [s.id for s in symbols], INFERRED)
