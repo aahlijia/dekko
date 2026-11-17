@@ -559,7 +559,7 @@ def test_a_file_name_alone_is_inferred(tmp_path: Path) -> None:
 
     assert _links(index) == {
         ("walker.py", "INFERRED", "src/pkg/walker.py"),
-        ("pkg/walker.py", "EXTRACTED", "src/pkg/walker.py"),
+        ("pkg/walker.py", "INFERRED", "src/pkg/walker.py"),
     }
 
 
@@ -671,3 +671,104 @@ def test_a_doc_under_tests_can_name_test_code(tmp_path: Path) -> None:
     assert [x.target for x in index.links] == [
         "tests/fixtures/lib.rs::Point.new"
     ]
+
+
+def _rust_repo(tmp_path: Path) -> list[FileMap]:
+    files = _repo(tmp_path)
+    for rel in (
+        "crates/panel/src/project_panel.rs",
+        "crates/ctx/src/types.rs",
+    ):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n" * 30)
+
+    def rust(path: str, qualname: str, kind: str = "function") -> Symbol:
+        sym = _sym(path, qualname, 1, 9, kind)
+        sym.language = "rust"
+        return sym
+
+    files.append(
+        FileMap(
+            "crates/panel/src/project_panel.rs",
+            "rust",
+            symbols=[rust("crates/panel/src/project_panel.rs", "git_status")],
+        )
+    )
+    files.append(
+        FileMap(
+            "crates/ctx/src/types.rs",
+            "rust",
+            symbols=[
+                rust("crates/ctx/src/types.rs", "Prompt", "struct"),
+                rust("crates/ctx/src/types.rs", "Kind", "enum"),
+            ],
+        )
+    )
+    return files
+
+
+def _resolve_in(files: list[FileMap], tmp_path: Path, text: str) -> DocIndex:
+    sections, cands = parse_doc("README.md", text)
+    return resolve_docs(tmp_path, sections, cands, files, ["README.md"])
+
+
+def test_a_language_tagged_block_only_names_that_language(
+    tmp_path: Path,
+) -> None:
+    files = _rust_repo(tmp_path)
+    text = (
+        "# S\n```python\nreturn types.Prompt()\n```\n"
+        "```rust\ntypes::Prompt\n```\n"
+    )
+
+    index = _resolve_in(files, tmp_path, text)
+
+    assert [(x.text, x.target) for x in index.links] == [
+        ("types::Prompt", "crates/ctx/src/types.rs::Prompt")
+    ]
+
+
+def test_a_partial_path_is_inferred(tmp_path: Path) -> None:
+    index = _resolve(
+        tmp_path, "# S\n`pkg/walker.py` and `src/pkg/walker.py`\n"
+    )
+
+    assert _links(index) == {
+        ("pkg/walker.py", "INFERRED", "src/pkg/walker.py"),
+        ("src/pkg/walker.py", "EXTRACTED", "src/pkg/walker.py"),
+    }
+
+
+def test_a_dotted_name_into_a_rust_module_is_inferred(tmp_path: Path) -> None:
+    files = _rust_repo(tmp_path)
+    text = "# S\n`project_panel.git_status` and `project_panel::git_status`\n"
+
+    index = _resolve_in(files, tmp_path, text)
+
+    assert {(x.text, x.tier) for x in index.links} == {
+        ("project_panel.git_status", "INFERRED"),
+        ("project_panel::git_status", "EXTRACTED"),
+    }
+
+
+def test_relative_and_dot_dir_span_paths_do_not_dangle(tmp_path: Path) -> None:
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "a.md").write_text("# A\n")
+    files = _repo(tmp_path)
+    text = "# S\n`./src/pkg/gone.py` and `.github/copilot-instructions.md`\n"
+    sections, cands = parse_doc("docs/guide.md", text)
+
+    index = resolve_docs(
+        tmp_path, sections, cands, files, ["docs/guide.md", ".github/a.md"]
+    )
+
+    assert index.dangling == []
+
+
+def test_an_enum_variant_is_not_a_missing_member(tmp_path: Path) -> None:
+    files = _rust_repo(tmp_path)
+
+    index = _resolve_in(files, tmp_path, "# S\n`Kind::Global`\n")
+
+    assert index.dangling == []

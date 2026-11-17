@@ -56,6 +56,9 @@ class Candidate:
         shape: ``path``, ``qualified`` (dotted or ``::`` name) or
             ``bare`` (one identifier).
         label: A link's text, empty for everything else.
+        lang: The language a code block was tagged with, as dekko
+            names it, so its names only match that language's code;
+            empty when untagged or not in a block.
     """
 
     line: int
@@ -63,6 +66,7 @@ class Candidate:
     kind: str
     shape: str
     label: str = field(default="", compare=False)
+    lang: str = field(default="", compare=False)
 
 
 # Shell sessions name commands and files, not the repo's symbols, so a
@@ -83,6 +87,27 @@ _TAG_ALIASES = frozenset(
         "ex", "exs", "hs", "ml", "pl", "scala", "lua", "zig", "swift",
     }
 )  # fmt: skip
+
+_TAG_LANGUAGE = {
+    "py": "python", "python3": "python", "pycon": "python",
+    "js": "javascript", "jsx": "javascript", "mjs": "javascript",
+    "cjs": "javascript", "ts": "typescript", "rs": "rust",
+    "golang": "go", "c++": "cpp", "cc": "cpp", "cxx": "cpp",
+    "hpp": "cpp", "h": "c", "kt": "kotlin", "kts": "kotlin",
+    "rb": "ruby", "cs": "csharp", "ex": "elixir", "exs": "elixir",
+    "hs": "haskell", "ml": "ocaml", "pl": "perl",
+}  # fmt: skip
+
+# Languages whose names cross over: a TS block can name JS or TSX code,
+# a C++ block C code.
+_LANGUAGE_FAMILY = {
+    "typescript": "js", "tsx": "js", "javascript": "js",
+    "cpp": "c", "c": "c",
+}  # fmt: skip
+
+# Families that write a module member as ``module::name``; the rest use
+# ``module.name``.
+_COLON_FAMILIES = frozenset({"rust", "c"})
 
 _NAME_TAGS = (
     frozenset(languages.SPEC_BY_NAME)
@@ -396,11 +421,16 @@ def _fence_candidates(line: str, num: int, tag: str) -> list[Candidate]:
     if tag and tag not in _NAME_TAGS:
         return cands
     text = _PATH_RE.sub(_blank_paths, text)
+    lang = _TAG_LANGUAGE.get(tag, tag)
     cands += [
-        Candidate(num, m.group(0), "fence", "qualified")
+        Candidate(num, m.group(0), "fence", "qualified", lang=lang)
         for m in _QUALIFIED_RE.finditer(text)
     ]
     return cands
+
+
+def _family(language: str) -> str:
+    return _LANGUAGE_FAMILY.get(language, language)
 
 
 def _span_candidates(content: str, num: int) -> list[Candidate]:
@@ -597,6 +627,7 @@ class _Tables:
     modules: dict[str, list[str]]
     symbols_in: dict[str, list[Symbol]]
     dir_exts: dict[str, set[str]]
+    languages: dict[str, str]
     line_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -681,6 +712,7 @@ def _tables(root: Path, files: list[FileMap], doc_paths: list[str]) -> _Tables:
         modules=_suffixes(paths, _module_of),
         symbols_in=symbols_in,
         dir_exts=_dir_extensions((*paths, *doc_paths)),
+        languages={fm.path: fm.language for fm in files},
     )
 
 
@@ -722,7 +754,7 @@ def _resolve_one(
     # that docs elsewhere use for other projects' code, so only a doc
     # that lives with the tests may name test code; exact paths still
     # resolve from anywhere.
-    scope = _Scope(allow_tests=is_test_path(doc))
+    scope = _Scope(is_test_path(doc), _family(cand.lang), t.languages)
     if cand.shape == "path":
         _resolve_path(t, at, doc, cand, index, scope)
     elif cand.shape == "qualified":
@@ -733,15 +765,38 @@ def _resolve_one(
 
 @dataclass(frozen=True)
 class _Scope:
-    """Which matches a doc may make by name."""
+    """Which matches a reference may make by name.
+
+    Attributes:
+        allow_tests: Whether test code counts (only for docs that live
+            with the tests).
+        family: The language family a tagged code block names, or empty
+            for any language.
+        languages: Mapped path → language, to judge module matches.
+    """
 
     allow_tests: bool
+    family: str
+    languages: dict[str, str]
 
     def symbols(self, found: list[Symbol]) -> list[Symbol]:
-        return [s for s in found if self.allow_tests or not s.test]
+        return [
+            s
+            for s in found
+            if (self.allow_tests or not s.test)
+            and (not self.family or _family(s.language) == self.family)
+        ]
 
     def paths(self, found: list[str]) -> list[str]:
-        return [p for p in found if self.allow_tests or not is_test_path(p)]
+        return [
+            p
+            for p in found
+            if (self.allow_tests or not is_test_path(p))
+            and (
+                not self.family
+                or _family(self.languages.get(p, "")) == self.family
+            )
+        ]
 
 
 def _emit(
@@ -817,9 +872,9 @@ def _resolve_path(
         return
     matches = scope.paths(_suffix_matches(t, raw))
     if matches and (len(matches) == 1 or cand.kind != "prose"):
-        # A bare file name is a guess at which file it means.
-        tier = EXTRACTED if "/" in raw else INFERRED
-        _emit_path(t, at, cand, matches, line, index, tier)
+        # A partial path or bare file name is a guess at which file it
+        # means; only a path that exists as written is certain.
+        _emit_path(t, at, cand, matches, line, index, INFERRED)
         return
     if cand.kind in ("link", "span") and _is_missing(t, cand, options, raw):
         _dangle(index, at, cand, "missing", None)
@@ -849,6 +904,11 @@ def _is_missing(
     if any(p in t.docs or (t.root / p).exists() for p in options):
         return False
     if cand.kind != "link":
+        # ``./x`` names a base the doc doesn't give, and dot-dirs
+        # (``.github/``, ``.vscode/``) are conventions docs cite for
+        # the reader's own projects.
+        if raw.startswith("."):
+            return False
         return _has_sibling_kind(t, options[-1])
     return any(
         not p.startswith("..")
@@ -945,20 +1005,36 @@ def _resolve_qualified(
     parts = key.split(".")
     modules = scope.paths(t.modules.get("/".join(parts), []))
     if modules:
-        _emit(index, at, cand, modules, EXTRACTED)
+        langs = [t.languages.get(p, "") for p in modules]
+        _emit(index, at, cand, modules, _module_tier(cand.text, langs))
         return
     members = scope.symbols(_module_members(t, parts))
     if members:
-        _emit(index, at, cand, [s.id for s in members], EXTRACTED)
+        langs = [s.language for s in members]
+        tier = _module_tier(cand.text, langs)
+        _emit(index, at, cand, [s.id for s in members], tier)
         return
     owner = _known_type(t, parts)
-    if owner is None:
+    if owner is None or owner.kind == "enum":
+        # Enum variants are not in the map, so ``Kind::Variant`` can't
+        # be judged missing.
         return
     line = next((f.line for f in owner.fields if f.name == parts[-1]), None)
     if line is not None:
         _emit(index, at, cand, [owner.id], EXTRACTED, line)
     elif cand.kind == "span" and parts[-1] not in _LANGUAGE_MEMBERS:
         _dangle(index, at, cand, "no-member", None)
+
+
+def _module_tier(text: str, languages: list[str]) -> str:
+    """EXTRACTED when the reference spells the module path the way the
+    target's language does (``a::b`` in Rust, ``a.b`` in Python);
+    a settings key like ``panel.option`` landing on Rust is a guess."""
+    colon = "::" in text
+    fits = all(
+        (_family(lang) in _COLON_FAMILIES) == colon for lang in languages
+    )
+    return EXTRACTED if fits else INFERRED
 
 
 def _module_members(t: _Tables, parts: list[str]) -> list[Symbol]:
