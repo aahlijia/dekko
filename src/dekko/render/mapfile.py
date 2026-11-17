@@ -618,6 +618,7 @@ def compute_provenance(
     graph: CallGraph,
     skipped: list[tuple[str, str]] | None = None,
     follow_symlinks: bool = False,
+    doc_paths: list[str] | tuple[str, ...] = (),
 ) -> dict:
     """Build the provenance stamp for a freshly generated map.
 
@@ -642,6 +643,9 @@ def compute_provenance(
         follow_symlinks: Whether this run indexed symlinked files as-is
             instead of skipping them — recorded so a later freshness
             check can detect the flag changing between runs.
+        doc_paths: Every doc the map indexed. Hashed apart from
+            ``files`` so nothing that counts mapped code sees docs, but
+            checked the same way, so editing a doc stales the map.
 
     Returns:
         JSON-serializable provenance dict.
@@ -660,6 +664,8 @@ def compute_provenance(
         "follow_symlinks": follow_symlinks,
         "files": {rel: _file_hash(root / rel) for rel in paths},
         "stat": {rel: _stat_sig(root / rel) for rel in paths},
+        "doc_files": {rel: _file_hash(root / rel) for rel in doc_paths},
+        "doc_stat": {rel: _stat_sig(root / rel) for rel in doc_paths},
         "unsupported": _unsupported_summary(skipped),
         "build_scripts": _build_script_summary(skipped),
         "vendored_excluded": _vendored_summary(skipped),
@@ -2315,39 +2321,40 @@ def _freshness_from_provenance(root: Path, prov: dict) -> Freshness:
 
 
 def _content_freshness(root: Path, prov: dict) -> Freshness:
-    """The source-content leg: were files added, removed, or changed?"""
-    recorded: dict[str, str] = prov.get("files", {})
+    """The source-content leg: were files added, removed, or changed?
+
+    Docs are compared the same way as code, from their own provenance
+    keys; a provenance written before docs were indexed records none,
+    so every doc on disk reads as added and the map rebuilds once.
+    """
+    options = {
+        "subpath": prov.get("subpath"),
+        "excludes": tuple(prov.get("excludes", [])),
+        "max_file_size": prov.get(
+            "max_file_size", walker.DEFAULT_MAX_FILE_SIZE
+        ),
+        "follow_symlinks": prov.get("follow_symlinks", False),
+    }
     recorded_stat: dict[str, list[int]] = prov.get("stat", {})
     seen_stat: dict[str, list[int]] = {}
     current_paths, _ = walker.discover(
         root,
-        subpath=prov.get("subpath"),
-        excludes=tuple(prov.get("excludes", [])),
-        max_file_size=prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE),
-        follow_symlinks=prov.get("follow_symlinks", False),
+        **options,
         known_stat=recorded_stat,
         stat_out=seen_stat,
     )
-    # Fast path: a file whose (mtime, size) signature is unchanged is
-    # assumed unchanged and not re-hashed (discovery skipped its
-    # content gates on the same signature). Files that are new, lack a
-    # recorded signature, or whose stat moved fall back to hashing —
-    # the content hash remains the decider for those.
-    current: dict[str, str] = {}
-    for rel in current_paths:
-        sig = recorded_stat.get(rel)
-        if sig and sig == seen_stat.get(rel):
-            current[rel] = recorded.get(rel, "")
-        else:
-            current[rel] = _file_hash(root / rel)
-
-    added = sorted(set(current) - set(recorded))
-    removed = sorted(set(recorded) - set(current))
-    changed = sorted(
-        rel
-        for rel in set(recorded) & set(current)
-        if recorded[rel] != current[rel]
+    code = _compare_hashes(
+        root, current_paths, prov.get("files", {}), recorded_stat, seen_stat
     )
+    doc_paths = walker.discover_docs(root, **options)
+    docs = _compare_hashes(
+        root,
+        doc_paths,
+        prov.get("doc_files", {}),
+        prov.get("doc_stat", {}),
+        {rel: _stat_sig(root / rel) for rel in doc_paths},
+    )
+    added, removed, changed = (sorted(a + b) for a, b in zip(code, docs))
     is_stale = bool(added or removed or changed)
     return Freshness(
         fresh=not is_stale,
@@ -2356,6 +2363,37 @@ def _content_freshness(root: Path, prov: dict) -> Freshness:
         changed=changed,
         reason="content" if is_stale else None,
     )
+
+
+def _compare_hashes(
+    root: Path,
+    current_paths: list[str],
+    recorded: dict[str, str],
+    recorded_stat: dict[str, list[int]],
+    seen_stat: dict[str, list[int]],
+) -> tuple[list[str], list[str], list[str]]:
+    """``(added, removed, changed)`` of the tree against a recording.
+
+    Fast path: a file whose (mtime, size) signature is unchanged is
+    assumed unchanged and not re-hashed. Files that are new, lack a
+    recorded signature, or whose stat moved fall back to hashing — the
+    content hash remains the decider for those.
+    """
+    current: dict[str, str] = {}
+    for rel in current_paths:
+        sig = recorded_stat.get(rel)
+        if sig and sig == seen_stat.get(rel):
+            current[rel] = recorded.get(rel, "")
+        else:
+            current[rel] = _file_hash(root / rel)
+    added = sorted(set(current) - set(recorded))
+    removed = sorted(set(recorded) - set(current))
+    changed = sorted(
+        rel
+        for rel in set(recorded) & set(current)
+        if recorded[rel] != current[rel]
+    )
+    return added, removed, changed
 
 
 def content_changes(root: Path, freshness: Freshness) -> dict[str, str | None]:
