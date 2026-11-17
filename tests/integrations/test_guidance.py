@@ -24,7 +24,7 @@ else:
     import tomli as tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = REPO_ROOT / "integrations" / "claude"
+BUNDLE = REPO_ROOT / "plugin"
 SKILL_ROOTS = (BUNDLE / "skills", BUNDLE / "skills-codex")
 CODEX_MANIFEST = BUNDLE / ".codex-plugin" / "plugin.json"
 CURSOR_MANIFEST = BUNDLE / ".cursor-plugin" / "plugin.json"
@@ -388,7 +388,7 @@ def test_wheel_ships_the_plugin_bundle(part: str) -> None:
     include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"][
         "force-include"
     ]
-    source = f"integrations/claude/{part}"
+    source = f"plugin/{part}"
 
     assert include.get(source) == f"dekko/_plugin/{part}"
     assert (REPO_ROOT / source).exists()

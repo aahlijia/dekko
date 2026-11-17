@@ -10,7 +10,7 @@ import pytest
 from dekko.integrations import cursor
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SOURCE_BUNDLE = REPO_ROOT / "integrations" / "claude"
+SOURCE_BUNDLE = REPO_ROOT / "plugin"
 FAKE_EXE = "/opt/bin/dekko"
 
 

@@ -26,19 +26,19 @@ ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 PLUGIN_MANIFESTS: tuple[tuple[Path, tuple[str, ...]], ...] = (
     (
-        ROOT / "integrations/claude/.claude-plugin/plugin.json",
+        ROOT / "plugin/.claude-plugin/plugin.json",
         ("version",),
     ),
     (
-        ROOT / "integrations/claude/.claude-plugin/marketplace.json",
+        ROOT / "plugin/.claude-plugin/marketplace.json",
         ("metadata", "version"),
     ),
     (
-        ROOT / "integrations/claude/.codex-plugin/plugin.json",
+        ROOT / "plugin/.codex-plugin/plugin.json",
         ("version",),
     ),
     (
-        ROOT / "integrations/claude/.cursor-plugin/plugin.json",
+        ROOT / "plugin/.cursor-plugin/plugin.json",
         ("version",),
     ),
 )

@@ -58,7 +58,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           status=0
           while read -r manifest key; do
-            found=$(jq -r "$key" "integrations/claude/$manifest")
+            found=$(jq -r "$key" "plugin/$manifest")
             if [ "$found" != "$version" ]; then
               echo "::error::$manifest ($found) does not match release tag" \
                    "($version) -- run scripts/sync_plugin_version.py before tagging"

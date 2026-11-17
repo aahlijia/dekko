@@ -192,7 +192,7 @@ See [CHANGELOG.md](CHANGELOG.md) for per-version history.
 
 The version is declared in six places that must all agree:
 `pyproject.toml`, `uv.lock`, and the four plugin manifests under
-`integrations/claude/` (Claude Code's `.claude-plugin/plugin.json` and
+`plugin/` (Claude Code's `.claude-plugin/plugin.json` and
 `.claude-plugin/marketplace.json`, Codex's `.codex-plugin/plugin.json`,
 and Cursor's `.cursor-plugin/plugin.json`).
 `tests/test_version.py::test_declared_versions_agree` checks this.
