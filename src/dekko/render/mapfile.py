@@ -21,6 +21,7 @@ from typing import Any
 
 from dekko import selfcheck
 from dekko.core import languages, walker
+from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.classify import is_test_path
 from dekko.core.model import (
     CallGraph,
@@ -1117,6 +1118,16 @@ def _symbol_is_test(sym: Symbol) -> bool:
     flags, not just what the path alone would catch.
     """
     return sym.test or is_test_path(sym.path)
+
+
+def path_of(index: "MapIndex", node_id: str) -> str | None:
+    """File path backing a graph node id (symbol or module origin)."""
+    sym = index.symbols_by_id.get(node_id)
+    if sym is not None:
+        return sym.path
+    if node_id.endswith(MODULE_CALLER_SUFFIX):
+        return node_id[: -len(MODULE_CALLER_SUFFIX)]
+    return None
 
 
 def _prod_id(sym_or_module_id: str, symbols_by_id: dict[str, Symbol]) -> bool:

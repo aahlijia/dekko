@@ -8,8 +8,7 @@ collapses to one node per file with edges between files.
 import sys
 from pathlib import Path
 
-from dekko.render.mapfile import MapIndex
-from dekko.core.resolver import MODULE_CALLER_SUFFIX
+from dekko.render.mapfile import MapIndex, path_of
 
 EXIT_OK = 0
 EXIT_TOO_BIG = 2
@@ -23,16 +22,6 @@ def _dir_of(path: str) -> str:
     """Directory portion of a repo-relative path (``.`` for the root)."""
     head, _, _ = path.rpartition("/")
     return head or "."
-
-
-def _path_of(index: MapIndex, node_id: str) -> str | None:
-    """File path backing a graph node id (symbol or module origin)."""
-    sym = index.symbols_by_id.get(node_id)
-    if sym is not None:
-        return sym.path
-    if node_id.endswith(MODULE_CALLER_SUFFIX):
-        return node_id[: -len(MODULE_CALLER_SUFFIX)]
-    return None
 
 
 def _symbol_graph(
@@ -64,11 +53,11 @@ def _file_graph(
     """Build ``(labels, edges)`` at file scope (no self-loops)."""
     edges: set[tuple[str, str]] = set()
     for caller, callees in index.calls_out.items():
-        src = _path_of(index, caller)
+        src = path_of(index, caller)
         if src is None:
             continue
         for callee in callees:
-            dst = _path_of(index, callee)
+            dst = path_of(index, callee)
             if dst is not None and dst != src:
                 edges.add((src, dst))
     labels = {node: node for edge in edges for node in edge}
@@ -86,12 +75,12 @@ def dir_graph(
     """
     edges: set[tuple[str, str]] = set()
     for caller, callees in index.calls_out.items():
-        src = _path_of(index, caller)
+        src = path_of(index, caller)
         if src is None:
             continue
         src_dir = _dir_of(src)
         for callee in callees:
-            dst = _path_of(index, callee)
+            dst = path_of(index, callee)
             if dst is None:
                 continue
             dst_dir = _dir_of(dst)

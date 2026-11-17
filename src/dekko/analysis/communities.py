@@ -8,8 +8,48 @@ exactly, so the same map always gives the same communities.
 
 from collections import defaultdict
 
+from dekko.render.mapfile import MapIndex, path_of
+
 Edges = dict[tuple[str, str], int]
 _Weights = dict[str, dict[str, int]]
+
+
+def file_graph(index: MapIndex, *, tests: bool) -> tuple[list[str], Edges]:
+    """Every mapped file and the weighted edges between files.
+
+    A pair's weight is its call sites plus reference sites plus one per
+    import and one per heritage clause, in either direction.
+
+    Args:
+        index: Loaded map index.
+        tests: Keep test files; otherwise read ``without_tests()``.
+
+    Returns:
+        ``(nodes, edges)``: sorted file paths, and weights keyed
+        ``(a, b)`` with ``a < b``.
+    """
+    view = index if tests else index.without_tests()
+    edges: Edges = defaultdict(int)
+    for out, lines in (
+        (view.calls_out, view.edge_lines),
+        (view.referenced_out, view.ref_lines),
+    ):
+        for src, targets in out.items():
+            for dst in targets:
+                sites = len(lines.get((src, dst), ())) or 1
+                _add(edges, path_of(view, src), path_of(view, dst), sites)
+    for importer, imported in view.module_deps_out.items():
+        for path in imported:
+            _add(edges, importer, path, 1)
+    for sub, supers in view.heritage_out.items():
+        for sup in supers:
+            _add(edges, path_of(view, sub), path_of(view, sup), 1)
+    return sorted(view.languages_by_path), dict(edges)
+
+
+def _add(edges: Edges, a: str | None, b: str | None, weight: int) -> None:
+    if a and b and a != b:
+        edges[(a, b) if a < b else (b, a)] += weight
 
 
 def louvain(nodes: list[str], edges: Edges) -> list[list[str]]:
