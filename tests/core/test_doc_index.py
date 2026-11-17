@@ -10,7 +10,7 @@ from dekko.core.docs import (
     parse_doc,
     resolve_docs,
 )
-from dekko.core.model import Field, FileMap, Symbol
+from dekko.core.model import Field, FileMap, RawHeritage, Symbol
 
 
 def _sections(path: str, text: str) -> list[DocSection]:
@@ -393,7 +393,7 @@ def test_a_module_qualified_function(tmp_path: Path) -> None:
     index = _resolve(tmp_path, "# S\n```\nwalker.discover(root)\n```\n")
 
     assert _links(index) == {
-        ("walker.discover", "EXTRACTED", "src/pkg/walker.py::discover")
+        ("walker.discover", "INFERRED", "src/pkg/walker.py::discover")
     }
 
 
@@ -859,3 +859,71 @@ def test_a_member_of_a_module_named_twice_is_inferred(tmp_path: Path) -> None:
     assert [(x.text, x.tier) for x in index.links] == [
         ("walker.function", "INFERRED")
     ]
+
+
+def test_a_huge_line_parses_quickly() -> None:
+    import time
+
+    text = "# S\n" + "a" * 300_000 + "\n```js\n" + "x." * 100_000 + "\n```\n"
+
+    start = time.perf_counter()
+    parse_doc("a.md", text)
+
+    assert time.perf_counter() - start < 2
+
+
+def test_a_member_of_a_subtype_or_rust_type_never_dangles(
+    tmp_path: Path,
+) -> None:
+    files = _rust_repo(tmp_path)
+    child = _sym("src/pkg/other.py", "Child", 13, 18, "class")
+    files[2].symbols.append(child)
+    files[2].heritage.append(
+        RawHeritage(
+            subtype_id=child.id,
+            path="src/pkg/other.py",
+            text="Base",
+            name="Base",
+        )
+    )
+    text = "# S\n`Child.run_job` and `Prompt::default` and `MapIndex.gone`\n"
+
+    index = _resolve_in(files, tmp_path, text)
+
+    assert [d.text for d in index.dangling] == ["MapIndex.gone"]
+
+
+def test_a_one_word_module_head_in_a_code_block_is_inferred(
+    tmp_path: Path,
+) -> None:
+    text = (
+        "# S\n```python\nvalue = walker.discover(root)\n```\n"
+        "`walker.discover`\n"
+    )
+
+    index = _resolve(tmp_path, text)
+
+    assert {(x.kind, x.tier) for x in index.links} == {
+        ("fence", "INFERRED"),
+        ("span", "EXTRACTED"),
+    }
+
+
+def test_a_field_link_honors_the_block_language(tmp_path: Path) -> None:
+    files = _rust_repo(tmp_path)
+    prompt = files[-1].symbols[0]
+    prompt.fields.append(Field("width", line=3))
+    text = "# S\n```python\nprint(Prompt.width)\n```\n"
+
+    assert _resolve_in(files, tmp_path, text).links == []
+
+
+def test_long_unbroken_words_are_cheap() -> None:
+    import time
+
+    text = "# S\n" + "a" * 9_900 + "\n```js\n" + "x." * 4_900 + "\n```\n"
+
+    start = time.perf_counter()
+    parse_doc("a.md", text)
+
+    assert time.perf_counter() - start < 0.3

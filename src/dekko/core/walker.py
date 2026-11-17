@@ -73,6 +73,10 @@ DOC_EXTENSIONS = (".md", ".mdx", ".rst")
 # indexing them as docs would link the map to itself.
 _MAP_DIR = ".dekko"
 
+# First line of every MAP.md index ``render_md`` writes; a map written
+# with ``--output`` elsewhere is found by it, with its ``map/`` pages.
+MAP_HEADING = "# Code Map — "
+
 # Heuristic for vendored/minified files that don't follow a `.min.`
 # naming convention (e.g. a vendored `book.js`/`highlight.js` under a
 # docs theme directory). Sampled over just the first few dozen lines,
@@ -492,14 +496,41 @@ def discover_docs(
     for rel in sorted(set(candidates)):
         if not rel.lower().endswith(DOC_EXTENSIONS):
             continue
-        if rel.split("/", 1)[0] == _MAP_DIR:
+        if _MAP_DIR in rel.split("/"):
             continue
         verdict = _path_verdict(
             root, rel, prefix, excludes, ignore_spec, follow_symlinks
         )
         if verdict == "ok" and _within_size(root / rel, max_file_size):
             docs.append(rel)
-    return docs
+    return _without_generated_maps(root, docs)
+
+
+def _without_generated_maps(root: Path, docs: list[str]) -> list[str]:
+    """Drop dekko's own MAP.md indexes and their ``map/`` shard pages."""
+    generated = [
+        rel
+        for rel in docs
+        if rel.rsplit("/", 1)[-1] == "MAP.md" and _is_map_index(root / rel)
+    ]
+    shard_dirs = tuple(
+        (rel.rsplit("/", 1)[0] + "/map/" if "/" in rel else "map/")
+        for rel in generated
+    )
+    return [
+        rel
+        for rel in docs
+        if rel not in generated and not rel.startswith(shard_dirs)
+    ]
+
+
+def _is_map_index(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(len(MAP_HEADING.encode()))
+    except OSError:
+        return False
+    return head == MAP_HEADING.encode()
 
 
 def _within_size(path: Path, max_file_size: int) -> bool:

@@ -570,3 +570,13 @@ def test_discover_docs_skips_dekkos_own_map_pages(tmp_path: Path) -> None:
     _touch(tmp_path / ".dekko/map/src.md", "# Page\n")
 
     assert discover_docs(tmp_path) == ["README.md"]
+
+
+def test_discover_docs_skips_maps_written_elsewhere(tmp_path: Path) -> None:
+    _touch(tmp_path / "docs/guide.md", "# Guide\n")
+    _touch(tmp_path / "docs/MAP.md", "# Code Map — repo\n\nGenerated.\n")
+    _touch(tmp_path / "docs/map/src.md", "# `src/`\n")
+    _touch(tmp_path / "pkg/.dekko/MAP.md", "# Code Map — pkg\n")
+    _touch(tmp_path / "notes/MAP.md", "# Treasure map\n")
+
+    assert discover_docs(tmp_path) == ["docs/guide.md", "notes/MAP.md"]

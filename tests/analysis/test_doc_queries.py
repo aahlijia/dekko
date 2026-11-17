@@ -443,3 +443,13 @@ def test_mcp_query_symbol_carries_docs(repo: Path) -> None:
     text = server._relation_tool(ctx, "symbol", {"symbol": "Registry.load"})
 
     assert "docs: README.md:1 App" in text
+
+
+def test_stale_without_a_map_cannot_tell(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, _ = _run(
+        capsys, "docs", "--stale", "--root", str(tmp_path), "--no-regen"
+    )
+
+    assert code == 2

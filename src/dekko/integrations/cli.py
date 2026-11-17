@@ -2877,9 +2877,11 @@ def run_docs(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    index, code = _read_index(args)
+    index, _ = _read_index(args)
     if index is None:
-        return code
+        # Exit 1 means "stale docs found"; without a map there is no
+        # answer, and CI must not read that as rot.
+        return docs_mod.EXIT_CANNOT_TELL
     return docs_mod.run_stale(
         index,
         args.paths,

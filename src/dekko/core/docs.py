@@ -126,8 +126,24 @@ _PATH_RE = re.compile(
     r"(?::(\d+)(?:-(\d+))?)?"
     r"(?![\w/])"
 )
-_URL_RE = re.compile(r"[A-Za-z][\w+.-]*://\S+|\S+@\S+\.\w+")
-_MD_LINK_RE = re.compile(r"!?\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+[^)]*)?\)")
+_URL_RE = re.compile(
+    r"(?<![\w+.-])[A-Za-z][\w+.-]*://\S+"
+    r"|(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
+)
+
+# Lines longer than this (minified code, base64 data, generated tables)
+# hold no reference a reader wrote, and scanning them costs time that
+# grows with their length.
+_MAX_LINE = 10_000
+
+# Paths and names never hold whitespace, so they are looked for one
+# word at a time; a word longer than this is data, and skipping it keeps
+# the path pattern from backtracking across it.
+_MAX_WORD = 500
+_WORD_RE = re.compile(r"\S+")
+_MD_LINK_RE = re.compile(
+    r"!?\[([^\]]*)\]\(\s*<?([^()\[\]\s>]+)>?(?:\s+[^)]*)?\)"
+)
 _MD_REFDEF_RE = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*<?(\S+?)>?(?:\s.*)?$")
 _RST_LINK_RE = re.compile(r"`([^`<]*?)\s*<([^>`]+)>`__?")
 _RST_LITERAL_RE = re.compile(r"``(.+?)``")
@@ -282,6 +298,8 @@ def _md_heading(lines: list[str], i: int) -> tuple[int, str, bool] | None:
 
 def _md_line_candidates(line: str, num: int) -> list[Candidate]:
     """Links, inline code and prose paths on one Markdown line."""
+    if len(line) > _MAX_LINE:
+        return []
     cands: list[Candidate] = []
     refdef = _MD_REFDEF_RE.match(line)
     if refdef:
@@ -388,6 +406,8 @@ def _rst_block_start(line: str) -> tuple[int, str] | None:
 
 def _rst_line_candidates(line: str, num: int) -> list[Candidate]:
     """Links, literals, roles and prose paths on one RST line."""
+    if len(line) > _MAX_LINE:
+        return []
     cands: list[Candidate] = []
     for m in _RST_LINK_RE.finditer(line):
         cands += _link_candidate(m.group(2), m.group(1).strip(), num)
@@ -416,17 +436,32 @@ def _tag(raw: str) -> str:
 
 def _fence_candidates(line: str, num: int, tag: str) -> list[Candidate]:
     """Paths from any code block; names only from code-language blocks."""
+    if len(line) > _MAX_LINE:
+        return []
     text = _URL_RE.sub(" ", line)
     cands = _path_candidates(text, num, "fence")
     if tag and tag not in _NAME_TAGS:
         return cands
-    text = _PATH_RE.sub(_blank_paths, text)
     lang = _TAG_LANGUAGE.get(tag, tag)
     cands += [
-        Candidate(num, m.group(0), "fence", "qualified", lang=lang)
-        for m in _QUALIFIED_RE.finditer(text)
+        Candidate(num, name, "fence", "qualified", lang=lang)
+        for name in _qualified_names(text)
     ]
     return cands
+
+
+def _words(text: str) -> list[str]:
+    """The whitespace-separated words of ``text`` short enough to scan."""
+    return [w for w in _WORD_RE.findall(text) if len(w) <= _MAX_WORD]
+
+
+def _qualified_names(text: str) -> list[str]:
+    """Dotted or ``::`` names in free text, outside any path."""
+    return [
+        m.group(0)
+        for word in _words(text)
+        for m in _QUALIFIED_RE.finditer(_PATH_RE.sub(_blank_paths, word))
+    ]
 
 
 def _family(language: str) -> str:
@@ -447,10 +482,9 @@ def _span_candidates(content: str, num: int) -> list[Candidate]:
         return [Candidate(num, text, "span", shape)]
     text = _URL_RE.sub(" ", content)
     cands = _path_candidates(text, num, "span")
-    text = _PATH_RE.sub(_blank_paths, text)
     cands += [
-        Candidate(num, m.group(0), "span", "qualified")
-        for m in _QUALIFIED_RE.finditer(text)
+        Candidate(num, name, "span", "qualified")
+        for name in _qualified_names(text)
     ]
     return cands
 
@@ -474,13 +508,16 @@ def _path_candidates(text: str, num: int, kind: str) -> list[Candidate]:
     text = _URL_RE.sub(" ", text)
     return [
         Candidate(num, _with_lines(m), kind, "path")
-        for m in _PATH_RE.finditer(text)
+        for word in _words(text)
+        for m in _PATH_RE.finditer(word)
         if _looks_like_path(m.group(1))
     ]
 
 
 def _whole_path(content: str) -> str | None:
     """The span as a path, when the whole span is one."""
+    if len(content) > _MAX_WORD:
+        return None
     m = _PATH_RE.fullmatch(content)
     if m and _looks_like_path(m.group(1)):
         return _with_lines(m)
@@ -628,6 +665,7 @@ class _Tables:
     symbols_in: dict[str, list[Symbol]]
     dir_exts: dict[str, set[str]]
     languages: dict[str, str]
+    subtypes: set[str]
     line_counts: dict[str, int] = field(default_factory=dict)
 
 
@@ -713,6 +751,7 @@ def _tables(root: Path, files: list[FileMap], doc_paths: list[str]) -> _Tables:
         symbols_in=symbols_in,
         dir_exts=_dir_extensions((*paths, *doc_paths)),
         languages={fm.path: fm.language for fm in files},
+        subtypes={h.subtype_id for fm in files for h in fm.heritage},
     )
 
 
@@ -1019,13 +1058,16 @@ def _resolve_qualified(
         langs = [t.languages.get(p, "") for p in modules]
         _emit(index, at, cand, modules, _module_tier(cand.text, langs))
         return
-    members, one_module = _module_members(t, parts, scope)
+    members, one_module, head = _module_members(t, parts, scope)
     if members:
         langs = [s.language for s in members]
-        tier = _module_tier(cand.text, langs) if one_module else INFERRED
+        # In a code block a one-word head is far more often a local
+        # variable (``cache.get(k)``) than a module.
+        guess = not one_module or (cand.kind == "fence" and head == 1)
+        tier = INFERRED if guess else _module_tier(cand.text, langs)
         _emit(index, at, cand, [s.id for s in members], tier)
         return
-    owner = _known_type(t, parts)
+    owner = _known_type(t, parts, scope)
     if owner is None or owner.kind == "enum":
         # Enum variants are not in the map, so ``Kind::Variant`` can't
         # be judged missing.
@@ -1033,7 +1075,7 @@ def _resolve_qualified(
     line = next((f.line for f in owner.fields if f.name == parts[-1]), None)
     if line is not None:
         _emit(index, at, cand, [owner.id], EXTRACTED, line)
-    elif cand.kind == "span" and _could_be_a_member(parts[-1]):
+    elif cand.kind == "span" and _could_be_a_member(t, owner, parts[-1]):
         _dangle(index, at, cand, "no-member", None)
 
 
@@ -1061,13 +1103,21 @@ def _owner_is_unique(t: _Tables, key: str, text: str, scope: _Scope) -> bool:
     return len(modules) == 1
 
 
-def _could_be_a_member(name: str) -> bool:
+def _could_be_a_member(t: _Tables, owner: Symbol, name: str) -> bool:
     """Whether a missing ``Type.name`` member counts as stale.
 
-    Language-given members (``class``, ``prototype``) and UPPER_CASE
-    constants and enum values, which the map doesn't record, never do.
+    Only for a type whose members the map sees in full. A subtype can
+    inherit the name, and a Rust type gets members from derives and
+    trait defaults, none of which the map records. Language-given
+    members (``class``, ``prototype``), UPPER_CASE constants and enum
+    values, and the std method names the resolver never resolves
+    (``toString``, ``clone``) never count either.
     """
-    return name not in _LANGUAGE_MEMBERS and not name.isupper()
+    if owner.id in t.subtypes or owner.language == "rust":
+        return False
+    if name in _LANGUAGE_MEMBERS or name.isupper():
+        return False
+    return not resolver_mod.is_guarded_method_name(name, owner.path)
 
 
 def _module_tier(text: str, languages: list[str]) -> str:
@@ -1083,13 +1133,14 @@ def _module_tier(text: str, languages: list[str]) -> str:
 
 def _module_members(
     t: _Tables, parts: list[str], scope: _Scope
-) -> tuple[list[Symbol], bool]:
+) -> tuple[list[Symbol], bool, int]:
     """``a.b.name`` as module ``a/b`` plus a symbol in it, longest first.
 
     Returns:
-        The matching symbols, and whether the module path named one
-        file (with two ``def_function`` modules, picking the one that
-        defines the name is a guess).
+        The matching symbols; whether the module path named one file
+        (with two ``def_function`` modules, picking the one that
+        defines the name is a guess); and how many segments the module
+        path has.
     """
     for split in range(len(parts) - 1, 0, -1):
         modules = scope.paths(t.modules.get("/".join(parts[:split]), []))
@@ -1103,11 +1154,11 @@ def _module_members(
             ]
         )
         if found:
-            return found, len(modules) == 1
-    return [], False
+            return found, len(modules) == 1, split
+    return [], False, 0
 
 
-def _known_type(t: _Tables, parts: list[str]) -> Symbol | None:
+def _known_type(t: _Tables, parts: list[str], scope: _Scope) -> Symbol | None:
     """The one non-test in-repo type all but the last segment names.
 
     Test fixtures define throwaway types (``A``, ``Box``) whose names
@@ -1116,7 +1167,7 @@ def _known_type(t: _Tables, parts: list[str]) -> Symbol | None:
     head = ".".join(parts[:-1])
     types = [
         s
-        for s in _symbols_named(t, head)
+        for s in scope.symbols(_symbols_named(t, head))
         if s.kind in TYPE_KINDS and not s.test
     ]
     return types[0] if len(types) == 1 else None
