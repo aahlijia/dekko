@@ -28,6 +28,7 @@ from dekko.render.mapfile import (
     format_build_scripts,
     format_unsupported,
 )
+from dekko.analysis import docs as docs_mod
 from dekko.core import languages
 from dekko.source import unmapped_reason
 from dekko.core.model import (
@@ -76,6 +77,8 @@ ACTIONS = (
     "catches",
     "env",
     "cohesion",
+    "docs",
+    "refs",
 )
 
 # Valid ``--relation``/``relation=`` filter values for supertypes/
@@ -118,6 +121,8 @@ _LANG_IGNORED_ACTIONS = (
     "importers",
     "env",
     "cohesion",
+    "docs",
+    "refs",
 )
 
 _BUDGETED_ACTIONS = (
@@ -133,6 +138,8 @@ _BUDGETED_ACTIONS = (
     "catches",
     "env",
     "cohesion",
+    "docs",
+    "refs",
 )
 
 # Identifier-token pattern for the default (non-``--exact``) ``type``
@@ -4472,6 +4479,8 @@ def _dispatch_scan(
         return _run_catches(index, target, as_json, limit, budget, lang)
     if action == "cohesion":
         return _run_cohesion(index, target, as_json, limit, budget)
+    if action in ("docs", "refs"):
+        return _dispatch_docs(index, action, target, as_json, limit, budget)
     if action == "env":
         if env_list:
             return _run_env_list(index, as_json, limit, budget)
@@ -4689,3 +4698,185 @@ def run(
     if code == EXIT_OK and not as_json and (text.strip() or omitted):
         print(meter.footer() if meter is not None else token_footer(text))
     return code
+
+
+# --- doc queries ------------------------------------------------------------
+
+EXIT_NO_DOC_INDEX = 1
+
+_STALE_WHY = {
+    "missing": "missing",
+    "past-end": "past end of file",
+    "no-member": "no such member",
+}
+
+
+def _dispatch_docs(
+    index: MapIndex,
+    action: str,
+    target: str,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Route ``docs``/``refs``, refusing a map built before docs were
+    indexed (it would answer "no docs" for every target)."""
+    if not index.has_doc_index:
+        print(docs_mod.NO_DOC_INDEX, file=sys.stderr)
+        return EXIT_NO_DOC_INDEX, None
+    if action == "refs":
+        return _run_refs(index, target, as_json, limit, budget)
+    return _run_docs(index, target, as_json, limit, budget)
+
+
+def _docs_targets(
+    index: MapIndex, target: str
+) -> tuple[list[str] | None, str, int]:
+    """``(targets, label, code)`` for a ``docs`` target: a file's path
+    and its symbols, or one symbol; ``None`` with the miss reported."""
+    if ":" not in target and ("/" in target or languages.is_supported(target)):
+        path, code = _locate_file(index, target)
+        if path is None:
+            return None, target, code
+        return docs_mod.file_targets(index, path), path, EXIT_OK
+    sym, candidates = resolve_target(index, target)
+    if sym is None:
+        return None, target, report_unresolved(target, candidates, index)
+    return [sym.id], sym.id, EXIT_OK
+
+
+def _run_docs(
+    index: MapIndex,
+    target: str,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the docs action: the doc sections that name a target."""
+    targets, label, code = _docs_targets(index, target)
+    if targets is None:
+        return code, None
+    hits = docs_mod.sections_naming(index, targets)
+    if as_json:
+        kept, meter = _fit_entries([_hit_json(h) for h in hits], budget, limit)
+        doc = {"action": "docs", "target": label, "sections": kept}
+        doc["meta"] = meter.as_dict()
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK, None
+    if not hits:
+        print(f"dekko: no doc section names '{label}'", file=sys.stderr)
+        return EXIT_OK, None
+    return EXIT_OK, _emit_lines([_hit_row(h) for h in hits], budget, limit)
+
+
+def _hit_row(hit: docs_mod.SectionHit) -> str:
+    s = hit.section
+    row = (
+        f"{s.path}:{s.line}  {s.heading}  [{hit.tier}]  {', '.join(hit.refs)}"
+    )
+    if hit.candidates:
+        row += f"  (1 of {hit.candidates} candidates)"
+    return row
+
+
+def _hit_json(hit: docs_mod.SectionHit) -> dict:
+    s = hit.section
+    entry = {
+        "path": s.path,
+        "line": s.line,
+        "heading": s.heading,
+        "tier": hit.tier,
+        "refs": list(hit.refs),
+    }
+    if hit.candidates:
+        entry["candidates"] = hit.candidates
+    return entry
+
+
+def _locate_doc(index: MapIndex, doc: str) -> tuple[str | None, int]:
+    """Resolve a ``refs`` doc target, reporting a miss."""
+    matches = docs_mod.match_doc(index, doc)
+    if len(matches) == 1:
+        return matches[0], EXIT_OK
+    if matches:
+        print(f"dekko: '{doc}' is ambiguous; candidates:", file=sys.stderr)
+        for path in matches:
+            print(f"  {path}", file=sys.stderr)
+        return None, EXIT_AMBIGUOUS
+    print(f"dekko: '{doc}' is not an indexed doc", file=sys.stderr)
+    close = difflib.get_close_matches(doc, docs_mod.doc_paths(index), n=3)
+    if close:
+        print(f"  did you mean: {', '.join(close)}", file=sys.stderr)
+    return None, EXIT_NOT_FOUND
+
+
+def _run_refs(
+    index: MapIndex,
+    target: str,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the refs action: the code a doc (or one section) names."""
+    doc, _, heading = target.partition("#")
+    path, code = _locate_doc(index, doc)
+    if path is None:
+        return code, None
+    sections = docs_mod.sections_of(index, path, heading or None)
+    if heading and not sections:
+        print(f"dekko: no section '{heading}' in {path}", file=sys.stderr)
+        return EXIT_NOT_FOUND, None
+    blocks = [_refs_block(index, at) for at in sections]
+    blocks = [b for b in blocks if b["links"] or b["stale"]]
+    if as_json:
+        kept, meter = _fit_entries(blocks, budget, limit)
+        doc_json = {"action": "refs", "doc": path, "sections": kept}
+        doc_json["meta"] = meter.as_dict()
+        print(json.dumps(doc_json, indent=2))
+        return EXIT_OK, None
+    if not blocks:
+        print(f"dekko: no code references in {target}", file=sys.stderr)
+        return EXIT_OK, None
+    lines = [row for block in blocks for row in _refs_rows(path, block)]
+    return EXIT_OK, _emit_lines(lines, budget, limit)
+
+
+def _refs_block(index: MapIndex, at: int) -> dict:
+    """One section's links and stale references, as JSON-ready dicts."""
+    section = index.doc_sections[at]
+    links = [
+        {
+            "line": link.line,
+            "text": link.text,
+            "tier": link.tier,
+            "target": link.target,
+            "target_line": link.target_line,
+            "candidates": list(link.candidates),
+        }
+        for i in index.doc_links_by_doc.get(section.path, [])
+        if (link := index.doc_links[i]).section == at
+    ]
+    stale = [
+        {"line": d.line, "text": d.text, "why": d.why, "now": d.now}
+        for d in index.doc_dangling
+        if d.section == at
+    ]
+    return {
+        "heading": section.heading,
+        "line": section.line,
+        "links": links,
+        "stale": stale,
+    }
+
+
+def _refs_rows(path: str, block: dict) -> list[str]:
+    rows = [f"{block['heading']} ({path}:{block['line']})"]
+    for link in block["links"]:
+        target = link["target"] or "? (" + " | ".join(link["candidates"]) + ")"
+        rows.append(
+            f"  {link['line']}  {link['text']} -> {target}  [{link['tier']}]"
+        )
+    for d in block["stale"]:
+        why = _STALE_WHY.get(d["why"]) or f"moved: now {d['now']}"
+        rows.append(f"  {d['line']}  stale: {d['text']} ({why})")
+    return rows
