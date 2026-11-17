@@ -77,7 +77,7 @@ Read `reference.md` in this skill's directory when you need:
 
 - **CLI-only queries** with no MCP tool: `diff`, `query file`,
   `ledger`, `query importers|peers|throws|catches|env|cohesion`,
-  `deps`, `trace`, `unused`, `stats`, `lean`.
+  `communities`, `deps`, `trace`, `unused`, `stats`, `lean`.
 - **The CLI flag for each knob** above, when working without MCP tools.
 - **Staleness**: `map_status` / `refresh_map` (full rebuild).
 

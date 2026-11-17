@@ -248,7 +248,7 @@ place of the slash commands (see
 | `get_context_pack` | a symbol's neighborhood, budget-capped |
 | `outline` | a file's structure without bodies |
 | `workset` | one bundle for a change (`rev` or `symbol`; `type_impact` for a type's full blast radius) |
-| `summary` | repo digest |
+| `summary` | repo digest, including the largest module communities |
 | `impacted_tests` | test files impacted by changes, plus a note counting tests that reach the change only through an ambiguous call (the CLI's `affected --possible` lists them) |
 | `check_ambiguous` | resolver-trust summary: where call resolution was ambiguous |
 | `add_note` / `list_notes` | symbol-anchored notes |

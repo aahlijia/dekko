@@ -9,7 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **`dekko communities`: the repo's subsystems, even when they cross
+  directories.** `dekko map` now groups files by how much they call,
+  reference, import and extend each other (Louvain clustering, the
+  same result every run) and stores the grouping in `map.json`. The
+  listing labels each community by the folders it lives in and shows
+  its top files, most-called symbols and cohesion, then the heaviest
+  bridges between communities and the folders split across three or
+  more of them. `dekko communities <file>` shows one file's community
+  and its links to the others. Tests are left out unless you pass
+  `--tests`.
+- **`summary` lists the eight largest communities**, so the `summary`
+  MCP tool carries them with no new tool.
+- **`export --granularity file` groups files by community**: Mermaid
+  subgraphs, DOT clusters, and a community filter in the HTML map.
+
 ### Changed
+- **`query cohesion` clusters a file's symbols** with the same Louvain
+  algorithm instead of listing connected components, so two tight
+  groups joined by one call now split. The note it prints says what
+  the signal leaves out. The JSON shape is unchanged.
 - **Plugin bundle source moved to `plugin/`** (was
   `integrations/claude/`). One bundle serves Claude Code, Codex and
   Cursor, so the folder is no longer named after one client. The

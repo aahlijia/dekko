@@ -113,6 +113,7 @@ in [docs/install.md](docs/install.md).
 cd my-project
 dekko map                  # writes .dekko/MAP.md + .dekko/map.json
 dekko summary               # ~40-line digest: dirs, hotspots, entry points
+dekko communities           # subsystems, even ones that cross directories
 ```
 
 `.dekko/` is git-ignored by default; the map regenerates on demand, so

@@ -4,6 +4,8 @@
 dekko map                            # (re)generate the map
 dekko map src                        # ...restricted to a subtree
 dekko summary                        # repo digest: dirs, hotspots, entry points
+dekko communities                    # files grouped into subsystems, even across directories
+dekko communities src/server.py      # one file's subsystem, its links to the others, its bridges
 dekko outline src/server.py          # a file's signatures + docs, no bodies (a path that exists but isn't mapped says why)
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
 dekko query callers resolve --sites  # who calls resolve, with call sites, then who passes it as a value ('referenced (not called)')
@@ -24,7 +26,7 @@ dekko query catches ConfigError      # every catch clause that would handle Conf
 dekko query catches ConfigError --lang java  # ...scoped to one language, cuts cross-language noise
 dekko query env DATABASE_URL         # every statically-known read site for this env var
 dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
-dekko query cohesion src/app.py      # intra-file connected-components (weak signal, not clustering)
+dekko query cohesion src/app.py      # cluster one file's symbols by their own calls (weak signal)
 dekko context run_map --budget 1500  # minimal context pack for an edit
 dekko search "retries failed http requests"  # free-text relevance search (a one-word query that is a symbol's name ranks it first)
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
@@ -44,6 +46,7 @@ dekko deps                           # module-level dependency graph: edge/file 
 dekko deps src/app.py                # one file's resolved imports/importers/external sources
 dekko deps --cycles                  # every detected circular-import cluster
 dekko export --format html           # interactive single-file browser
+dekko export --format mermaid --granularity file  # file graph, one subgraph per community
 dekko status                         # is the map still fresh? (exit 0/1)
 dekko doctor                         # diagnose install/environment issues (PATH shadowing, hooks, MCP, ...)
 dekko install claude                 # wire dekko into a client (claude, cline) or file (claude-md, agents-md); see below
@@ -1883,46 +1886,98 @@ scope than `throws`/`catches`'s own CLI-only pilot; revisit if a
 recurring "which env vars does this service read" need surfaces for
 an MCP-only agent session.
 
-## Interpreting `dekko query cohesion`
+## Interpreting `dekko communities`
 
-`cohesion` answers "if I'm splitting this file in two, which symbols
-naturally group together" — but only partially, and it says so in its
-own output. It groups a file's symbols into **connected components**
-over intra-file calls/references only (edges where both the caller/
-referrer and the callee/referenced symbol are defined in the same
-file); this is **connectivity, not clustering** — a deliberately weak
-signal, not a "which functions belong together" recommendation.
+`summary` groups files by directory. Real subsystems often don't
+follow the folders: a feature can live half in `core/` and half in
+`api/`. `communities` groups files by how much they use each other
+instead, so those subsystems show up.
 
 ```sh
-dekko query cohesion src/app/big_module.py         # intra-file coupling summary
+dekko communities                    # every community, largest first
+dekko communities src/app/server.py  # one file: its community, links, bridges
+dekko communities src/app/server.py::Server.start  # a symbol works too (its file)
+dekko communities --tests            # put test files back in
+dekko communities --json
+```
+
+`dekko map` builds a file graph and stores the grouping in `map.json`.
+Two files are linked by every call and reference between them (one per
+call site), one per import, and one per `extends`/`implements` clause.
+The grouping is Louvain modularity clustering, run the same way every
+time, so the same map always gives the same communities. Labels,
+cohesion and bridges are worked out when you ask, from the edges the
+map already has.
+
+Each community row shows:
+
+- **a label.** The folder holding most of its files, as deep as a
+  majority goes (`src/app/core`). When its files split evenly between
+  two folders, both (`core + api`). When they scatter, the last
+  majority folder plus the file at the center of the community
+  (`src/app (server.py)`).
+- **files and symbols**, the three files with the most weight inside
+  it (`top:`), and its three most-called symbols (`key:`).
+- **cohesion**: the share of its link weight that stays inside it.
+  1.00 means nothing outside touches it.
+- **`spans:`** when its files sit in three or more top-level folders.
+  That's the cross-cutting subsystem `summary` can't show.
+
+After the rows come the five heaviest **bridges** (pairs of
+communities and the two files on each side that carry most of the
+traffic between them) and the **directory mismatches**: folders whose
+files land in three or more communities. Files with no link to any
+other file are counted on the header line (`unconnected`), and groups
+under three files are folded into `small groups`. Both still answer
+`dekko communities <file>`.
+
+Tests are left out unless you pass `--tests`. That's the opposite of
+most commands (which have `--no-tests`), on purpose: shared test
+helpers call into every subsystem and would glue them into one big
+community. `--budget` (default 5000 tokens) sheds the mismatches first,
+then the bridges, then communities from the bottom. `--limit N` lists
+the first N. A map from before communities existed says so and asks
+for `dekko map`.
+
+`summary` (and the `summary` MCP tool) lists the eight largest
+communities with their label, size and cohesion. `export --granularity
+file` draws each community as a Mermaid subgraph or a DOT cluster, and
+`export --format html` shows a file's community and lets you filter by
+it. MAP.md doesn't show communities: they can shift when the code
+changes, and MAP.md is often committed.
+
+## Interpreting `dekko query cohesion`
+
+`cohesion` answers "if I split this file, which symbols go together?"
+It clusters a file's symbols with the same Louvain algorithm
+`communities` uses, over calls and references that start and end in
+that file.
+
+```sh
+dekko query cohesion src/app/big_module.py         # groups, largest first
 dekko query cohesion src/app/big_module.py --json
 ```
 
-`FILE` is matched the same way as `query file` — exact repo-relative
-path, or any unambiguous trailing path suffix. Symbols with **no**
-intra-file call/reference edge to any other symbol in the file are
-reported separately as `isolated`, not as their own one-member
-"component". Every run always prints this disclosure, in both text
-and JSON output, never dropped by `--budget`/`--limit` capping:
+`FILE` is matched the same way as `query file`: exact repo-relative
+path, or any unambiguous trailing path suffix. Symbols with no call or
+reference to anything else in the file are listed separately as
+`isolated`. Two tight groups joined by a single call come out as two
+groups. Every run prints this note, in text and JSON, and no
+`--budget` or `--limit` drops it:
 
-> note: this groups symbols that are mutually reachable, not symbols
-> that are tightly coupled vs. loosely coupled — a file that's one
-> connected component (the common case) gets no useful split
-> suggestion from this view. Real "which functions belong together"
-> clustering is not implemented.
+> note: groups come from this file's own calls and references only;
+> calls from other files and shared state don't count, so treat a
+> split as a hint, not a verdict.
 
-That note is load-bearing, not decorative: **most non-trivial files
-are a single connected component**, and for those, `cohesion` gives
-**zero** useful split signal — this is the expected, common case, not
-a bug. Real community-detection/modularity-style clustering (which
-would give a genuinely useful answer even for a fully-connected file)
-is a materially harder algorithm dekko has no other precedent for and
-does not implement.
+It's a hint because a file's own calls are a thin signal. Two
+functions that never call each other but always change together (they
+share a data structure, or the same callers use both) still land in
+different groups. The JSON keeps the `components` key it has always
+had.
 
-`cohesion` is **CLI-only** (no MCP tool) — this is a human refactor-
-planning aid, not something an agent typically needs mid-task, and the
-weak-signal caveat above makes it a poor fit for always-loaded MCP
-schema rent regardless.
+`cohesion` is CLI-only (no MCP tool). It's a refactor-planning aid,
+not something an agent needs mid-task, so it isn't worth a schema in
+every session.
 
 ## Daemon mode
 
@@ -1939,7 +1994,8 @@ dekko daemon stop                    # graceful shutdown
 
 Once running, every read-only subcommand (`query`, `deps`, `search`,
 `workset`, `diff`, `affected`, `outline`, `context`, `trace`, `stats`,
-`summary`, `lean`, `unused`, `status`, `note list`, `export`)
+`summary`, `communities`, `lean`, `unused`, `status`, `note list`,
+`export`)
 transparently routes through the daemon: identical output and exit
 code, just without the reload. Write-path commands (`map`, `note add`/
 `note rm`, `hooks ...`) always run directly, sidestepping
