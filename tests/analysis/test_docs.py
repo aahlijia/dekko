@@ -221,3 +221,102 @@ def test_refs_of_an_unknown_doc(
     assert code == 3
     assert "not an indexed doc" in err
     assert "README.md" in err
+
+
+# --- docs --stale ---------------------------------------------------------
+
+
+def _plant(root: Path) -> None:
+    (root / "docs" / "rot.md").write_text(
+        "# Rot\n\n"
+        "See [gone](../src/app/gone.py) and `src/app/walker.py:400`.\n"
+        "Call `MapIndex.lod` or [MapIndex.build](../src/app/index.py#L8).\n"
+    )
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+
+def test_stale_is_silent_on_a_clean_tree(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _run(capsys, "docs", "--stale", "--root", str(repo))
+
+    assert code == 0
+    assert out == ""
+    assert "1 in changelogs" in err
+
+
+def test_stale_reports_each_kind_of_rot(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _plant(repo)
+
+    code, out, _ = _run(capsys, "docs", "--stale", "--root", str(repo))
+
+    assert code == 1
+    assert "docs/rot.md" in out
+    assert "../src/app/gone.py  (missing)" in out
+    assert "src/app/walker.py:400  (past end of file)" in out
+    assert "MapIndex.lod  (no such member)" in out
+    assert "../src/app/index.py:8  (moved: now src/app/index.py:10)" in out
+    assert "CHANGELOG" not in out
+
+
+def test_stale_all_includes_changelogs(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = _run(
+        capsys, "docs", "--stale", "--all", "--root", str(repo)
+    )
+
+    assert code == 1
+    assert "CHANGELOG.md" in out
+    assert "src/app/old_walker.py  (missing)" in out
+
+
+def test_stale_narrows_to_paths(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _plant(repo)
+
+    code, out, _ = _run(
+        capsys, "docs", "--stale", "README.md", "--root", str(repo)
+    )
+
+    assert code == 0
+    assert out == ""
+
+
+def test_stale_json(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _plant(repo)
+
+    code, out, _ = _run(
+        capsys, "docs", "--stale", "--json", "--root", str(repo)
+    )
+
+    doc = json.loads(out)
+    assert code == 1
+    assert doc["count"] == 4
+    assert {r["why"] for r in doc["stale"]} == {
+        "missing",
+        "past-end",
+        "no-member",
+        "moved",
+    }
+    assert {"path", "line", "heading", "text", "why", "now"} <= set(
+        doc["stale"][0]
+    )
+
+
+def test_docs_needs_an_action(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run(capsys, "docs", "--root", str(repo))
+
+    assert code == 2
+    assert "--stale" in err
+
+
+def test_docs_is_routed_through_the_daemon() -> None:
+    from dekko.daemon import daemon
+
+    assert "docs" in daemon._DAEMON_ELIGIBLE

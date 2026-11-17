@@ -5,10 +5,18 @@ them for ``query docs``/``query refs``, ``docs --stale`` for rot, and
 ``contextpack``/``workset``/``query symbol`` for their ``docs:`` lines.
 """
 
+import json
 import re
+import sys
 from dataclasses import dataclass
 
-from dekko.core.docs import AMBIGUOUS, EXTRACTED, INFERRED, DocSection
+from dekko.core.docs import (
+    AMBIGUOUS,
+    EXTRACTED,
+    INFERRED,
+    DocDangling,
+    DocSection,
+)
 from dekko.render.mapfile import MapIndex
 
 _TIER_RANK = {EXTRACTED: 0, INFERRED: 1, AMBIGUOUS: 2}
@@ -135,3 +143,106 @@ def sections_of(index: MapIndex, doc: str, heading: str | None) -> list[int]:
             or slug(s.heading) == wanted
         )
     ]
+
+
+# --- docs --stale -----------------------------------------------------------
+
+EXIT_CLEAN = 0
+EXIT_STALE = 1
+EXIT_CANNOT_TELL = 2
+
+_WHY_TEXT = {
+    "missing": "missing",
+    "past-end": "past end of file",
+    "no-member": "no such member",
+}
+
+
+def why_text(why: str, now: str | None) -> str:
+    """A dangling reference's reason, as a reader would say it."""
+    return _WHY_TEXT.get(why) or f"moved: now {now}"
+
+
+def run_stale(
+    index: MapIndex,
+    paths: list[str],
+    include_changelogs: bool,
+    as_json: bool,
+) -> int:
+    """Print every doc reference that no longer points at code.
+
+    Args:
+        index: Loaded map index.
+        paths: Only docs at or under these repo-relative paths; empty
+            for every doc.
+        include_changelogs: Report release notes too; they cite removed
+            names and old paths on purpose, so they are skipped by
+            default.
+        as_json: Emit JSON instead of text.
+
+    Returns:
+        0 when nothing is stale, 1 when something is, 2 when the map
+        predates the doc index.
+    """
+    if not index.has_doc_index:
+        print(NO_DOC_INDEX, file=sys.stderr)
+        return EXIT_CANNOT_TELL
+    rows = [d for d in index.doc_dangling if _wanted(index, d, paths)]
+    skipped = 0
+    if not include_changelogs:
+        kept = [d for d in rows if not _in_changelog(index, d)]
+        skipped, rows = len(rows) - len(kept), kept
+    if as_json:
+        stale = [_stale_json(index, d) for d in rows]
+        print(json.dumps({"stale": stale, "count": len(stale)}, indent=2))
+    else:
+        _print_stale(index, rows)
+    if skipped:
+        print(
+            f"dekko: note: {skipped} in changelogs not shown "
+            "(--all shows them)",
+            file=sys.stderr,
+        )
+    return EXIT_STALE if rows else EXIT_CLEAN
+
+
+def _wanted(index: MapIndex, d: DocDangling, paths: list[str]) -> bool:
+    if not paths:
+        return True
+    doc = index.doc_sections[d.section].path
+    for raw in paths:
+        prefix = raw.removeprefix("./").rstrip("/")
+        if doc == prefix or doc.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def _in_changelog(index: MapIndex, d: DocDangling) -> bool:
+    return is_changelog(index.doc_sections[d.section].path)
+
+
+def _stale_json(index: MapIndex, d: DocDangling) -> dict:
+    section = index.doc_sections[d.section]
+    return {
+        "path": section.path,
+        "line": d.line,
+        "heading": section.heading,
+        "text": d.text,
+        "why": d.why,
+        "now": d.now,
+    }
+
+
+def _print_stale(index: MapIndex, rows: list[DocDangling]) -> None:
+    """Group by doc: the doc's path, then one indented row per ref."""
+    current = None
+    for d in sorted(rows, key=lambda r: (_doc_of(index, r), r.line)):
+        doc = _doc_of(index, d)
+        if doc != current:
+            print(doc)
+            current = doc
+        print(f"  {d.line}  {d.text}  ({why_text(d.why, d.now)})")
+
+
+def _doc_of(index: MapIndex, d: DocDangling) -> str:
+    return index.doc_sections[d.section].path

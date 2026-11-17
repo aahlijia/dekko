@@ -4704,12 +4704,6 @@ def run(
 
 EXIT_NO_DOC_INDEX = 1
 
-_STALE_WHY = {
-    "missing": "missing",
-    "past-end": "past end of file",
-    "no-member": "no such member",
-}
-
 
 def _dispatch_docs(
     index: MapIndex,
@@ -4877,6 +4871,6 @@ def _refs_rows(path: str, block: dict) -> list[str]:
             f"  {link['line']}  {link['text']} -> {target}  [{link['tier']}]"
         )
     for d in block["stale"]:
-        why = _STALE_WHY.get(d["why"]) or f"moved: now {d['now']}"
+        why = docs_mod.why_text(d["why"], d["now"])
         rows.append(f"  {d['line']}  stale: {d['text']} ({why})")
     return rows
