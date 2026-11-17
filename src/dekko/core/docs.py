@@ -977,14 +977,15 @@ def _emit_path(
     index: DocIndex,
     tier: str,
 ) -> None:
-    if len(paths) != 1 or line is None:
+    if len(paths) != 1 or line is None or cand.kind not in ("link", "span"):
+        # A line in a code block or prose is a snapshot (a traceback, a
+        # log), not a pointer at today's file, so only the file links.
         _emit(index, at, cand, paths, tier)
         return
     path = paths[0]
-    # Only a path written exactly, in a link or inline code, is judged by
-    # its line: a guessed file or a traceback in a code block isn't
-    # this repo's file at that line.
-    judged = tier == EXTRACTED and cand.kind in ("link", "span")
+    # A guessed file isn't judged by its line either: it may not be the
+    # file the doc meant.
+    judged = tier == EXTRACTED
     if line > _line_count(t, path):
         if judged:
             _dangle(index, at, cand, "past-end", None)

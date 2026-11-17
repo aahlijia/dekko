@@ -927,3 +927,11 @@ def test_long_unbroken_words_are_cheap() -> None:
     parse_doc("a.md", text)
 
     assert time.perf_counter() - start < 0.3
+
+
+def test_a_line_in_a_code_block_links_the_file_only(tmp_path: Path) -> None:
+    text = '# S\n```\n  File "src/pkg/index.py:15", in load\n```\n'
+
+    (link,) = _resolve(tmp_path, text).links
+
+    assert (link.target, link.target_line) == ("src/pkg/index.py", None)
