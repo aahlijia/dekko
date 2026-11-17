@@ -3438,7 +3438,7 @@ def _reference_sites(
     Module-scope references are included: their caller is the
     ``path::<module>`` pseudo-id, which never enters ``symbols_by_id``,
     so the path comes off the id itself (same fallback as
-    ``mapfile._prod_id``). Empty for any language whose spec has no
+    ``mapfile.prod_id``). Empty for any language whose spec has no
     ``reference_query``.
     """
     sites: set[tuple[str, int]] = set()

@@ -64,7 +64,7 @@ def is_test_path(path: str) -> bool:
     directories (see the module docstring for who consumes which).
 
     Memoized: ``mapfile.without_tests()`` calls this (directly and via
-    ``_symbol_is_test``/``_prod_id``) for every symbol and both
+    ``_symbol_is_test``/``prod_id``) for every symbol and both
     endpoints of every edge, re-deriving the same answer for the same
     small set of distinct paths millions of times on a large repo. A
     pure function of an immutable string with no side effects, so

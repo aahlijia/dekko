@@ -12,7 +12,9 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 
-from dekko.render.mapfile import MapIndex, path_of
+from dekko.classify import is_test_path
+from dekko.core.model import Symbol
+from dekko.render.mapfile import MapIndex, path_of, prod_id
 from dekko.textutil import fit_to_budget, strip_dot_slash
 
 Edges = dict[tuple[str, str], int]
@@ -32,37 +34,58 @@ def file_graph(index: MapIndex, *, tests: bool) -> tuple[list[str], Edges]:
     """Every mapped file and the weighted edges between files.
 
     A pair's weight is its call sites plus reference sites plus one per
-    import and one per heritage clause, in either direction.
+    import and one per heritage clause, in either direction. Test code
+    is skipped edge by edge, the way ``without_tests()`` drops it,
+    without building that whole view.
 
     Args:
         index: Loaded map index.
-        tests: Keep test files; otherwise read ``without_tests()``.
+        tests: Keep test files and test symbols.
 
     Returns:
         ``(nodes, edges)``: sorted file paths, and weights keyed
-        ``(a, b)`` with ``a < b``.
+        ``(a, b)`` with ``a < b`` between two of those files.
     """
-    view = index if tests else index.without_tests()
+    by_id = index.symbols_by_id
+
+    def keep(node_id: str) -> bool:
+        return tests or prod_id(node_id, by_id)
+
+    nodes = sorted(
+        p for p in index.languages_by_path if tests or not is_test_path(p)
+    )
+    known = set(nodes)
     edges: Edges = defaultdict(int)
     for out, lines in (
-        (view.calls_out, view.edge_lines),
-        (view.referenced_out, view.ref_lines),
+        (index.calls_out, index.edge_lines),
+        (index.referenced_out, index.ref_lines),
+        (index.heritage_out, {}),
     ):
         for src, targets in out.items():
+            if not keep(src):
+                continue
             for dst in targets:
-                sites = len(lines.get((src, dst), ())) or 1
-                _add(edges, path_of(view, src), path_of(view, dst), sites)
-    for importer, imported in view.module_deps_out.items():
+                if keep(dst):
+                    sites = len(lines.get((src, dst), ())) or 1
+                    _add(
+                        edges,
+                        known,
+                        path_of(index, src),
+                        path_of(index, dst),
+                        sites,
+                    )
+    for importer, imported in index.module_deps_out.items():
         for path in imported:
-            _add(edges, importer, path, 1)
-    for sub, supers in view.heritage_out.items():
-        for sup in supers:
-            _add(edges, path_of(view, sub), path_of(view, sup), 1)
-    return sorted(view.languages_by_path), dict(edges)
+            _add(edges, known, importer, path, 1)
+    return nodes, dict(edges)
 
 
-def _add(edges: Edges, a: str | None, b: str | None, weight: int) -> None:
-    if a and b and a != b:
+def _add(
+    edges: Edges, known: set[str], a: str | None, b: str | None, weight: int
+) -> None:
+    # Only files the view maps: an edge to anything else would put an
+    # unmapped path into a community that map.json can't store.
+    if a in known and b in known and a != b:
         edges[(a, b) if a < b else (b, a)] += weight
 
 
@@ -220,6 +243,7 @@ _TOP_FILES = 3
 _KEY_SYMBOLS = 3
 _MAX_BRIDGES = 5
 _MAX_SPLITS = 5
+_MAX_SPANS = 5
 
 
 @dataclass
@@ -234,7 +258,7 @@ class Community:
         top_files: The files with the most weight inside the community.
         key_symbols: The most-called symbols defined in it (fan-in).
         cohesion: Share of its edge weight that stays inside it.
-        spans: Top-level directories, when it spans 3 or more.
+        spans: Top-level directories (up to 5), when it spans 3 or more.
     """
 
     id: int
@@ -272,6 +296,8 @@ class Report:
         bridges: The heaviest community pairs.
         splits: ``(directory, communities)`` for directories cut 3+ ways.
         community_of: File → listed community id.
+        group_of: File → its stored group's position, listed or not.
+        nodes: Files in the view.
         edges: The file graph the report was built from.
     """
 
@@ -283,7 +309,60 @@ class Report:
     bridges: list[Bridge]
     splits: list[tuple[str, int]]
     community_of: dict[str, int]
+    group_of: dict[str, int] = field(repr=False)
+    nodes: set[str] = field(repr=False)
     edges: Edges = field(repr=False)
+
+
+@dataclass
+class _Listed:
+    """The groups a listing shows and what naming them takes."""
+
+    nodes: list[str]
+    edges: Edges
+    stored: list[list[str]]
+    groups: list[list[str]]
+    inside: list[Counter[str]]
+    labels: list[str]
+
+
+def _listed(index: MapIndex, tests: bool) -> _Listed:
+    nodes, edges = file_graph(index, tests=tests)
+    stored = index.communities_with_tests if tests else index.communities
+    groups = [g for g in stored if len(g) >= _MIN_FILES]
+    inside = [_inside_weight(g, edges) for g in groups]
+    hubs = [_ranked(w)[0] if w else g[0] for g, w in zip(groups, inside)]
+    labels = label_groups(groups, hubs, nodes)
+    return _Listed(nodes, edges, stored, groups, inside, labels)
+
+
+def largest(index: MapIndex, n: int) -> list[tuple[int, str, int, float]]:
+    """The ``n`` largest test-free communities as ``(id, label, files,
+    cohesion)``, without the symbol work a full listing does."""
+    if not index.has_communities:
+        return []
+    base = _listed(index, tests=False)
+    return [
+        (i, label, len(group), cohesion(group, base.edges))
+        for i, (group, label) in enumerate(
+            zip(base.groups[:n], base.labels), start=1
+        )
+    ]
+
+
+def file_titles(index: MapIndex) -> dict[str, tuple[int, str]]:
+    """File → ``(id, "community N: label")`` for the listed test-free
+    communities; empty for a map without them."""
+    if not index.has_communities:
+        return {}
+    base = _listed(index, tests=False)
+    return {
+        path: (i, f"community {i}: {label}")
+        for i, (group, label) in enumerate(
+            zip(base.groups, base.labels), start=1
+        )
+        for path in group
+    }
 
 
 def describe(index: MapIndex, *, tests: bool) -> Report:
@@ -293,16 +372,11 @@ def describe(index: MapIndex, *, tests: bool) -> Report:
         index: Loaded map index with communities.
         tests: Read the with-tests partition instead of the default.
     """
-    nodes, edges = file_graph(index, tests=tests)
+    base = _listed(index, tests)
     view = index if tests else index.without_tests()
-    stored = index.communities_with_tests if tests else index.communities
-    linked = {node for pair in edges for node in pair}
-    listed = [g for g in stored if len(g) >= _MIN_FILES]
-    small = [g for g in stored if len(g) < _MIN_FILES and linked & set(g)]
-    inside = [_inside_weight(g, edges) for g in listed]
-    hubs = [_ranked(w)[0] if w else g[0] for g, w in zip(listed, inside)]
-    labels = label_groups(listed, hubs, nodes)
-    skip = _shared_depth(nodes)
+    linked = {node for pair in base.edges for node in pair}
+    small = [g for g in base.stored if len(g) < _MIN_FILES and linked & set(g)]
+    skip = _shared_depth(base.nodes)
     communities = [
         Community(
             id=i,
@@ -311,23 +385,25 @@ def describe(index: MapIndex, *, tests: bool) -> Report:
             symbols=sum(len(view.symbols_by_path.get(p, [])) for p in group),
             top_files=_ranked(weights)[:_TOP_FILES],
             key_symbols=_key_symbols(view, group),
-            cohesion=cohesion(group, edges),
+            cohesion=cohesion(group, base.edges),
             spans=spans(group, skip),
         )
         for i, (group, label, weights) in enumerate(
-            zip(listed, labels, inside), start=1
+            zip(base.groups, base.labels, base.inside), start=1
         )
     ]
     return Report(
         communities=communities,
         small_groups=len(small),
         small_files=sum(len(g) for g in small),
-        unconnected=len(nodes) - len(linked & set(nodes)),
-        total_files=len(nodes),
-        bridges=bridges(listed, edges),
-        splits=splits(listed),
+        unconnected=len(base.nodes) - len(linked & set(base.nodes)),
+        total_files=len(base.nodes),
+        bridges=bridges(base.groups, base.edges),
+        splits=splits(base.groups),
         community_of={p: c.id for c in communities for p in c.files},
-        edges=edges,
+        group_of={p: i for i, g in enumerate(base.stored) for p in g},
+        nodes=set(base.nodes),
+        edges=base.edges,
     )
 
 
@@ -338,40 +414,60 @@ def label_groups(
 
     The directory prefix every path shares is dropped. From the top,
     a directory holding at least half the group's files is taken and
-    the walk goes deeper; where none does, the top two together name
-    the group if they hold half (``a + b``). Otherwise the files
-    scatter there, so the hub file is added (``src (cli.py)``), or
-    names the group alone when they scatter from the top. Groups that
-    still share a name get their hub file added too.
+    the walk goes deeper inside it; two directories holding half each,
+    or the top two together holding half where none does alone, name
+    the group ``a + b``. Otherwise the files scatter there, so the hub
+    file is added (``src (cli.py)``), or names the group alone when
+    they scatter from the top. Groups that still share a name get
+    their hub added, as its path when the name already holds it.
     """
     skip = _shared_depth(paths)
     labels = [
         _label(g, posixpath.basename(h), skip) for g, h in zip(groups, hubs)
     ]
     seen = Counter(labels)
-    out = []
-    for label, hub in zip(labels, hubs):
-        suffix = f" ({posixpath.basename(hub)})"
-        clash = seen[label] > 1 and not label.endswith(suffix)
-        out.append(label + suffix if clash else label)
-    return out
+    return [
+        _distinct(label, hub, skip) if seen[label] > 1 else label
+        for label, hub in zip(labels, hubs)
+    ]
+
+
+def _distinct(label: str, hub: str, skip: int) -> str:
+    """``label`` told apart by its hub: the file name, or its path when
+    the file name is already in the label."""
+    name = posixpath.basename(hub)
+    where = _short("/".join(hub.split("/")[skip:]))
+    if label == name:
+        return where
+    if label.endswith(f" ({name})"):
+        return f"{label[: -len(name) - 3]} ({where})"
+    return f"{label} ({name})"
 
 
 def _label(group: list[str], hub: str, skip: int) -> str:
     best = None
+    scope = group
     depth = 0
     while True:
         depth += 1
-        ranked = _dirs_at(group, skip, depth)
+        ranked = _dirs_at(scope, skip, depth)
         if not ranked:
             return best or hub
         (top, count), rest = ranked[0], ranked[1:]
-        if count * 2 >= len(group):
-            best = _short(top)
-            continue
-        if rest and (count + rest[0][1]) * 2 >= len(group):
+        runner = rest[0][1] if rest else 0
+        if runner * 2 >= len(group) or (
+            count * 2 < len(group) and (count + runner) * 2 >= len(group)
+        ):
             return f"{_short(top)} + {_short(rest[0][0])}"
-        return f"{best} ({hub})" if best else hub
+        if count * 2 < len(group):
+            return f"{best} ({hub})" if best else hub
+        best = _short(top)
+        scope = [p for p in scope if _under(p, skip, top)]
+
+
+def _under(path: str, skip: int, directory: str) -> bool:
+    """Whether ``path`` sits in ``directory`` (below the shared prefix)."""
+    return "/".join(path.split("/")[skip:]).startswith(directory + "/")
 
 
 def _dirs_at(group: list[str], skip: int, depth: int) -> list[tuple[str, int]]:
@@ -458,9 +554,8 @@ def spans(group: list[str], skip: int) -> list[str]:
     counts = Counter((p.split("/")[skip:-1] or ["."])[0] for p in group)
     if len(counts) < _MIN_FILES:
         return []
-    return [
-        d for d, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    ]
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [d for d, _ in ranked[:_MAX_SPANS]]
 
 
 def splits(groups: list[list[str]]) -> list[tuple[str, int]]:
@@ -508,7 +603,6 @@ def _key_symbols(view: MapIndex, group: list[str]) -> list[str]:
 
 EXIT_OK = 0
 EXIT_NO_DATA = 2
-EXIT_NOT_FOUND = 3
 
 
 def run(
@@ -533,7 +627,8 @@ def run(
 
     Returns:
         ``0``; ``2`` when the map predates communities; ``3`` when
-        ``target`` names nothing in the map.
+        ``target`` names nothing in the map, ``4`` when it names
+        symbols in several files (as ``query`` reports them).
     """
     if not index.has_communities:
         print(
@@ -563,17 +658,23 @@ def run(
 
 def _listing(report: Report, limit: int | None) -> tuple[str, list[str]]:
     """The header, then one section per community, then bridges and
-    directory mismatches, so a budget sheds those first."""
+    directory mismatches, so a budget sheds those first. ``limit`` 0
+    keeps the header only."""
+    n = len(report.communities)
     header = (
-        f"dekko: {len(report.communities)} communities over "
+        f"dekko: {n} {'community' if n == 1 else 'communities'} over "
         f"{report.total_files} files ({report.unconnected} unconnected, "
         f"{report.small_groups} small groups)"
     )
-    shown = report.communities[:limit] if limit else report.communities
+    if limit == 0:
+        return header, []
+    shown = report.communities if limit is None else report.communities[:limit]
+    last = len(shown)
     sections = [_block(c) for c in shown]
-    if report.bridges:
+    pairs = [b for b in report.bridges if b.second <= last]
+    if pairs:
         sections.append(
-            "\n".join(["bridges:", *(_bridge_line(b) for b in report.bridges)])
+            "\n".join(["bridges:", *(_bridge_line(b) for b in pairs)])
         )
     if report.splits:
         sections.append(
@@ -628,26 +729,29 @@ def _report_json(report: Report, view: str) -> dict:
 def _run_target(
     index: MapIndex, report: Report, target: str, view: str, as_json: bool
 ) -> int:
-    path = _target_file(index, target)
+    path, candidates = _target_file(index, target)
     if path is None:
-        print(f"dekko: {target!r} not found in the map", file=sys.stderr)
-        return EXIT_NOT_FOUND
+        # Imported here: query imports this module for ``cohesion``.
+        from dekko.analysis import query
+
+        return query.report_unresolved(target, candidates, index)
+    if path not in report.nodes:
+        print(
+            f"{path} is test code, left out of the default view; pass --tests"
+        )
+        return EXIT_OK
     cid = report.community_of.get(path)
     links = _links_of(report, path)
-    sits_on = [
-        b for b in report.bridges if path in (*b.first_files, *b.second_files)
-    ]
     if as_json:
         doc = {
             "view": view,
             "file": path,
             "community": cid,
             "links": [{"community": c, "weight": w} for c, w in links],
-            "bridges": [asdict(b) for b in sits_on],
         }
         print(json.dumps(doc, indent=2))
         return EXIT_OK
-    print(_target_text(report, path, cid, links, sits_on))
+    print(_target_text(report, path, cid, links))
     return EXIT_OK
 
 
@@ -656,64 +760,49 @@ def _target_text(
     path: str,
     cid: int | None,
     links: list[tuple[int | None, int]],
-    sits_on: list[Bridge],
 ) -> str:
     by_id = {c.id: c for c in report.communities}
     if cid is None:
         why = "small group" if links else "unconnected"
         lines = [f"{path} is in no listed community ({why})"]
     else:
-        c = by_id[cid]
-        lines = [
-            f"{path} is in #{cid} {c.label} ({len(c.files)} files, "
-            f"cohesion {c.cohesion:.2f})"
-        ]
+        lines = [f"{path} is in:", _block(by_id[cid])]
     if links:
         lines.append("links to other communities:")
         for other, weight in links:
             name = f"#{other} {by_id[other].label}" if other else "unlisted"
             lines.append(f"  {name}  {weight}")
-    if sits_on:
-        lines.append("bridges it sits on:")
-        lines += [_bridge_line(b) for b in sits_on]
     return "\n".join(lines)
 
 
 def _links_of(report: Report, path: str) -> list[tuple[int | None, int]]:
     """``path``'s weight to each other community, heaviest first;
-    ``None`` collects files in no listed community."""
-    own = report.community_of.get(path)
+    ``None`` collects files in no listed community. Files in the same
+    stored group (listed or small) don't count."""
+    own = report.group_of.get(path)
     totals: Counter[int | None] = Counter()
     for (a, b), weight in report.edges.items():
         if path not in (a, b):
             continue
-        other = report.community_of.get(b if a == path else a)
-        if other != own or other is None:
-            totals[other] += weight
+        other = b if a == path else a
+        if report.group_of.get(other) != own:
+            totals[report.community_of.get(other)] += weight
     return sorted(totals.items(), key=lambda cw: (-cw[1], cw[0] or 0))
 
 
-def _target_file(index: MapIndex, target: str) -> str | None:
-    """The file a path or symbol target names, or ``None``."""
+def _target_file(
+    index: MapIndex, target: str
+) -> tuple[str | None, list[Symbol]]:
+    """The file a path or symbol target names, or ``None`` with the
+    symbols it could mean (several files, or none)."""
     # Imported here: query imports this module for ``cohesion``.
     from dekko.analysis import query
 
     path = strip_dot_slash(target)
     if path in index.languages_by_path:
-        return path
+        return path, []
     match, candidates = query.resolve_target(index, target)
     files = {s.path for s in ([match] if match else candidates)}
-    return files.pop() if len(files) == 1 else None
-
-
-def file_titles(index: MapIndex) -> dict[str, tuple[int, str]]:
-    """File → ``(id, "community N: label")`` for the listed test-free
-    communities; empty for a map without them."""
-    if not index.has_communities:
-        return {}
-    report = describe(index, tests=False)
-    return {
-        path: (c.id, f"community {c.id}: {c.label}")
-        for c in report.communities
-        for path in c.files
-    }
+    if len(files) == 1:
+        return files.pop(), []
+    return None, candidates

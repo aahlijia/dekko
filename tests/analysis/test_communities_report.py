@@ -67,6 +67,39 @@ def test_communities_with_the_same_label_name_their_hub() -> None:
     assert labels == ["web (a.py)", "web (m.py)"]
 
 
+def test_a_community_split_evenly_names_both_halves() -> None:
+    group = ["app/a.py", "app/b.py", "lib/c.py", "lib/d.py"]
+
+    assert label_groups([group], ["app/a.py"], [*group, "x/y.py"]) == [
+        "app + lib"
+    ]
+
+
+def test_the_label_only_descends_into_the_directory_it_took() -> None:
+    # src/ holds 3 of 5 files, one per subfolder; tools/x holds the
+    # other 2. One level down tools/x outranks every src/ child, but it
+    # sits outside src/, so it must not name the community.
+    group = ["src/a/1.py", "src/b/2.py", "src/c/3.py", "tools/x/4.py"]
+    group.append("tools/x/5.py")
+
+    labels = label_groups([group], ["src/a/1.py"], [*group, "z/w.py"])
+
+    assert labels == ["src (1.py)"]
+
+
+def test_hub_named_communities_with_the_same_hub_name_use_its_path() -> None:
+    groups = [
+        [f"{d}/index.ts" for d in ("a", "b", "c", "d", "e")],
+        [f"{d}/index.ts" for d in ("f", "g", "h", "i", "j")],
+    ]
+
+    labels = label_groups(
+        groups, ["c/index.ts", "h/index.ts"], groups[0] + groups[1]
+    )
+
+    assert labels == ["c/index.ts", "h/index.ts"]
+
+
 def test_cohesion_is_the_share_of_weight_that_stays_inside() -> None:
     edges = {("a", "b"): 3, ("a", "c"): 1}
 

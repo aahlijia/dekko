@@ -5,7 +5,7 @@ dekko map                            # (re)generate the map
 dekko map src                        # ...restricted to a subtree
 dekko summary                        # repo digest: dirs, hotspots, entry points
 dekko communities                    # files grouped into subsystems, even across directories
-dekko communities src/server.py      # one file's subsystem, its links to the others, its bridges
+dekko communities src/server.py      # one file's subsystem and its links to the others
 dekko outline src/server.py          # a file's signatures + docs, no bodies (a path that exists but isn't mapped says why)
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
 dekko query callers resolve --sites  # who calls resolve, with call sites, then who passes it as a value ('referenced (not called)')
@@ -1895,7 +1895,7 @@ instead, so those subsystems show up.
 
 ```sh
 dekko communities                    # every community, largest first
-dekko communities src/app/server.py  # one file: its community, links, bridges
+dekko communities src/app/server.py  # one file: its community and links
 dekko communities src/app/server.py::Server.start  # a symbol works too (its file)
 dekko communities --tests            # put test files back in
 dekko communities --json

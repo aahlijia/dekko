@@ -2701,3 +2701,9 @@ def test_a_request_past_the_first_wait_is_waited_for_while_busy(
     # can land in either stream in this same-process test.
     printed = err + capsys.readouterr().err
     assert "note: the daemon is still working on this" in printed
+
+
+def test_every_dispatched_command_is_eligible_for_routing() -> None:
+    # A command in the dispatch table but not the eligible set is never
+    # routed, so it reloads the map on every call.
+    assert set(daemon._dispatch_table()) == set(daemon._DAEMON_ELIGIBLE)

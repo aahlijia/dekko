@@ -1065,7 +1065,7 @@ class MapIndex:
         out.edge_lines = {
             key: lines
             for key, lines in self.edge_lines.items()
-            if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+            if prod_id(key[0], by_id) and prod_id(key[1], by_id)
         }
         out.imports_by_path = _filter_paths(self.imports_by_path)
         out.type_aliases_by_path = _filter_paths(self.type_aliases_by_path)
@@ -1075,33 +1075,33 @@ class MapIndex:
         out.notes = {
             sid: texts
             for sid, texts in self.notes.items()
-            if _prod_id(sid, by_id)
+            if prod_id(sid, by_id)
         }
         for name, exts in self.externals_by_name.items():
-            kept = [e for e in exts if _prod_id(e.caller, by_id)]
+            kept = [e for e in exts if prod_id(e.caller, by_id)]
             if kept:
                 out.externals_by_name[name] = kept
         for cand, pairs in self.ambiguous_in.items():
-            if not _prod_id(cand, by_id):
+            if not prod_id(cand, by_id):
                 continue
             kept_pairs = [
                 (caller, name)
                 for caller, name in pairs
-                if _prod_id(caller, by_id)
+                if prod_id(caller, by_id)
             ]
             if kept_pairs:
                 out.ambiguous_in[cand] = kept_pairs
         out.ambiguous_out = {
             caller: names
             for caller, names in self.ambiguous_out.items()
-            if _prod_id(caller, by_id)
+            if prod_id(caller, by_id)
         }
         out.referenced_in = _filter_adjacency(self.referenced_in, by_id)
         out.referenced_out = _filter_adjacency(self.referenced_out, by_id)
         out.ref_lines = {
             key: lines
             for key, lines in self.ref_lines.items()
-            if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+            if prod_id(key[0], by_id) and prod_id(key[1], by_id)
         }
         _filter_heritage(self, out, by_id)
         _filter_module_graph(self, out)
@@ -1141,7 +1141,7 @@ def path_of(index: "MapIndex", node_id: str) -> str | None:
     return None
 
 
-def _prod_id(sym_or_module_id: str, symbols_by_id: dict[str, Symbol]) -> bool:
+def prod_id(sym_or_module_id: str, symbols_by_id: dict[str, Symbol]) -> bool:
     """Whether a symbol/module id belongs to production (non-test) code.
 
     Resolves the id against ``symbols_by_id`` and defers to
@@ -1162,9 +1162,9 @@ def _filter_adjacency(
     """Drop test-path nodes from an adjacency table, keys and values."""
     out: dict[str, list[str]] = {}
     for sid, others in table.items():
-        if not _prod_id(sid, symbols_by_id):
+        if not prod_id(sid, symbols_by_id):
             continue
-        kept = [o for o in others if _prod_id(o, symbols_by_id)]
+        kept = [o for o in others if prod_id(o, symbols_by_id)]
         if kept:
             out[sid] = kept
     return out
@@ -1196,30 +1196,30 @@ def _filter_heritage(
     out.heritage_lines = {
         key: lines
         for key, lines in src.heritage_lines.items()
-        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+        if prod_id(key[0], by_id) and prod_id(key[1], by_id)
     }
     out.heritage_relation = {
         key: rel
         for key, rel in src.heritage_relation.items()
-        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+        if prod_id(key[0], by_id) and prod_id(key[1], by_id)
     }
     for cand, pairs in src.heritage_ambiguous_in.items():
-        if not _prod_id(cand, by_id):
+        if not prod_id(cand, by_id):
             continue
         kept_pairs = [
             (subtype, name)
             for subtype, name in pairs
-            if _prod_id(subtype, by_id)
+            if prod_id(subtype, by_id)
         ]
         if kept_pairs:
             out.heritage_ambiguous_in[cand] = kept_pairs
     out.heritage_ambiguous_out = {
         subtype: names
         for subtype, names in src.heritage_ambiguous_out.items()
-        if _prod_id(subtype, by_id)
+        if prod_id(subtype, by_id)
     }
     for subtype, exts in src.heritage_external_out.items():
-        if _prod_id(subtype, by_id):
+        if prod_id(subtype, by_id):
             out.heritage_external_out[subtype] = exts
     # Repo-wide scalar, not per-symbol -- carried over unfiltered,
     # same as every other whole-repo count this view doesn't narrow.
@@ -1236,7 +1236,7 @@ def _filter_module_graph(src: "MapIndex", out: "MapIndex") -> None:
     Unlike ``_filter_heritage``/``_filter_adjacency``, the module
     graph is keyed and valued by file *path* directly (not a symbol
     id needing a ``symbols_by_id`` lookup to classify), so this
-    filters on ``is_test_path`` alone rather than via ``_prod_id``.
+    filters on ``is_test_path`` alone rather than via ``prod_id``.
     """
     for path, others in src.module_deps_out.items():
         if is_test_path(path):
@@ -1271,27 +1271,27 @@ def _filter_throws_catches(
     Split out of ``MapIndex.without_tests`` for the same reason
     ``_filter_heritage``/``_filter_module_graph`` are. ``catches`` is a
     flat per-clause list (not an adjacency table), so it's filtered by
-    a direct ``_prod_id`` check on each site's ``caller`` rather than
+    a direct ``prod_id`` check on each site's ``caller`` rather than
     via ``_filter_adjacency``.
     """
     out.throws_out = _filter_adjacency(src.throws_out, by_id)
     out.throws_lines = {
         key: lines
         for key, lines in src.throws_lines.items()
-        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+        if prod_id(key[0], by_id) and prod_id(key[1], by_id)
     }
     out.throws_ambiguous_out = {
         caller: names
         for caller, names in src.throws_ambiguous_out.items()
-        if _prod_id(caller, by_id)
+        if prod_id(caller, by_id)
     }
     for caller, exts in src.throws_external_out.items():
-        if _prod_id(caller, by_id):
+        if prod_id(caller, by_id):
             out.throws_external_out[caller] = exts
     for caller, sites in src.throws_bare_out.items():
-        if _prod_id(caller, by_id):
+        if prod_id(caller, by_id):
             out.throws_bare_out[caller] = sites
-    out.catches = [c for c in src.catches if _prod_id(c.caller, by_id)]
+    out.catches = [c for c in src.catches if prod_id(c.caller, by_id)]
 
 
 def _filter_env_reads(src: "MapIndex", out: "MapIndex") -> None:
@@ -1300,7 +1300,7 @@ def _filter_env_reads(src: "MapIndex", out: "MapIndex") -> None:
 
     Filtered on ``EnvRead.path`` directly (mirrors
     ``_filter_module_graph``'s path-keyed filtering), not via
-    ``_prod_id`` — an ``EnvRead``'s ``caller_id`` is disclosure-only
+    ``prod_id`` — an ``EnvRead``'s ``caller_id`` is disclosure-only
     (see ``model.EnvRead``'s docstring), not something ``dekko query
     env`` looks up by id, so there's no adjacency table here requiring
     symbol-level classification the way ``_filter_throws_catches``
@@ -1317,12 +1317,12 @@ def _filter_reads(
 ) -> None:
     """Fill ``out.reads_by_name`` from ``src``, test-code readers dropped.
 
-    Filtered on the reader id through ``_prod_id`` like
+    Filtered on the reader id through ``prod_id`` like
     ``externals_by_name`` is on its caller: a module-level reader is
     a ``path::<module>`` pseudo-id that falls back to the path check.
     """
     for name, sites in src.reads_by_name.items():
-        kept = [s for s in sites if _prod_id(s.reader, by_id)]
+        kept = [s for s in sites if prod_id(s.reader, by_id)]
         if kept:
             out.reads_by_name[name] = kept
 

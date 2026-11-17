@@ -176,15 +176,11 @@ def _communities(index: MapIndex) -> dict:
     """The largest communities, or nothing for a map without them."""
     if not index.has_communities:
         return {}
-    report = communities.describe(index, tests=False)
     rows = [
-        {
-            "id": c.id,
-            "label": c.label,
-            "files": len(c.files),
-            "cohesion": c.cohesion,
-        }
-        for c in report.communities[:_MAX_COMMUNITIES]
+        {"id": i, "label": label, "files": files, "cohesion": share}
+        for i, label, files, share in communities.largest(
+            index, _MAX_COMMUNITIES
+        )
     ]
     return {"communities": rows}
 

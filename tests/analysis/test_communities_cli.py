@@ -86,7 +86,7 @@ def test_a_file_target_shows_its_community_and_links(
     assert _run(root, "app/a.py") == 0
     out = capsys.readouterr().out
 
-    assert out.startswith("app/a.py is in #2 app")
+    assert out.startswith("app/a.py is in:\n#2 app  3 files")
     assert "#1 lib  2" in out
 
 
@@ -95,14 +95,14 @@ def test_a_symbol_target_uses_its_file(
 ) -> None:
     assert _run(root, "lib/z.py::z") == 0
 
-    assert capsys.readouterr().out.startswith("lib/z.py is in #1 lib")
+    assert capsys.readouterr().out.startswith("lib/z.py is in:\n#1 lib")
 
 
 def test_an_unknown_target_exits_3(
     root: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert _run(root, "nowhere.py") == 3
-    assert "not found" in capsys.readouterr().err
+    assert "no symbol matches 'nowhere.py'" in capsys.readouterr().err
 
 
 def test_tests_flag_reads_the_partition_with_tests(
@@ -137,3 +137,55 @@ def test_a_map_from_before_communities_says_to_remap(
 
     assert _run(root, "--no-regen") == 2
     assert "run dekko map" in capsys.readouterr().err
+
+
+def test_an_ambiguous_symbol_lists_its_candidates(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = make_mapped_repo(
+        {**SOURCES, "lib/dup.py": "def c():\n    return 3\n"}
+    )
+
+    assert _run(root, "c") == 4
+
+    err = capsys.readouterr().err
+    assert "'c' is ambiguous" in err
+    assert "lib/dup.py" in err
+
+
+def test_a_test_file_in_the_default_view_points_at_tests_flag(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(root, "tests/test_all.py") == 0
+
+    assert "left out of the default view; pass --tests" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_file_target_shows_its_whole_community_row(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(root, "lib/y.py") == 0
+    out = capsys.readouterr().out
+
+    assert "   top: " in out
+    assert "   key: " in out
+
+
+def test_limit_zero_prints_counts_only(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(root, "--limit", "0", "--budget", "0") == 0
+
+    assert capsys.readouterr().out == (
+        "dekko: 2 communities over 8 files (2 unconnected, 0 small groups)\n"
+    )
+
+
+def test_bridges_under_a_limit_name_only_listed_communities(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(root, "--limit", "1") == 0
+
+    assert "<->" not in capsys.readouterr().out

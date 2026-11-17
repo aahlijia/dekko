@@ -6,7 +6,7 @@ import pytest
 from conftest import RepoFactory
 
 from dekko.integrations import cli
-from dekko.render import mapfile, render_html
+from dekko.render import export, mapfile, render_html
 
 SOURCES = {
     "app/__init__.py": "",
@@ -85,3 +85,17 @@ def test_html_files_carry_their_community(root: Path) -> None:
 
     assert files["lib/x.py"]["community"] == "community 1: lib"
     assert files["tests/test_all.py"]["community"] == ""
+
+
+def test_renderers_without_groups_keep_their_old_output() -> None:
+    # MAP.md's overview diagram calls these with no groups.
+    labels = {"b.py": "b.py", "a.py": 'a "q".py'}
+    edges = [("a.py", "b.py")]
+
+    assert export.render_mermaid(labels, edges) == (
+        'flowchart LR\n  n0["a \'q\'.py"]\n  n1["b.py"]\n  n0 --> n1'
+    )
+    assert export.render_dot(labels, edges) == (
+        'digraph dekko {\n  rankdir=LR;\n  n0 [label="a \\"q\\".py"];\n'
+        '  n1 [label="b.py"];\n  n0 -> n1;\n}'
+    )

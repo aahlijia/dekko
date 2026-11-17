@@ -1589,8 +1589,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "target",
         nargs="?",
         metavar="FILE_OR_SYMBOL",
-        help="show this file's community, its links to other "
-        "communities, and the bridges it sits on",
+        help="show this file's (or symbol's file's) community and its "
+        "links to the other communities",
     )
     p_comm.add_argument(
         "--tests",

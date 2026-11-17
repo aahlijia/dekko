@@ -74,6 +74,7 @@ _DAEMON_ELIGIBLE = frozenset(
         "trace",
         "stats",
         "summary",
+        "communities",
         "lean",
         "unused",
         "ambiguous",
