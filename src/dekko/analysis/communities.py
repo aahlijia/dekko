@@ -14,6 +14,15 @@ Edges = dict[tuple[str, str], int]
 _Weights = dict[str, dict[str, int]]
 
 
+def cluster(index: MapIndex) -> dict[str, list[list[str]]]:
+    """Communities for the test-free (``default``) and full
+    (``with_tests``) views, as ``map.json`` stores them."""
+    return {
+        "default": louvain(*file_graph(index, tests=False)),
+        "with_tests": louvain(*file_graph(index, tests=True)),
+    }
+
+
 def file_graph(index: MapIndex, *, tests: bool) -> tuple[list[str], Edges]:
     """Every mapped file and the weighted edges between files.
 

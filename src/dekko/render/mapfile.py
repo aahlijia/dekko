@@ -900,6 +900,12 @@ class MapIndex:
         root_dir: The repository root the map was read from
             (``load_map`` only), so a reply can look at a path on disk
             that isn't in the map.
+        communities: File communities on the test-free graph, largest
+            first, each a sorted list of paths.
+        communities_with_tests: The same with test files included
+            (empty in a ``without_tests`` view).
+        has_communities: Whether the map stored communities; false for
+            a map written before they existed.
     """
 
     root_label: str
@@ -974,6 +980,9 @@ class MapIndex:
     hidden_test_symbols: dict[str, int] = field(default_factory=dict)
     notes_stat: list[int] | None = None
     root_dir: Path | None = None
+    communities: list[list[str]] = field(default_factory=list)
+    communities_with_tests: list[list[str]] = field(default_factory=list)
+    has_communities: bool = False
     # ``without_tests``'s result, kept for the next call. The view
     # shares symbols and lists with this index, which no reader
     # mutates; ``refresh_notes`` drops it when the notes change.
@@ -1040,6 +1049,8 @@ class MapIndex:
             provenance=self.provenance,
             doc_version=self.doc_version,
             root_dir=self.root_dir,
+            communities=self.communities,
+            has_communities=self.has_communities,
         )
         for sid, sym in self.symbols_by_id.items():
             if _symbol_is_test(sym):
@@ -1700,7 +1711,23 @@ def load_map(root: Path) -> MapIndex | None:
     _load_env_reads(index, doc)
     _load_reads(index, doc, ids)
     _load_type_uses(index, doc)
+    _load_communities(index, doc)
     return index
+
+
+def _load_communities(index: MapIndex, doc: dict) -> None:
+    """Fill ``index``'s communities from file indexes into ``files``."""
+    stored = doc.get("communities")
+    if stored is None:
+        return
+    paths = [entry["path"] for entry in doc.get("files", [])]
+    index.communities = [
+        [paths[i] for i in group] for group in stored.get("default", [])
+    ]
+    index.communities_with_tests = [
+        [paths[i] for i in group] for group in stored.get("with_tests", [])
+    ]
+    index.has_communities = True
 
 
 def _load_reads(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
