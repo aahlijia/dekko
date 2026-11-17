@@ -436,6 +436,7 @@ def _dispatch_table() -> dict[str, Callable[[argparse.Namespace], int]]:
         "trace": cli.run_trace,
         "stats": cli.run_stats,
         "summary": cli.run_summary,
+        "communities": cli.run_communities,
         "lean": cli.run_lean,
         "unused": cli.run_unused,
         "ambiguous": cli.run_ambiguous,

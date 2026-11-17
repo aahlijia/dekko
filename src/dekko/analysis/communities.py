@@ -6,11 +6,14 @@ visited in sorted order, weights are integers, and gains are compared
 exactly, so the same map always gives the same communities.
 """
 
+import json
 import posixpath
+import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from dekko.render.mapfile import MapIndex, path_of
+from dekko.textutil import fit_to_budget, strip_dot_slash
 
 Edges = dict[tuple[str, str], int]
 _Weights = dict[str, dict[str, int]]
@@ -499,3 +502,205 @@ def _key_symbols(view: MapIndex, group: list[str]) -> list[str]:
     called = [i for i in ids if view.calls_in.get(i)]
     called.sort(key=lambda i: (-len(view.calls_in[i]), i))
     return called[:_KEY_SYMBOLS]
+
+
+# --- dekko communities ---------------------------------------------------
+
+EXIT_OK = 0
+EXIT_NO_DATA = 2
+EXIT_NOT_FOUND = 3
+
+
+def run(
+    index: MapIndex,
+    target: str | None,
+    *,
+    tests: bool,
+    limit: int | None,
+    budget: int | None,
+    as_json: bool,
+) -> int:
+    """Print the communities listing, or one file's place in it.
+
+    Args:
+        index: Loaded map index.
+        target: A file path or symbol, or ``None`` for the listing.
+        tests: Read the partition that includes test files.
+        limit: List at most this many communities.
+        budget: Approximate token cap for the text listing; trailing
+            sections (mismatches, bridges, then communities) go first.
+        as_json: Emit JSON (never budgeted).
+
+    Returns:
+        ``0``; ``2`` when the map predates communities; ``3`` when
+        ``target`` names nothing in the map.
+    """
+    if not index.has_communities:
+        print(
+            "dekko: map predates communities; run dekko map",
+            file=sys.stderr,
+        )
+        return EXIT_NO_DATA
+    report = describe(index, tests=tests)
+    view = "with_tests" if tests else "default"
+    if target is not None:
+        return _run_target(index, report, target, view, as_json)
+    if as_json:
+        print(json.dumps(_report_json(report, view), indent=2))
+        return EXIT_OK
+    if not report.edges:
+        n = report.total_files
+        noun = "file" if n == 1 else "files"
+        print(f"dekko: no communities ({n} {noun}, no cross-file edges)")
+        return EXIT_OK
+    header, sections = _listing(report, limit)
+    kept, meter = fit_to_budget(sections, budget, None, prefix=header)
+    print("\n".join([header, *kept]))
+    if budget:
+        print(meter.footer())
+    return EXIT_OK
+
+
+def _listing(report: Report, limit: int | None) -> tuple[str, list[str]]:
+    """The header, then one section per community, then bridges and
+    directory mismatches, so a budget sheds those first."""
+    header = (
+        f"dekko: {len(report.communities)} communities over "
+        f"{report.total_files} files ({report.unconnected} unconnected, "
+        f"{report.small_groups} small groups)"
+    )
+    shown = report.communities[:limit] if limit else report.communities
+    sections = [_block(c) for c in shown]
+    if report.bridges:
+        sections.append(
+            "\n".join(["bridges:", *(_bridge_line(b) for b in report.bridges)])
+        )
+    if report.splits:
+        sections.append(
+            "\n".join(
+                [
+                    "directory mismatches:",
+                    *(
+                        f"  split: {d} ({n} communities)"
+                        for d, n in report.splits
+                    ),
+                ]
+            )
+        )
+    return header, sections
+
+
+def _block(c: Community) -> str:
+    lines = [
+        f"#{c.id} {c.label}  {len(c.files)} files, {c.symbols} symbols, "
+        f"cohesion {c.cohesion:.2f}",
+        f"   top: {', '.join(c.top_files)}",
+    ]
+    if c.key_symbols:
+        lines.append(f"   key: {', '.join(c.key_symbols)}")
+    if c.spans:
+        lines.append(f"   spans: {', '.join(c.spans)}")
+    return "\n".join(lines)
+
+
+def _bridge_line(b: Bridge) -> str:
+    return (
+        f"  #{b.first} <-> #{b.second}  {b.weight}  "
+        f"{', '.join(b.first_files)} | {', '.join(b.second_files)}"
+    )
+
+
+def _report_json(report: Report, view: str) -> dict:
+    return {
+        "view": view,
+        "files": report.total_files,
+        "unconnected": report.unconnected,
+        "small_groups": report.small_groups,
+        "small_files": report.small_files,
+        "communities": [asdict(c) for c in report.communities],
+        "bridges": [asdict(b) for b in report.bridges],
+        "splits": [
+            {"directory": d, "communities": n} for d, n in report.splits
+        ],
+    }
+
+
+def _run_target(
+    index: MapIndex, report: Report, target: str, view: str, as_json: bool
+) -> int:
+    path = _target_file(index, target)
+    if path is None:
+        print(f"dekko: {target!r} not found in the map", file=sys.stderr)
+        return EXIT_NOT_FOUND
+    cid = report.community_of.get(path)
+    links = _links_of(report, path)
+    sits_on = [
+        b for b in report.bridges if path in (*b.first_files, *b.second_files)
+    ]
+    if as_json:
+        doc = {
+            "view": view,
+            "file": path,
+            "community": cid,
+            "links": [{"community": c, "weight": w} for c, w in links],
+            "bridges": [asdict(b) for b in sits_on],
+        }
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK
+    print(_target_text(report, path, cid, links, sits_on))
+    return EXIT_OK
+
+
+def _target_text(
+    report: Report,
+    path: str,
+    cid: int | None,
+    links: list[tuple[int | None, int]],
+    sits_on: list[Bridge],
+) -> str:
+    by_id = {c.id: c for c in report.communities}
+    if cid is None:
+        why = "small group" if links else "unconnected"
+        lines = [f"{path} is in no listed community ({why})"]
+    else:
+        c = by_id[cid]
+        lines = [
+            f"{path} is in #{cid} {c.label} ({len(c.files)} files, "
+            f"cohesion {c.cohesion:.2f})"
+        ]
+    if links:
+        lines.append("links to other communities:")
+        for other, weight in links:
+            name = f"#{other} {by_id[other].label}" if other else "unlisted"
+            lines.append(f"  {name}  {weight}")
+    if sits_on:
+        lines.append("bridges it sits on:")
+        lines += [_bridge_line(b) for b in sits_on]
+    return "\n".join(lines)
+
+
+def _links_of(report: Report, path: str) -> list[tuple[int | None, int]]:
+    """``path``'s weight to each other community, heaviest first;
+    ``None`` collects files in no listed community."""
+    own = report.community_of.get(path)
+    totals: Counter[int | None] = Counter()
+    for (a, b), weight in report.edges.items():
+        if path not in (a, b):
+            continue
+        other = report.community_of.get(b if a == path else a)
+        if other != own or other is None:
+            totals[other] += weight
+    return sorted(totals.items(), key=lambda cw: (-cw[1], cw[0] or 0))
+
+
+def _target_file(index: MapIndex, target: str) -> str | None:
+    """The file a path or symbol target names, or ``None``."""
+    # Imported here: query imports this module for ``cohesion``.
+    from dekko.analysis import query
+
+    path = strip_dot_slash(target)
+    if path in index.languages_by_path:
+        return path
+    match, candidates = query.resolve_target(index, target)
+    files = {s.path for s in ([match] if match else candidates)}
+    return files.pop() if len(files) == 1 else None
