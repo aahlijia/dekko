@@ -2,7 +2,7 @@
 against a targeted grep sweep.
 
 Automates the ``dekko-verify`` skill
-(``integrations/claude/skills/dekko-verify/SKILL.md``), which is pure
+(``plugin/skills/dekko-verify/SKILL.md``), which is pure
 guidance today — an agent has to both recognize a call-graph result as
 "suspiciously low" *and* remember to actually run the one-grep sanity
 check it recommends. Both are judgment calls that get skipped under

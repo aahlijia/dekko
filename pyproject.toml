@@ -90,15 +90,15 @@ build-backend = "hatchling.build"
 packages = ["src/dekko"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"integrations/claude/.claude-plugin" = "dekko/_plugin/.claude-plugin"
-"integrations/claude/commands" = "dekko/_plugin/commands"
-"integrations/claude/skills" = "dekko/_plugin/skills"
-"integrations/claude/.mcp.json" = "dekko/_plugin/.mcp.json"
-"integrations/claude/.codex-plugin" = "dekko/_plugin/.codex-plugin"
-"integrations/claude/skills-codex" = "dekko/_plugin/skills-codex"
-"integrations/claude/codex.mcp.json" = "dekko/_plugin/codex.mcp.json"
-"integrations/claude/.cursor-plugin" = "dekko/_plugin/.cursor-plugin"
-"integrations/claude/cursor.mcp.json" = "dekko/_plugin/cursor.mcp.json"
+"plugin/.claude-plugin" = "dekko/_plugin/.claude-plugin"
+"plugin/commands" = "dekko/_plugin/commands"
+"plugin/skills" = "dekko/_plugin/skills"
+"plugin/.mcp.json" = "dekko/_plugin/.mcp.json"
+"plugin/.codex-plugin" = "dekko/_plugin/.codex-plugin"
+"plugin/skills-codex" = "dekko/_plugin/skills-codex"
+"plugin/codex.mcp.json" = "dekko/_plugin/codex.mcp.json"
+"plugin/.cursor-plugin" = "dekko/_plugin/.cursor-plugin"
+"plugin/cursor.mcp.json" = "dekko/_plugin/cursor.mcp.json"
 
 [dependency-groups]
 dev = [

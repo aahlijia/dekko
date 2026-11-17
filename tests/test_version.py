@@ -42,18 +42,18 @@ def test_declared_versions_agree() -> None:
     versions = {
         "pyproject.toml": _pyproject_version(),
         "plugin.json": _json_version(
-            "integrations/claude/.claude-plugin/plugin.json", "version"
+            "plugin/.claude-plugin/plugin.json", "version"
         ),
         "marketplace.json": _json_version(
-            "integrations/claude/.claude-plugin/marketplace.json",
+            "plugin/.claude-plugin/marketplace.json",
             "metadata",
             "version",
         ),
         "codex plugin.json": _json_version(
-            "integrations/claude/.codex-plugin/plugin.json", "version"
+            "plugin/.codex-plugin/plugin.json", "version"
         ),
         "cursor plugin.json": _json_version(
-            "integrations/claude/.cursor-plugin/plugin.json", "version"
+            "plugin/.cursor-plugin/plugin.json", "version"
         ),
         "uv.lock": _uvlock_version(),
     }

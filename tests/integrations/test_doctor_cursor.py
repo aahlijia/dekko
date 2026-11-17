@@ -14,7 +14,7 @@ import pytest
 from dekko.integrations import cursor, doctor, hooks, policy_md
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = REPO_ROOT / "integrations" / "claude"
+BUNDLE = REPO_ROOT / "plugin"
 VERSION = "1.2.3"
 
 

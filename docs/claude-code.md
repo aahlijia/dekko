@@ -221,7 +221,7 @@ step:
 | `dekko-delegate` | briefing a subagent before dispatching it into a mapped repo: paste one budgeted digest (`dekko orient --budget 800` to explore, `dekko workset --budget 2000` to implement) into its prompt with a paragraph telling it the dekko tools exist and how to use them, since a subagent gets no session-start orientation and otherwise re-explores with grep and whole-file reads |
 | `dekko-debug` | working a traceback or error report from the map: `query_symbol` on the innermost in-repo frame (notes first), `query throws` (`--transitive`) for where the exception can come from, `query catches` for who handles it, `get_callers` / `trace` to reconstruct a truncated or async call path, `query env` for environment-dependent failures, then `impacted_tests` after the fix; grep is reserved for the error message text, which dekko doesn't model |
 
-See each skill's `SKILL.md` under `integrations/claude/skills/` for the
+See each skill's `SKILL.md` under `plugin/skills/` for the
 full guidance.
 
 The same eight skills ship in the Codex plugin, word for word: they

@@ -19,10 +19,10 @@ SCRIPT = (
     / "sync_plugin_version.py"
 )
 
-PLUGIN_JSON = "integrations/claude/.claude-plugin/plugin.json"
-MARKETPLACE_JSON = "integrations/claude/.claude-plugin/marketplace.json"
-CODEX_JSON = "integrations/claude/.codex-plugin/plugin.json"
-CURSOR_JSON = "integrations/claude/.cursor-plugin/plugin.json"
+PLUGIN_JSON = "plugin/.claude-plugin/plugin.json"
+MARKETPLACE_JSON = "plugin/.claude-plugin/marketplace.json"
+CODEX_JSON = "plugin/.codex-plugin/plugin.json"
+CURSOR_JSON = "plugin/.cursor-plugin/plugin.json"
 
 
 def _make_repo(tmp_path: Path, *, pyproject: str, manifests: str) -> Path:
@@ -43,7 +43,7 @@ def _make_repo(tmp_path: Path, *, pyproject: str, manifests: str) -> Path:
         f'[project]\nname = "dekko"\nversion = "{pyproject}"\n'
     )
 
-    plugin_dir = tmp_path / "integrations" / "claude" / ".claude-plugin"
+    plugin_dir = tmp_path / "plugin" / ".claude-plugin"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / "plugin.json").write_text(
         json.dumps(
@@ -63,7 +63,7 @@ def _make_repo(tmp_path: Path, *, pyproject: str, manifests: str) -> Path:
         + "\n"
     )
     for client in (".codex-plugin", ".cursor-plugin"):
-        client_dir = tmp_path / "integrations" / "claude" / client
+        client_dir = tmp_path / "plugin" / client
         client_dir.mkdir(parents=True)
         (client_dir / "plugin.json").write_text(
             json.dumps(
