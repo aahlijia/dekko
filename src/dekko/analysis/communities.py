@@ -6,7 +6,9 @@ visited in sorted order, weights are integers, and gains are compared
 exactly, so the same map always gives the same communities.
 """
 
-from collections import defaultdict
+import posixpath
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 
 from dekko.render.mapfile import MapIndex, path_of
 
@@ -206,3 +208,294 @@ def _ordered(groups: list[list[str]], edges: Edges) -> list[list[str]]:
         key=lambda i: (-len(groups[i]), -inside[i], groups[i][0]),
     )
     return [groups[i] for i in order]
+
+
+# --- what the listing derives on read ------------------------------------
+
+_MIN_FILES = 3
+_TOP_FILES = 3
+_KEY_SYMBOLS = 3
+_MAX_BRIDGES = 5
+_MAX_SPLITS = 5
+
+
+@dataclass
+class Community:
+    """One community as the listing shows it.
+
+    Attributes:
+        id: 1-based position among the listed communities.
+        label: Directory-based name (see ``label_groups``).
+        files: Member paths, sorted.
+        symbols: How many symbols the files define.
+        top_files: The files with the most weight inside the community.
+        key_symbols: The most-called symbols defined in it (fan-in).
+        cohesion: Share of its edge weight that stays inside it.
+        spans: Top-level directories, when it spans 3 or more.
+    """
+
+    id: int
+    label: str
+    files: list[str]
+    symbols: int
+    top_files: list[str]
+    key_symbols: list[str]
+    cohesion: float
+    spans: list[str]
+
+
+@dataclass
+class Bridge:
+    """Cross weight between two listed communities and the files that
+    carry most of it on each side."""
+
+    first: int
+    second: int
+    weight: int
+    first_files: list[str]
+    second_files: list[str]
+
+
+@dataclass
+class Report:
+    """Everything ``dekko communities`` lists for one view.
+
+    Attributes:
+        communities: Communities of 3 or more files, largest first.
+        small_groups: How many smaller groups were folded away.
+        small_files: Files in those groups.
+        unconnected: Files with no edge to another file.
+        total_files: Files in the view.
+        bridges: The heaviest community pairs.
+        splits: ``(directory, communities)`` for directories cut 3+ ways.
+        community_of: File → listed community id.
+        edges: The file graph the report was built from.
+    """
+
+    communities: list[Community]
+    small_groups: int
+    small_files: int
+    unconnected: int
+    total_files: int
+    bridges: list[Bridge]
+    splits: list[tuple[str, int]]
+    community_of: dict[str, int]
+    edges: Edges = field(repr=False)
+
+
+def describe(index: MapIndex, *, tests: bool) -> Report:
+    """Build the listing for the stored communities of one view.
+
+    Args:
+        index: Loaded map index with communities.
+        tests: Read the with-tests partition instead of the default.
+    """
+    nodes, edges = file_graph(index, tests=tests)
+    view = index if tests else index.without_tests()
+    stored = index.communities_with_tests if tests else index.communities
+    linked = {node for pair in edges for node in pair}
+    listed = [g for g in stored if len(g) >= _MIN_FILES]
+    small = [g for g in stored if len(g) < _MIN_FILES and linked & set(g)]
+    inside = [_inside_weight(g, edges) for g in listed]
+    hubs = [_ranked(w)[0] if w else g[0] for g, w in zip(listed, inside)]
+    labels = label_groups(listed, hubs, nodes)
+    skip = _shared_depth(nodes)
+    communities = [
+        Community(
+            id=i,
+            label=label,
+            files=group,
+            symbols=sum(len(view.symbols_by_path.get(p, [])) for p in group),
+            top_files=_ranked(weights)[:_TOP_FILES],
+            key_symbols=_key_symbols(view, group),
+            cohesion=cohesion(group, edges),
+            spans=spans(group, skip),
+        )
+        for i, (group, label, weights) in enumerate(
+            zip(listed, labels, inside), start=1
+        )
+    ]
+    return Report(
+        communities=communities,
+        small_groups=len(small),
+        small_files=sum(len(g) for g in small),
+        unconnected=len(nodes) - len(linked & set(nodes)),
+        total_files=len(nodes),
+        bridges=bridges(listed, edges),
+        splits=splits(listed),
+        community_of={p: c.id for c in communities for p in c.files},
+        edges=edges,
+    )
+
+
+def label_groups(
+    groups: list[list[str]], hubs: list[str], paths: list[str]
+) -> list[str]:
+    """A directory-based name for each group.
+
+    The directory prefix every path shares is dropped. From the top,
+    a directory holding at least half the group's files is taken and
+    the walk goes deeper; where none does, the top two together name
+    the group if they hold half (``a + b``). Otherwise the files
+    scatter there, so the hub file is added (``src (cli.py)``), or
+    names the group alone when they scatter from the top. Groups that
+    still share a name get their hub file added too.
+    """
+    skip = _shared_depth(paths)
+    labels = [
+        _label(g, posixpath.basename(h), skip) for g, h in zip(groups, hubs)
+    ]
+    seen = Counter(labels)
+    out = []
+    for label, hub in zip(labels, hubs):
+        suffix = f" ({posixpath.basename(hub)})"
+        clash = seen[label] > 1 and not label.endswith(suffix)
+        out.append(label + suffix if clash else label)
+    return out
+
+
+def _label(group: list[str], hub: str, skip: int) -> str:
+    best = None
+    depth = 0
+    while True:
+        depth += 1
+        ranked = _dirs_at(group, skip, depth)
+        if not ranked:
+            return best or hub
+        (top, count), rest = ranked[0], ranked[1:]
+        if count * 2 >= len(group):
+            best = _short(top)
+            continue
+        if rest and (count + rest[0][1]) * 2 >= len(group):
+            return f"{_short(top)} + {_short(rest[0][0])}"
+        return f"{best} ({hub})" if best else hub
+
+
+def _dirs_at(group: list[str], skip: int, depth: int) -> list[tuple[str, int]]:
+    """Directories ``depth`` levels below the shared prefix, by how many
+    of the group's files sit under each (most first, then by name)."""
+    counts: Counter[str] = Counter()
+    for path in group:
+        parts = path.split("/")[skip:]
+        if len(parts) > depth:
+            counts["/".join(parts[:depth])] += 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _short(directory: str) -> str:
+    """Keep the first two segments and the last of a long directory."""
+    parts = directory.split("/")
+    if len(parts) <= 3:
+        return directory
+    return f"{parts[0]}/{parts[1]}/…/{parts[-1]}"
+
+
+def _shared_depth(paths: list[str]) -> int:
+    """How many leading directories every path has in common."""
+    dirs = [p.split("/")[:-1] for p in paths]
+    depth = 0
+    for segment in zip(*dirs):
+        if len(set(segment)) != 1:
+            break
+        depth += 1
+    return depth
+
+
+def cohesion(group: list[str], edges: Edges) -> float:
+    """Inside weight over inside plus boundary weight, two decimals."""
+    members = set(group)
+    inside = boundary = 0
+    for (a, b), weight in edges.items():
+        hits = (a in members) + (b in members)
+        if hits == 2:
+            inside += weight
+        elif hits == 1:
+            boundary += weight
+    if inside + boundary == 0:
+        return 1.0
+    return round(inside / (inside + boundary), 2)
+
+
+def bridges(groups: list[list[str]], edges: Edges) -> list[Bridge]:
+    """The heaviest pairs of groups, with each side's top two files."""
+    of = {p: i for i, group in enumerate(groups, start=1) for p in group}
+    pairs: dict[tuple[int, int], Counter[str]] = defaultdict(Counter)
+    for (a, b), weight in edges.items():
+        ca, cb = of.get(a), of.get(b)
+        if ca is None or cb is None or ca == cb:
+            continue
+        key = (ca, cb) if ca < cb else (cb, ca)
+        pairs[key][a] += weight
+        pairs[key][b] += weight
+    out = []
+    for (first, second), by_file in pairs.items():
+        weight = sum(by_file.values()) // 2
+        out.append(
+            Bridge(
+                first=first,
+                second=second,
+                weight=weight,
+                first_files=_side(by_file, set(groups[first - 1])),
+                second_files=_side(by_file, set(groups[second - 1])),
+            )
+        )
+    out.sort(key=lambda b: (-b.weight, b.first, b.second))
+    return out[:_MAX_BRIDGES]
+
+
+def _side(by_file: Counter[str], members: set[str]) -> list[str]:
+    return _ranked(
+        Counter({p: w for p, w in by_file.items() if p in members})
+    )[:2]
+
+
+def spans(group: list[str], skip: int) -> list[str]:
+    """The group's top-level directories (below the shared prefix),
+    most files first, when there are 3 or more of them."""
+    counts = Counter((p.split("/")[skip:-1] or ["."])[0] for p in group)
+    if len(counts) < _MIN_FILES:
+        return []
+    return [
+        d for d, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+def splits(groups: list[list[str]]) -> list[tuple[str, int]]:
+    """Directories with 3+ files spread over 3+ groups, most cut first."""
+    files: Counter[str] = Counter()
+    owners: dict[str, set[int]] = defaultdict(set)
+    for i, group in enumerate(groups):
+        for path in group:
+            parent = posixpath.dirname(path) or "."
+            files[parent] += 1
+            owners[parent].add(i)
+    cut = [
+        (d, len(owners[d]))
+        for d in files
+        if files[d] >= _MIN_FILES and len(owners[d]) >= _MIN_FILES
+    ]
+    cut.sort(key=lambda dc: (-dc[1], dc[0]))
+    return cut[:_MAX_SPLITS]
+
+
+def _inside_weight(group: list[str], edges: Edges) -> Counter[str]:
+    """Each member's weight to the other members."""
+    members = set(group)
+    weights: Counter[str] = Counter()
+    for (a, b), weight in edges.items():
+        if a in members and b in members:
+            weights[a] += weight
+            weights[b] += weight
+    return weights
+
+
+def _ranked(weights: Counter[str]) -> list[str]:
+    return sorted(weights, key=lambda p: (-weights[p], p))
+
+
+def _key_symbols(view: MapIndex, group: list[str]) -> list[str]:
+    """The group's most-called symbols, as ``stats`` ranks fan-in."""
+    ids = [s.id for path in group for s in view.symbols_by_path.get(path, [])]
+    called = [i for i in ids if view.calls_in.get(i)]
+    called.sort(key=lambda i: (-len(view.calls_in[i]), i))
+    return called[:_KEY_SYMBOLS]
