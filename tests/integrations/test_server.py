@@ -456,7 +456,7 @@ def test_every_unknown_argument_is_named() -> None:
         server._reject_unknown_args("summary", {"files": 1, "rev": "x"})
     message = str(excinfo.value)
     assert message.startswith("unknown arguments 'files', 'rev' for summary")
-    assert "accepted: budget, root" in message
+    assert "accepted: budget, docs, root" in message
 
 
 @pytest.mark.parametrize(
@@ -565,6 +565,7 @@ _DRIFT_VALUES: dict[str, object] = {
     "task": "change f",
     "rev": "HEAD",
     "include_tests": True,
+    "docs": True,
     "sites": True,
     "exact": True,
     "transitive": True,
@@ -1800,7 +1801,7 @@ def test_summary_tool_defaults_budget(
     ctx = _ctx(make_mapped_repo(SRC))
     seen: dict = {}
 
-    def fake_run(index, as_json, budget=None):  # noqa: ANN001, ANN202
+    def fake_run(index, as_json, budget=None, docs=False):  # noqa: ANN001, ANN202
         seen["budget"] = budget
         print("digest")
         return 0
