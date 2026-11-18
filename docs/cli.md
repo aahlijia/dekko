@@ -2097,9 +2097,12 @@ What counts as a link to another doc:
   be the heading text as written.
 
 Tables of contents (`SUMMARY.md`, `_sidebar.md`, `_toc.md`, or any
-page that is mostly a list of links) link to everything. dekko keeps
-them as entry points but leaves them out of "most linked", doc
-communities and `trace` paths.
+page that is mostly a list of links) point at many docs at once.
+dekko keeps them as entry points but leaves them out of "most linked"
+and never routes a `trace` path through one. A contents page for the
+whole site also stays out of doc communities. One for a single section,
+like a `languages.md` that lists every language page, stays in: it's
+what holds that section together.
 
 ```sh
 dekko outline docs/guide.md          # heading tree: lines, then (N code, M doc) per section
@@ -2111,8 +2114,9 @@ dekko trace README.md docs/api.md    # shortest link path: README.md:12 -> docs/
 dekko query docs docs/guide.md       # the sections of other docs that link to it
 ```
 
-`outline` drops the deepest headings first when it runs past
-`--budget` or `--limit`, so you keep the shape of a long doc. `summary`
+When `outline` runs past `--budget` or `--limit`, it keeps every
+top-level heading first, then as many of the next level as fit, so you
+keep the shape of a long doc. `summary`
 shows its docs section on its own when docs outnumber code files.
 `trace` prints each doc with the heading the link arrived at and the
 line that links onward. A broken link from a doc under a test folder
