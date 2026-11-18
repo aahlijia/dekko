@@ -34,6 +34,8 @@ class DocSection:
             heading.
         line: First line of the heading (1-based).
         end_line: Last line before the next heading, or the file's end.
+        anchor: The heading's explicit id (``{#id}``), or empty when
+            it has none and links reach it by its slug.
     """
 
     path: str
@@ -41,6 +43,7 @@ class DocSection:
     level: int
     line: int
     end_line: int
+    anchor: str = ""
 
 
 @dataclass(frozen=True)
@@ -52,13 +55,16 @@ class Candidate:
         text: The reference: a name (``MapIndex.load``, ``Pack``) or a
             path with an optional ``:LINE`` or ``:START-END``.
         kind: Where it was found: ``span`` (inline code), ``fence``
-            (a code block), ``link`` (a link target) or ``prose``.
+            (a code block), ``link`` (a link target), ``wiki`` (a
+            ``[[wikilink]]``), ``route`` (a docs-site route such as
+            ``/features/x``) or ``prose``.
         shape: ``path``, ``qualified`` (dotted or ``::`` name) or
             ``bare`` (one identifier).
         label: A link's text, empty for everything else.
         lang: The language a code block was tagged with, as dekko
             names it, so its names only match that language's code;
             empty when untagged or not in a block.
+        anchor: The heading a link names after ``#``, if any.
     """
 
     line: int
@@ -67,6 +73,7 @@ class Candidate:
     shape: str
     label: str = field(default="", compare=False)
     lang: str = field(default="", compare=False)
+    anchor: str = field(default="", compare=False)
 
 
 # Shell sessions name commands and files, not the repo's symbols, so a
@@ -152,6 +159,10 @@ _RST_INTERPRETED_RE = re.compile(r"(?<![`\w])`([^`]+)`(?!_)")
 _MD_SPAN_RE = re.compile(r"(`+)(.+?)(?<!`)\1(?!`)")
 _SCHEME_RE = re.compile(r"^[A-Za-z][\w+.-]*:")
 _ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L?(\d+))?$")
+_WIKI_RE = re.compile(r"!?\[\[(?!\s)([^\[\]\n]+?)(?<!\s)\]\]")
+_HREF_RE = re.compile(r"""\bhref=["'](/[^"'#?\s]*)(?:#([^"'\s]*))?["']""")
+_RST_DOC_ROLE_RE = re.compile(r":doc:`([^`]+)`")
+_HEADING_ID_RE = re.compile(r"\s*\{#([\w.:-]+)(?:\s+[^}]*)?\}\s*$")
 
 _ATX_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*#*[ \t]*$")
 _SETEXT_RE = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
@@ -210,8 +221,17 @@ def _sections(
         out.append(DocSection(path, name, 0, body + 1, first - 1))
     for i, (line, level, heading) in enumerate(headings):
         end = starts[i + 1] - 1 if i + 1 < len(starts) else total
-        out.append(DocSection(path, heading, level, line, end))
+        text, anchor = _heading_id(heading)
+        out.append(DocSection(path, text, level, line, end, anchor))
     return out
+
+
+def _heading_id(heading: str) -> tuple[str, str]:
+    """``("Title", "id")`` for ``Title {#id}``; no id gives ``""``."""
+    m = _HEADING_ID_RE.search(heading)
+    if m is None:
+        return heading, ""
+    return heading[: m.start()], m.group(1)
 
 
 def _group(
@@ -306,15 +326,23 @@ def _md_line_candidates(line: str, num: int) -> list[Candidate]:
         cands += _link_candidate(refdef.group(2), refdef.group(1), num)
         return cands
     code = [m.span() for m in _MD_SPAN_RE.finditer(line)]
-    links = [
-        m
-        for m in _MD_LINK_RE.finditer(line)
-        if not any(start <= m.start() < end for start, end in code)
-    ]
+
+    def outside(m: re.Match[str]) -> bool:
+        return not any(start <= m.start() < end for start, end in code)
+
+    wikis = [m for m in _WIKI_RE.finditer(line) if outside(m)]
+    links = [m for m in _MD_LINK_RE.finditer(line) if outside(m)]
+    hrefs = [m for m in _HREF_RE.finditer(line) if outside(m)]
+    cands += [_wiki_candidate(m.group(1), num) for m in wikis]
     for m in links:
         cands += _link_candidate(m.group(2), m.group(1), num)
+    cands += [
+        Candidate(num, _route(m.group(1)), "route", "path", anchor=m[2] or "")
+        for m in hrefs
+        if _is_route(m.group(1))
+    ]
     rest = line
-    for m in reversed(links):
+    for m in sorted([*wikis, *links], key=lambda m: m.start(), reverse=True):
         rest = rest[: m.start()] + " " + rest[m.end() :]
     for m in _MD_SPAN_RE.finditer(rest):
         cands += _span_candidates(m.group(2).strip(), num)
@@ -412,6 +440,9 @@ def _rst_line_candidates(line: str, num: int) -> list[Candidate]:
     for m in _RST_LINK_RE.finditer(line):
         cands += _link_candidate(m.group(2), m.group(1).strip(), num)
     rest = _RST_LINK_RE.sub(" ", line)
+    for m in _RST_DOC_ROLE_RE.finditer(rest):
+        cands.append(Candidate(num, _role_target(m.group(1)), "route", "path"))
+    rest = _RST_DOC_ROLE_RE.sub(" ", rest)
     for pattern in (_RST_LITERAL_RE, _RST_ROLE_RE, _RST_INTERPRETED_RE):
         for m in pattern.finditer(rest):
             cands += _span_candidates(_role_target(m.group(1)), num)
@@ -490,9 +521,13 @@ def _span_candidates(content: str, num: int) -> list[Candidate]:
 
 
 def _link_candidate(target: str, label: str, num: int) -> list[Candidate]:
-    """A link target as a path candidate, or nothing for URLs/anchors."""
+    """A link target as a path or route candidate; nothing for a URL.
+
+    A ``#heading`` anchor rides along on the candidate; a ``#L10`` line
+    anchor becomes part of the path, as ``path:10``.
+    """
     target = target.strip()
-    if not target or target.startswith("#") or _SCHEME_RE.match(target):
+    if not target or _SCHEME_RE.match(target) or target.startswith("//"):
         return []
     target, _, anchor = target.split("?", 1)[0].partition("#")
     lines = _ANCHOR_LINE_RE.match(anchor)
@@ -500,7 +535,33 @@ def _link_candidate(target: str, label: str, num: int) -> list[Candidate]:
         target += f":{lines.group(1)}"
         if lines.group(2):
             target += f"-{lines.group(2)}"
-    return [Candidate(num, target, "link", "path", label)]
+        anchor = ""
+    if not target and not anchor:
+        return []
+    if _is_route(target):
+        return [
+            Candidate(num, _route(target), "route", "path", label, "", anchor)
+        ]
+    return [Candidate(num, target, "link", "path", label, "", anchor)]
+
+
+def _is_route(target: str) -> bool:
+    """A site-absolute link with no file extension: ``/features/x``."""
+    name = target.rstrip("/").rsplit("/", 1)[-1]
+    return target.startswith("/") and bool(name) and "." not in name
+
+
+def _route(target: str) -> str:
+    return target.rstrip("/")
+
+
+def _wiki_candidate(inner: str, num: int) -> Candidate:
+    """``[[target#heading|alias]]`` as a ``wiki`` candidate."""
+    target, _, alias = inner.partition("|")
+    name, _, heading = target.partition("#")
+    return Candidate(
+        num, name.strip(), "wiki", "path", alias.strip(), "", heading.strip()
+    )
 
 
 def _path_candidates(text: str, num: int, kind: str) -> list[Candidate]:

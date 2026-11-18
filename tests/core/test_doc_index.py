@@ -211,6 +211,7 @@ def test_links_normalize_their_targets() -> None:
         "docs/cli.md",
         "img/logo.png",
         "src/ref.py",
+        "",  # [f](#local): a heading in this same doc
     }
 
 
