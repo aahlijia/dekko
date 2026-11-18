@@ -239,3 +239,94 @@ def test_summary_tool_takes_a_docs_switch(tmp_path: Path) -> None:
 
     assert reply["result"]["isError"] is False
     assert "docs: 1 file" in reply["result"]["content"][0]["text"]
+
+
+# --- communities --docs ---------------------------------------------------
+
+
+def _two_topics(root: Path, nav: bool = False) -> Path:
+    """Two folders of three docs that link among themselves, joined by
+    one link."""
+    files = {}
+    for topic in ("alpha", "beta"):
+        names = [f"{topic}/{topic[0]}{n}.md" for n in range(3)]
+        for name in names:
+            others = [o for o in names if o != name]
+            links = " ".join(f"[x](../{o})" for o in others)
+            files[name] = f"# {name}\n\n{links}\n"
+    files["alpha/a0.md"] += "Also [b0](../beta/b0.md).\n"
+    if nav:
+        listing = "".join(
+            f"- [{n}]({n})\n" for n in sorted(files) if n.endswith(".md")
+        )
+        files["SUMMARY.md"] = f"# Summary\n\n{listing}"
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    return root
+
+
+def test_doc_communities_follow_the_links(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _two_topics(tmp_path)
+
+    code, out, _ = _run(capsys, "communities", "--docs", "--root", str(root))
+
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0] == (
+        "dekko: 2 doc communities over 6 docs (0 unconnected, 0 small groups)"
+    )
+    assert any(line.startswith("#1 alpha  3 docs, cohesion") for line in lines)
+    assert any(line.startswith("#2 beta  3 docs, cohesion") for line in lines)
+    assert "   top: alpha/a0.md, alpha/a1.md, alpha/a2.md" in lines
+
+
+def test_doc_communities_leave_tables_of_contents_out(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _two_topics(tmp_path, nav=True)
+
+    _, out, _ = _run(capsys, "communities", "--docs", "--root", str(root))
+
+    assert "over 6 docs" in out.splitlines()[0]
+    assert "SUMMARY.md" not in out
+
+
+def test_communities_of_one_doc(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _two_topics(tmp_path)
+
+    code, out, _ = _run(
+        capsys, "communities", "alpha/a0.md", "--root", str(root)
+    )
+
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0] == "alpha/a0.md is in:"
+    assert lines[1].startswith("#1 alpha  3 docs")
+    assert "links to other communities:" in lines
+    assert "  #2 beta  1" in lines
+
+
+def test_doc_communities_as_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _two_topics(tmp_path)
+
+    code, out, _ = _run(
+        capsys, "communities", "--docs", "--json", "--root", str(root)
+    )
+
+    assert code == 0
+    doc = json.loads(out)
+    assert doc["view"] == "docs"
+    assert [c["label"] for c in doc["communities"]] == ["alpha", "beta"]
+    assert doc["communities"][1]["files"] == [
+        "beta/b0.md",
+        "beta/b1.md",
+        "beta/b2.md",
+    ]

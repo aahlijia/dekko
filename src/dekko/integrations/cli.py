@@ -1653,6 +1653,12 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         f"then communities are shed to fit (default: "
         f"{summary.DEFAULT_BUDGET}; 0 = no cap)",
     )
+    p_comm.add_argument(
+        "--docs",
+        action="store_true",
+        help="group docs by the links between them instead of code files; "
+        "a doc as FILE_OR_SYMBOL does the same",
+    )
     _add_read_options(p_comm, no_tests=False)
     p_comm.set_defaults(func=run_communities)
 
@@ -3050,6 +3056,7 @@ def run_communities(args: argparse.Namespace) -> int:
         limit=args.limit,
         budget=args.budget,
         as_json=args.as_json,
+        docs=args.docs,
     )
 
 
