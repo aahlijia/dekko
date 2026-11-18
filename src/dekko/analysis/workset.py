@@ -427,6 +427,8 @@ def _pack_block(pack: Pack) -> list[str]:
     if pack.module_callers:
         joined = ", ".join(pack.module_callers)
         lines.append(f"      module callers: {joined}")
+    if pack.docs:
+        lines.append(f"      docs: {', '.join(pack.docs)}")
     return lines
 
 
@@ -545,6 +547,7 @@ def _pack_json(pack: Pack) -> dict:
             _entry_json(e) for e in pack.entries if e.direction == "callee"
         ],
         "module_callers": pack.module_callers,
+        "docs": pack.docs,
     }
 
 

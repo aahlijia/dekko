@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from dekko.render.mapfile import MAP_DOC_VERSION, _json_dumps, build_id_table
+from dekko.core.docs import DocIndex
 from dekko.core.model import CallGraph, FileMap, Symbol
 
 
@@ -13,6 +14,7 @@ def render_json(
     root_label: str,
     provenance: dict | None = None,
     communities: dict[str, list[list[str]]] | None = None,
+    docs: DocIndex | None = None,
 ) -> bytes:
     """Serialize the full graph (including external calls) to JSON.
 
@@ -24,6 +26,8 @@ def render_json(
             discovery options, per-file hashes), or ``None``.
         communities: View name → file communities (paths), or ``None``
             to leave the key out.
+        docs: Doc sections and their code references, or ``None`` to
+            leave the doc keys out (a map that never indexed docs).
 
     Returns:
         Compact JSON bytes. ``map.json`` has no human reader — only
@@ -237,6 +241,13 @@ def render_json(
             view: [[position[p] for p in group] for group in groups]
             for view, groups in communities.items()
         }
+    if docs is not None:
+        # Plain strings, not interned: a doc link's target is read only
+        # by the doc queries, and the lists are small next to the
+        # graph. Additive and optional like ``type_uses``.
+        doc["doc_sections"] = [asdict(s) for s in docs.sections]
+        doc["doc_links"] = [asdict(link) for link in docs.links]
+        doc["doc_dangling"] = [asdict(d) for d in docs.dangling]
 
     return _json_dumps(doc) + b"\n"
 

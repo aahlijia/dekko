@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from functools import cache, cached_property
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ from dekko import selfcheck
 from dekko.core import languages, walker
 from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.classify import is_test_path
+from dekko.core.docs import DocDangling, DocLink, DocSection
 from dekko.core.model import (
     CallGraph,
     CatchSite,
@@ -618,6 +619,7 @@ def compute_provenance(
     graph: CallGraph,
     skipped: list[tuple[str, str]] | None = None,
     follow_symlinks: bool = False,
+    doc_paths: list[str] | tuple[str, ...] = (),
 ) -> dict:
     """Build the provenance stamp for a freshly generated map.
 
@@ -642,6 +644,9 @@ def compute_provenance(
         follow_symlinks: Whether this run indexed symlinked files as-is
             instead of skipping them — recorded so a later freshness
             check can detect the flag changing between runs.
+        doc_paths: Every doc the map indexed. Hashed apart from
+            ``files`` so nothing that counts mapped code sees docs, but
+            checked the same way, so editing a doc stales the map.
 
     Returns:
         JSON-serializable provenance dict.
@@ -660,6 +665,8 @@ def compute_provenance(
         "follow_symlinks": follow_symlinks,
         "files": {rel: _file_hash(root / rel) for rel in paths},
         "stat": {rel: _stat_sig(root / rel) for rel in paths},
+        "doc_files": {rel: _file_hash(root / rel) for rel in doc_paths},
+        "doc_stat": {rel: _stat_sig(root / rel) for rel in doc_paths},
         "unsupported": _unsupported_summary(skipped),
         "build_scripts": _build_script_summary(skipped),
         "vendored_excluded": _vendored_summary(skipped),
@@ -866,6 +873,15 @@ class MapIndex:
             one consumer, ``unused``'s dispatch check, asks "is this
             flagged symbol's name read anywhere"; never an adjacency
             table, since a read is not an edge (``model.RawRead``).
+        doc_sections: Every indexed doc's heading sections.
+        doc_links: Resolved doc-to-code references; ``section`` indexes
+            ``doc_sections``.
+        doc_dangling: Doc references that point at nothing any more.
+        doc_links_by_target: Symbol id or file path → ``doc_links``
+            indexes (an ambiguous link is filed under each candidate).
+        doc_links_by_doc: Doc path → its ``doc_links`` indexes.
+        has_doc_index: Whether the map was built by a dekko that
+            indexes docs (false for older maps and in-memory indexes).
         type_uses: Every parameter/return annotation on a
             function-shaped node that is not a symbol, repo-wide
             (empty for maps written before the section existed) —
@@ -969,6 +985,12 @@ class MapIndex:
     env_reads_by_key: dict[str, list[EnvRead]] = field(default_factory=dict)
     reads_by_name: dict[str, list[ReadSite]] = field(default_factory=dict)
     type_uses: list[TypeUse] = field(default_factory=list)
+    doc_sections: list[DocSection] = field(default_factory=list)
+    doc_links: list[DocLink] = field(default_factory=list)
+    doc_dangling: list[DocDangling] = field(default_factory=list)
+    doc_links_by_target: dict[str, list[int]] = field(default_factory=dict)
+    doc_links_by_doc: dict[str, list[int]] = field(default_factory=dict)
+    has_doc_index: bool = False
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
@@ -1107,6 +1129,7 @@ class MapIndex:
         _filter_module_graph(self, out)
         _filter_throws_catches(self, out, by_id)
         _filter_env_reads(self, out)
+        _filter_docs(self, out, by_id)
         _filter_reads(self, out, by_id)
         out.type_uses = [t for t in self.type_uses if not is_test_path(t.path)]
         out.hidden_test_symbols = {
@@ -1310,6 +1333,48 @@ def _filter_env_reads(src: "MapIndex", out: "MapIndex") -> None:
         kept = [r for r in reads if not is_test_path(r.path)]
         if kept:
             out.env_reads_by_key[key] = kept
+
+
+def _filter_docs(
+    src: "MapIndex", out: "MapIndex", by_id: dict[str, Symbol]
+) -> None:
+    """Fill ``out``'s doc fields from ``src``: docs under test paths and
+    references to test code dropped.
+
+    ``doc_sections`` is shared as-is so link ``section`` indexes stay
+    valid; a test doc's sections are only unreachable, through no link.
+    """
+    out.has_doc_index = src.has_doc_index
+    out.doc_sections = src.doc_sections
+    out.doc_links = [
+        kept
+        for link in src.doc_links
+        if not is_test_path(src.doc_sections[link.section].path)
+        and (kept := _prod_doc_link(link, by_id)) is not None
+    ]
+    out.doc_dangling = [
+        d
+        for d in src.doc_dangling
+        if not is_test_path(src.doc_sections[d.section].path)
+    ]
+    _index_doc_links(out)
+
+
+def _prod_doc_link(link: DocLink, by_id: dict[str, Symbol]) -> DocLink | None:
+    """``link`` with its test-code targets removed, or ``None`` if none
+    is left."""
+
+    def prod(target: str) -> bool:
+        if "::" in target:
+            return target in by_id
+        return not is_test_path(target)
+
+    if not link.candidates:
+        return link if prod(link.target) else None
+    kept = tuple(c for c in link.candidates if prod(c))
+    if not kept:
+        return None
+    return replace(link, candidates=kept)
 
 
 def _filter_reads(
@@ -1709,6 +1774,7 @@ def load_map(root: Path) -> MapIndex | None:
     _load_module_graph(index, doc, ids)
     _load_throws_catches(index, doc, ids)
     _load_env_reads(index, doc)
+    _load_docs(index, doc)
     _load_reads(index, doc, ids)
     _load_type_uses(index, doc)
     _load_communities(index, doc)
@@ -1899,6 +1965,42 @@ def _load_env_reads(index: MapIndex, doc: dict) -> None:
             line=d.get("line", 0),
         )
         index.env_reads_by_key.setdefault(read.key, []).append(read)
+
+
+def _load_docs(index: MapIndex, doc: dict) -> None:
+    """Fill ``index``'s doc fields from a parsed ``map.json`` doc.
+
+    Maps written before docs were indexed have none of the keys; their
+    ``has_doc_index`` stays false so a doc query can say so instead of
+    answering "no docs".
+    """
+    if "doc_sections" not in doc:
+        return
+    index.has_doc_index = True
+    index.doc_sections = [
+        _from_known(DocSection, d) for d in doc.get("doc_sections", [])
+    ]
+    index.doc_links = [
+        _from_known(
+            DocLink, {**d, "candidates": tuple(d.get("candidates", ()))}
+        )
+        for d in doc.get("doc_links", [])
+    ]
+    index.doc_dangling = [
+        _from_known(DocDangling, d) for d in doc.get("doc_dangling", [])
+    ]
+    _index_doc_links(index)
+
+
+def _index_doc_links(index: MapIndex) -> None:
+    """Rebuild the by-target and by-doc lookups from ``doc_links``."""
+    index.doc_links_by_target = {}
+    index.doc_links_by_doc = {}
+    for i, link in enumerate(index.doc_links):
+        for target in link.candidates or (link.target,):
+            index.doc_links_by_target.setdefault(target, []).append(i)
+        doc = index.doc_sections[link.section].path
+        index.doc_links_by_doc.setdefault(doc, []).append(i)
 
 
 def _load_type_uses(index: MapIndex, doc: dict) -> None:
@@ -2257,39 +2359,41 @@ def _freshness_from_provenance(root: Path, prov: dict) -> Freshness:
 
 
 def _content_freshness(root: Path, prov: dict) -> Freshness:
-    """The source-content leg: were files added, removed, or changed?"""
-    recorded: dict[str, str] = prov.get("files", {})
+    """The source-content leg: were files added, removed, or changed?
+
+    Docs are compared the same way as code, from their own provenance
+    keys; a provenance written before docs were indexed records none,
+    so every doc on disk reads as added and the map rebuilds once.
+    """
+    options = {
+        "subpath": prov.get("subpath"),
+        "excludes": tuple(prov.get("excludes", [])),
+        "max_file_size": prov.get(
+            "max_file_size", walker.DEFAULT_MAX_FILE_SIZE
+        ),
+        "follow_symlinks": prov.get("follow_symlinks", False),
+        "candidates": walker.list_files(root),
+    }
     recorded_stat: dict[str, list[int]] = prov.get("stat", {})
     seen_stat: dict[str, list[int]] = {}
     current_paths, _ = walker.discover(
         root,
-        subpath=prov.get("subpath"),
-        excludes=tuple(prov.get("excludes", [])),
-        max_file_size=prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE),
-        follow_symlinks=prov.get("follow_symlinks", False),
+        **options,
         known_stat=recorded_stat,
         stat_out=seen_stat,
     )
-    # Fast path: a file whose (mtime, size) signature is unchanged is
-    # assumed unchanged and not re-hashed (discovery skipped its
-    # content gates on the same signature). Files that are new, lack a
-    # recorded signature, or whose stat moved fall back to hashing —
-    # the content hash remains the decider for those.
-    current: dict[str, str] = {}
-    for rel in current_paths:
-        sig = recorded_stat.get(rel)
-        if sig and sig == seen_stat.get(rel):
-            current[rel] = recorded.get(rel, "")
-        else:
-            current[rel] = _file_hash(root / rel)
-
-    added = sorted(set(current) - set(recorded))
-    removed = sorted(set(recorded) - set(current))
-    changed = sorted(
-        rel
-        for rel in set(recorded) & set(current)
-        if recorded[rel] != current[rel]
+    code = _compare_hashes(
+        root, current_paths, prov.get("files", {}), recorded_stat, seen_stat
     )
+    doc_paths = walker.discover_docs(root, **options)
+    docs = _compare_hashes(
+        root,
+        doc_paths,
+        prov.get("doc_files", {}),
+        prov.get("doc_stat", {}),
+        {rel: _stat_sig(root / rel) for rel in doc_paths},
+    )
+    added, removed, changed = (sorted(a + b) for a, b in zip(code, docs))
     is_stale = bool(added or removed or changed)
     return Freshness(
         fresh=not is_stale,
@@ -2298,6 +2402,37 @@ def _content_freshness(root: Path, prov: dict) -> Freshness:
         changed=changed,
         reason="content" if is_stale else None,
     )
+
+
+def _compare_hashes(
+    root: Path,
+    current_paths: list[str],
+    recorded: dict[str, str],
+    recorded_stat: dict[str, list[int]],
+    seen_stat: dict[str, list[int]],
+) -> tuple[list[str], list[str], list[str]]:
+    """``(added, removed, changed)`` of the tree against a recording.
+
+    Fast path: a file whose (mtime, size) signature is unchanged is
+    assumed unchanged and not re-hashed. Files that are new, lack a
+    recorded signature, or whose stat moved fall back to hashing — the
+    content hash remains the decider for those.
+    """
+    current: dict[str, str] = {}
+    for rel in current_paths:
+        sig = recorded_stat.get(rel)
+        if sig and sig == seen_stat.get(rel):
+            current[rel] = recorded.get(rel, "")
+        else:
+            current[rel] = _file_hash(root / rel)
+    added = sorted(set(current) - set(recorded))
+    removed = sorted(set(recorded) - set(current))
+    changed = sorted(
+        rel
+        for rel in set(recorded) & set(current)
+        if recorded[rel] != current[rel]
+    )
+    return added, removed, changed
 
 
 def content_changes(root: Path, freshness: Freshness) -> dict[str, str | None]:

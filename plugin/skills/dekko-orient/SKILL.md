@@ -53,6 +53,7 @@ don't fall back to grep because "the map might be stale now."
 | What a type extends, and what extends it | `get_supertypes` / `get_subtypes` | `dekko query supertypes\|subtypes <type>` |
 | How far to trust fan-in counts here | `check_ambiguous` | `dekko ambiguous` |
 | Symbol notes (rationale) | `list_notes` / `add_note` | `dekko note list\|add` |
+| Which docs describe a symbol or file; what a doc points at | `query_symbol` (`docs:` line) | `dekko query docs <sym\|file>` / `dekko query refs <doc>` |
 | Text dekko doesn't model: strings, comments, config, prose | grep/Read | grep/Read |
 
 `search_code` is relevance-ranked over names, signatures and doc lines,

@@ -53,6 +53,7 @@ from dekko.analysis import communities
 from dekko.analysis import summary
 from dekko.core.model import Symbol
 from dekko.analysis import trace
+from dekko.analysis import docs as docs_mod
 from dekko.analysis import unused
 from dekko.core import tier2, walker
 from dekko.analysis import workset as workset_mod
@@ -79,6 +80,7 @@ SUBCOMMANDS = (
     "daemon",
     "serve",
     "unused",
+    "docs",
     "stats",
     "ambiguous",
     "summary",
@@ -567,7 +569,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "(for catches) a raised type name (e.g. ConfigError, "
         "ValueError), or (for env) a literal env-var name (e.g. "
         "DATABASE_URL); 'throws' takes a function/method symbol like "
-        "callers/callees; 'cohesion' takes a file path like 'file'. "
+        "callers/callees; 'cohesion' takes a file path like 'file'; "
+        "'docs' takes a symbol or a file path and lists the doc sections "
+        "that name it; 'refs' takes a doc path, optionally with "
+        "'#heading' (README.md#install), and lists the code it names. "
         "Append ':LINE' (file.py:Class.method:LINE) "
         "to pick one candidate out of an overload set the "
         "ambiguous-candidate error reports. Required for every action "
@@ -1442,6 +1447,33 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_read_options(p_unused)
     p_unused.set_defaults(func=run_unused)
+
+    p_docs = sub.add_parser(
+        "docs",
+        help="doc rot: references in Markdown/RST that no longer point "
+        "at code (--stale)",
+    )
+    p_docs.add_argument(
+        "paths",
+        nargs="*",
+        metavar="PATH",
+        help="only docs at or under these repo-relative paths",
+    )
+    p_docs.add_argument(
+        "--stale",
+        action="store_true",
+        help="list doc references to missing paths, lines past a "
+        "file's end, missing members of known types, and line links "
+        "whose symbol moved; exits 1 when any are found, 0 when clean",
+    )
+    p_docs.add_argument(
+        "--all",
+        action="store_true",
+        help="include changelogs and release notes, which cite removed "
+        "names on purpose and are skipped by default",
+    )
+    _add_read_options(p_docs)
+    p_docs.set_defaults(func=run_docs)
 
     p_stats = sub.add_parser(
         "stats", help="hotspots, largest files, language mix"
@@ -2880,6 +2912,27 @@ def run_search(args: argparse.Namespace) -> int:
         root=root,
         scorer_name=args.scorer,
         excluded_test_count=excluded_test_count,
+    )
+
+
+def run_docs(args: argparse.Namespace) -> int:
+    """Handle ``dekko docs``."""
+    if not args.stale:
+        print(
+            "dekko docs: nothing to do; pass --stale to list doc rot",
+            file=sys.stderr,
+        )
+        return 2
+    index, _ = _read_index(args)
+    if index is None:
+        # Exit 1 means "stale docs found"; without a map there is no
+        # answer, and CI must not read that as rot.
+        return docs_mod.EXIT_CANNOT_TELL
+    return docs_mod.run_stale(
+        index,
+        args.paths,
+        include_changelogs=args.all,
+        as_json=args.as_json,
     )
 
 

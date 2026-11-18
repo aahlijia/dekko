@@ -240,7 +240,7 @@ place of the slash commands (see
 | Tool | Backs |
 | --- | --- |
 | `search_code` | free-text relevance search over every symbol (BM25 by default; `scorer: "embedding"` opt-in with `dekko[search]`) |
-| `query_symbol` | signature, doc, fan-in/out, notes |
+| `query_symbol` | signature, doc, fan-in/out, notes, and the doc sections that name it |
 | `get_callers` / `get_callees` | callers/callees, with call sites. `get_callers` leaves out test-file callers unless you pass `include_tests: true` (the CLI's `query callers` includes them), and says how many it left out |
 | `find_usages` | calls into an external name: by function (`run`), import binding (`chalk`, `np`), or module (`numpy`, `node:path`), with a members histogram |
 | `find_type_usages` | functions/methods taking or returning a type |

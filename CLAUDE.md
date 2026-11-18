@@ -28,9 +28,10 @@ its own source. See `README.md` and `docs/` (`docs/install.md`,
   generated map of itself; the map is git-ignored by default but this
   repo tracks its own for dogfooding. **Always regenerate the map before
   committing and commit the refreshed `.dekko/` files with the change:**
-  run `dekko map` (or `uv run dekko map`) after your last source edit,
-  then `git add .dekko/`. A checkout's map must match its source, so a
-  source commit with a stale map is a bug. The `dekko-map` pre-commit
+  run `dekko map` (or `uv run dekko map`) after your last source or doc
+  edit, then `git add .dekko/`. A checkout's map must match its source
+  and its Markdown/RST docs (doc links live in the map), so a commit of
+  either with a stale map is a bug. The `dekko-map` pre-commit
   hook runs `dekko map --if-stale` but only when hooks are installed and
   it does not stage the result, so it is not a substitute for doing this
   yourself.

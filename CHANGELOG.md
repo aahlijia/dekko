@@ -10,6 +10,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 ## [Unreleased]
 
 ### Added
+- **Docs linked to the code they name.** `dekko map` now indexes
+  Markdown (`.md`, `.mdx`) and reStructuredText (`.rst`) files by
+  heading section and matches the code references in each one (inline
+  code, code blocks, links, file paths) against the map, with no LLM
+  and no new dependency. Each match is tagged `EXTRACTED`, `INFERRED`
+  or `AMBIGUOUS`, and prose words never match a name.
+  - `dekko query docs <symbol|file>` lists the sections that name it.
+  - `dekko query refs <doc>[#heading]` lists the code a doc or one
+    section names, plus its stale references.
+  - `dekko docs --stale` reports references to missing files, lines
+    past a file's end, missing members of known types, and line links
+    whose symbol moved. It exits 1 when it finds any. Changelogs are
+    skipped unless `--all`.
+  - `query symbol` and MCP `query_symbol` get a `docs:` line, and
+    `context`/`workset` packs list up to two sections.
+  - Editing a doc now makes the map stale, like editing code.
 - **`dekko communities`: the repo's subsystems, even when they cross
   directories.** `dekko map` now groups files by how much they call,
   reference, import and extend each other (Louvain clustering, the
