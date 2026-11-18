@@ -101,18 +101,40 @@ def render_text(outline: DocOutline, budget: int | None, limit: int) -> None:
     """Print one doc's outline, dropping the deepest headings first."""
     prefix = header(outline)
     shown = _shown(outline)
-    levels = sorted({s.level for s, _, _ in shown}, reverse=True)
-    kept_rows = rows(outline)
-    for deepest in levels[:-1]:
-        if _fits(prefix, kept_rows, budget, limit):
-            break
-        kept_rows = rows(outline, max_level=deepest - 1)
-    kept, meter = fit_to_budget(kept_rows, budget, limit, prefix=prefix)
+    picked = _shallowest_first(prefix, shown, budget, limit)
+    kept, meter = fit_to_budget(picked, budget, limit, prefix=prefix)
     meter.total = len(shown)
     print(prefix)
     for row in kept:
         print(row)
     print(meter.footer())
+
+
+def _shallowest_first(
+    prefix: str,
+    shown: list[tuple[DocSection, int, int]],
+    budget: int | None,
+    limit: int | None,
+) -> list[str]:
+    """Rows that fit, taken top level first, then printed in doc order.
+
+    Every level-1 heading goes in before any level 2, and so on, so a
+    long doc keeps its outer shape and as much of the next level as
+    the budget allows.
+    """
+    rows_at = [_row(s, code, links) for s, code, links in shown]
+    order = sorted(range(len(shown)), key=lambda i: (shown[i][0].level, i))
+    used = estimate_tokens(prefix)
+    chosen: list[int] = []
+    for i in order:
+        if limit is not None and len(chosen) >= limit:
+            break
+        cost = estimate_tokens(rows_at[i]) + 1
+        if budget and chosen and used + cost > budget:
+            break
+        chosen.append(i)
+        used += cost
+    return [rows_at[i] for i in sorted(chosen)]
 
 
 def json_entry(outline: DocOutline) -> dict:
@@ -177,16 +199,6 @@ def _row(section: DocSection, code: int, links: int) -> str:
     tail = f"  ({', '.join(counts)})" if counts else ""
     span = f"{section.line}-{section.end_line}"
     return f"{indent}{span}  {section.heading}{tail}"
-
-
-def _fits(
-    prefix: str, kept: list[str], budget: int | None, limit: int | None
-) -> bool:
-    if limit is not None and len(kept) > limit:
-        return False
-    if not budget:
-        return True
-    return estimate_tokens("\n".join([prefix, *kept])) <= budget
 
 
 def _count(n: int, noun: str) -> str:

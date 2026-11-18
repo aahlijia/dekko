@@ -452,3 +452,21 @@ def test_query_docs_on_a_doc_lists_what_links_to_it(
         "docs/guide/setup.md:1  Setup  → #example-1",
         "docs/index.mdx:1  Welcome  → #custom-id",
     ]
+
+
+def test_outline_keeps_what_fits_of_a_level_too_big_to_show_whole(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    text = "# Top\n" + "".join(f"## Sec {n}\n### sub {n}\n" for n in range(40))
+    (tmp_path / "big.md").write_text(text)
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    _, out, _ = _run(
+        capsys, "outline", "big.md", "--limit", "10", "--root", str(tmp_path)
+    )
+
+    headings = [
+        line.split("  ")[-1].strip() for line in out.splitlines()[1:11]
+    ]
+    assert headings == ["Top", *(f"Sec {n}" for n in range(9))]
+    assert "sub" not in out
