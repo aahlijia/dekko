@@ -1912,12 +1912,17 @@ map already has.
 Each community row shows:
 
 - **a label.** The folder holding most of its files, as deep as a
-  majority goes (`src/app/core`). When its files split evenly between
-  two folders, both (`core + api`). When they scatter, the last
-  majority folder plus the file at the center of the community
-  (`src/app (server.py)`).
+  majority goes (`app/core`). When no folder has a majority, two
+  folders that hold half the files between them get both names
+  (`core + api`), as long as the second has at least half as many as
+  the first. One folder with twice the files of any other gets its
+  name alone. When the files scatter, it's the last majority
+  folder plus the busiest file inside it (`app (server.py)`). Folders
+  every label starts with, like `src/myapp/`, are left off.
 - **files and symbols**, the three files with the most weight inside
-  it (`top:`), and its three most-called symbols (`key:`).
+  it (`top:`), and the three symbols the most other files call or
+  reference (`key:`). A helper only its own file calls doesn't make
+  that list, however busy it is.
 - **cohesion**: the share of its link weight that stays inside it.
   1.00 means nothing outside touches it.
 - **`spans:`** when its files sit in three or more top-level folders.
@@ -1930,6 +1935,13 @@ files land in three or more communities. Files with no link to any
 other file are counted on the header line (`unconnected`), and groups
 under three files are folded into `small groups`. Both still answer
 `dekko communities <file>`.
+
+On a big repo built around one shared framework, don't trust the
+biggest communities to be subsystems. Files that lean on the same
+framework file end up together whatever they do: in zed, the largest
+community is 443 files from 123 crates, gathered around gpui's
+`app.rs`. A `spans:` line and low cohesion give these away. Look for
+the subsystems in the smaller communities with high cohesion.
 
 Tests are left out unless you pass `--tests`. That's the opposite of
 most commands (which have `--no-tests`), on purpose: shared test
