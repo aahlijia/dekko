@@ -332,8 +332,8 @@ def _listed(index: MapIndex, tests: bool) -> _Listed:
     stored = index.communities_with_tests if tests else index.communities
     groups = [g for g in stored if len(g) >= _MIN_FILES]
     inside = [_inside_weight(g, edges) for g in groups]
-    hubs = [_ranked(w)[0] if w else g[0] for g, w in zip(groups, inside)]
-    labels = label_groups(groups, hubs, nodes)
+    ranked = [_ranked(w) or g for g, w in zip(groups, inside)]
+    labels = label_groups(groups, ranked, nodes)
     return _Listed(nodes, edges, stored, groups, inside, labels)
 
 
@@ -409,28 +409,71 @@ def describe(index: MapIndex, *, tests: bool) -> Report:
 
 
 def label_groups(
-    groups: list[list[str]], hubs: list[str], paths: list[str]
+    groups: list[list[str]], ranked: list[list[str]], paths: list[str]
 ) -> list[str]:
     """A directory-based name for each group.
 
+    Args:
+        groups: The groups to name.
+        ranked: Each group's files, most weight inside it first.
+        paths: Every file in the view, to find the prefix they share.
+
     The directory prefix every path shares is dropped. From the top,
     a directory holding at least half the group's files is taken and
-    the walk goes deeper inside it; two directories holding half each,
-    or the top two together holding half where none does alone, name
-    the group ``a + b``. Otherwise the files scatter there, so the hub
-    file is added (``src (cli.py)``), or names the group alone when
-    they scatter from the top. Groups that still share a name get
-    their hub added, as its path when the name already holds it.
+    the walk goes deeper inside it, until files sitting in it directly
+    make up half the group. Where no directory holds half, two directories
+    that hold half together name the group ``a + b``, if the second
+    is at least half the first and nothing else ties it; one directory
+    with twice the files of any other and a third of the group names
+    it alone. Otherwise the files scatter there, so the hub (the
+    heaviest file in the directory taken) is added (``src (cli.py)``),
+    or names the group alone when they scatter from the top. When two
+    or more directories are named, the leading folders they all share
+    are dropped too. Groups that still share a name get their hub
+    added, as its path when the name already holds it.
     """
     skip = _shared_depth(paths)
-    labels = [
-        _label(g, posixpath.basename(h), skip) for g, h in zip(groups, hubs)
-    ]
+    names = [_name(g, skip) for g in groups]
+    prefix = _named_prefix(
+        [d for dirs, scattered in names if not scattered for d in dirs]
+    )
+    labels, hubs = [], []
+    for (dirs, scattered), files in zip(names, ranked):
+        hub = _hub(files, skip, dirs[0] if len(dirs) == 1 else None)
+        hubs.append(hub)
+        labels.append(_text(dirs, scattered, hub, prefix))
     seen = Counter(labels)
     return [
         _distinct(label, hub, skip) if seen[label] > 1 else label
         for label, hub in zip(labels, hubs)
     ]
+
+
+def _hub(files: list[str], skip: int, directory: str | None) -> str:
+    """The heaviest of ``files`` inside ``directory``, if one is."""
+    if directory is not None:
+        for path in files:
+            if _under(path, skip, directory):
+                return path
+    return files[0]
+
+
+def _named_prefix(dirs: list[str]) -> int:
+    """Leading folders every named directory shares, each keeping its
+    last; 0 with fewer than two to compare."""
+    # _shared_depth reads the last segment as a file name, which is
+    # what keeps each directory's last folder.
+    return _shared_depth(dirs) if len(dirs) >= 2 else 0
+
+
+def _text(dirs: list[str], scattered: bool, hub: str, prefix: int) -> str:
+    shown = [_short("/".join(d.split("/")[prefix:])) for d in dirs]
+    name = posixpath.basename(hub)
+    if not scattered:
+        return " + ".join(shown)
+    if not dirs or len(dirs[0].split("/")) <= prefix:
+        return name
+    return f"{shown[0]} ({name})"
 
 
 def _distinct(label: str, hub: str, skip: int) -> str:
@@ -445,25 +488,33 @@ def _distinct(label: str, hub: str, skip: int) -> str:
     return f"{label} ({name})"
 
 
-def _label(group: list[str], hub: str, skip: int) -> str:
-    best = None
+def _name(group: list[str], skip: int) -> tuple[list[str], bool]:
+    """The directories that name ``group`` (below the shared prefix),
+    and whether its files scatter below the last of them."""
+    size = len(group)
+    best: list[str] = []
     scope = group
     depth = 0
-    while True:
-        depth += 1
-        ranked = _dirs_at(scope, skip, depth)
-        if not ranked:
-            return best or hub
-        (top, count), rest = ranked[0], ranked[1:]
-        runner = rest[0][1] if rest else 0
-        if runner * 2 >= len(group) or (
-            count * 2 < len(group) and (count + runner) * 2 >= len(group)
-        ):
-            return f"{_short(top)} + {_short(rest[0][0])}"
-        if count * 2 < len(group):
-            return f"{best} ({hub})" if best else hub
-        best = _short(top)
-        scope = [p for p in scope if _under(p, skip, top)]
+    while ranked := _dirs_at(scope, skip, depth := depth + 1):
+        top, count = ranked[0]
+        counts = [n for _, n in ranked[1:]]
+        runner = counts[0] if counts else 0
+        # Files sitting in the directory taken compete with its children.
+        loose = len(scope) - sum(n for _, n in ranked)
+        third = max(counts[1] if len(counts) > 1 else 0, loose)
+        if best and loose * 2 >= size:
+            return best, False
+        if count * 2 >= size and runner * 2 < size:
+            best = [top]
+            scope = [p for p in scope if _under(p, skip, top)]
+            continue
+        pair = runner * 2 >= count and third < runner
+        if pair and (count + runner) * 2 >= size:
+            return [top, ranked[1][0]], False
+        if count >= 2 * max(runner, loose) and count * 3 >= size:
+            return [top], False
+        return best, True
+    return best, not best
 
 
 def _under(path: str, skip: int, directory: str) -> bool:

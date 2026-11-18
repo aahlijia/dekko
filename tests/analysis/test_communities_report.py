@@ -23,25 +23,25 @@ def test_a_label_drops_the_shared_prefix_and_follows_the_majority() -> None:
     ]
     paths = [p for g in groups for p in g]
 
-    assert label_groups(groups, ["a.py", "x.py"], paths) == ["core", "web"]
+    assert label_groups(groups, groups, paths) == ["core", "web"]
 
 
 def test_two_directories_share_a_label_when_neither_has_half() -> None:
     group = ["p/a.py", "p/d.py", "q/b.py", "q/e.py", "r/c.py"]
 
-    assert label_groups([group], ["a.py"], [*group, "z/w.py"]) == ["p + q"]
+    assert label_groups([group], [group], [*group, "z/w.py"]) == ["p + q"]
 
 
 def test_a_scattered_community_is_named_by_its_hub() -> None:
     group = ["a/1.py", "b/2.py", "c/3.py", "d/4.py", "e/5.py"]
 
-    assert label_groups([group], ["c/3.py"], group) == ["3.py"]
+    assert label_groups([group], [["c/3.py"]], group) == ["3.py"]
 
 
 def test_a_community_that_scatters_below_a_directory_adds_its_hub() -> None:
     group = [f"src/{d}/{i}.py" for i, d in enumerate("abcde")]
 
-    labels = label_groups([group], ["src/c/2.py"], [*group, "lib/x.py"])
+    labels = label_groups([group], [["src/c/2.py"]], [*group, "lib/x.py"])
 
     assert labels == ["src (2.py)"]
 
@@ -50,7 +50,7 @@ def test_long_directory_names_lose_their_middle() -> None:
     deep = "core/spring-boot/src/main/java/org/x"
     group = [f"{deep}/A.java", f"{deep}/B.java", f"{deep}/C.java"]
 
-    labels = label_groups([group], ["A.java"], [*group, "other/D.java"])
+    labels = label_groups([group], [group], [*group, "other/D.java"])
 
     assert labels == ["core/spring-boot/…/x"]
 
@@ -62,7 +62,7 @@ def test_communities_with_the_same_label_name_their_hub() -> None:
     ]
     paths = [*groups[0], *groups[1], "api/q.py"]
 
-    labels = label_groups(groups, ["web/a.py", "web/m.py"], paths)
+    labels = label_groups(groups, groups, paths)
 
     assert labels == ["web (a.py)", "web (m.py)"]
 
@@ -70,9 +70,7 @@ def test_communities_with_the_same_label_name_their_hub() -> None:
 def test_a_community_split_evenly_names_both_halves() -> None:
     group = ["app/a.py", "app/b.py", "lib/c.py", "lib/d.py"]
 
-    assert label_groups([group], ["app/a.py"], [*group, "x/y.py"]) == [
-        "app + lib"
-    ]
+    assert label_groups([group], [group], [*group, "x/y.py"]) == ["app + lib"]
 
 
 def test_the_label_only_descends_into_the_directory_it_took() -> None:
@@ -82,7 +80,7 @@ def test_the_label_only_descends_into_the_directory_it_took() -> None:
     group = ["src/a/1.py", "src/b/2.py", "src/c/3.py", "tools/x/4.py"]
     group.append("tools/x/5.py")
 
-    labels = label_groups([group], ["src/a/1.py"], [*group, "z/w.py"])
+    labels = label_groups([group], [group], [*group, "z/w.py"])
 
     assert labels == ["src (1.py)"]
 
@@ -94,7 +92,7 @@ def test_hub_named_communities_with_the_same_hub_name_use_its_path() -> None:
     ]
 
     labels = label_groups(
-        groups, ["c/index.ts", "h/index.ts"], groups[0] + groups[1]
+        groups, [["c/index.ts"], ["h/index.ts"]], groups[0] + groups[1]
     )
 
     assert labels == ["c/index.ts", "h/index.ts"]
@@ -240,3 +238,66 @@ def test_a_constructor_counts_toward_its_class(
 
     assert "p/Foo.java::Foo" in community.key_symbols
     assert "p/Foo.java::Foo.Foo" not in community.key_symbols
+
+
+def _files(directory: str, count: int) -> list[str]:
+    return [
+        f"{directory}/{directory.replace('/', '_')}{i}.py"
+        for i in range(count)
+    ]
+
+
+def test_a_third_directory_tying_the_second_blocks_a_pair() -> None:
+    group = [*_files("r", 5), *_files("a", 4), *_files("i", 4)]
+
+    labels = label_groups([group], [group], [*group, "z/w.py"])
+
+    assert labels == ["r0.py"]
+
+
+def test_a_directory_far_ahead_of_the_rest_names_the_group_alone() -> None:
+    group = [*_files("db", 8), *_files("api", 1)]
+    group += [f"x{i}/f{i}.py" for i in range(8)]
+
+    assert label_groups([group], [group], [*group, "z/w.py"]) == ["db"]
+
+
+def test_files_in_the_directory_taken_outweigh_a_subfolder() -> None:
+    group = [*_files("app", 4), *_files("app/sub", 2)]
+
+    assert label_groups([group], [group], [*group, "z/w.py"]) == ["app"]
+
+
+def test_a_hub_added_to_tell_labels_apart_sits_in_the_named_folder() -> None:
+    first = ["cli/a.ts", "cli/b.ts", "server/path.ts"]
+    second = ["cli/c.ts", "cli/d.ts", "server/engine.ts"]
+    ranked = [
+        ["server/path.ts", "cli/a.ts", "cli/b.ts"],
+        ["server/engine.ts", "cli/c.ts", "cli/d.ts"],
+    ]
+
+    labels = label_groups([first, second], ranked, first + second)
+
+    assert labels == ["cli (a.ts)", "cli (c.ts)"]
+
+
+def test_folders_every_label_shares_are_dropped() -> None:
+    groups = [_files("src/pkg/core", 3), _files("src/pkg/web", 3)]
+    paths = [*groups[0], *groups[1], "tools/t.py"]
+
+    assert label_groups(groups, groups, paths) == ["core", "web"]
+
+
+def test_a_group_scattered_inside_the_dropped_folders_is_its_hub() -> None:
+    scattered = [f"src/pkg/{d}/{d}.py" for d in ("a", "b", "c", "d")]
+    groups = [
+        _files("src/pkg/core", 3),
+        _files("src/pkg/web", 3),
+        scattered,
+    ]
+    ranked = [groups[0], groups[1], ["src/pkg/c/c.py"]]
+    paths = [p for g in groups for p in g] + ["tools/t.py"]
+
+    labels = label_groups(groups, ranked, paths)
+
+    assert labels == ["core", "web", "c.py"]
