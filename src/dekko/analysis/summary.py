@@ -231,7 +231,7 @@ def _doc_lines(section: dict | None) -> list[str]:
         lines.append(f"entry docs: {', '.join(section['entries'])}")
     if section["orphans"]:
         lines.append(
-            f"orphan docs: {section['orphans_total']} — "
+            f"orphan docs ({section['orphans_total']}): "
             f"{', '.join(section['orphans'])}"
         )
     return lines

@@ -194,7 +194,7 @@ def test_summary_of_a_doc_heavy_repo_has_a_docs_section(
         "diagram.md (1)"
     ) in lines
     assert "entry docs: a/index.md, b/index.md" in lines
-    assert "orphan docs: 3 — Orphan.md, a/index.md, b/index.md" in lines
+    assert "orphan docs (3): Orphan.md, a/index.md, b/index.md" in lines
 
 
 def test_summary_of_a_code_repo_leaves_docs_out_unless_asked(
