@@ -27,7 +27,7 @@ EXIT_AMBIGUOUS = 4
 def describe(index: MapIndex) -> comm.Report:
     """Cluster the docs and build the listing, as for code files."""
     graph = DocGraph.from_index(index)
-    nodes = [d for d in graph.docs if d not in graph.nav]
+    nodes = [d for d in graph.docs if not graph.is_site_wide(d)]
     edges = graph.cluster_edges
     stored = comm._ordered(
         comm.split_components(comm.louvain(nodes, edges), edges), edges

@@ -85,12 +85,27 @@ class DocGraph:
 
     @property
     def cluster_edges(self) -> dict[tuple[str, str], int]:
-        """The edges that say how docs relate: none to or from nav."""
+        """The edges that say how docs relate.
+
+        A site-wide table of contents (one found by name, or one that
+        links to half the docs or more) cuts across every topic, so its
+        edges go. A section index (``languages.md`` listing the language
+        pages) stays: it is what ties that section's pages together.
+        """
+        wide = {d for d in self.nav if self.is_site_wide(d)}
         return {
             pair: n
             for pair, n in self.edges.items()
-            if pair[0] not in self.nav and pair[1] not in self.nav
+            if pair[0] not in wide and pair[1] not in wide
         }
+
+    def is_site_wide(self, doc: str) -> bool:
+        """A table of contents for the whole site, not one section."""
+        if doc not in self.nav:
+            return False
+        if posixpath.basename(doc).lower() in NAV_NAMES:
+            return True
+        return len(self.targets_of(doc)) * 2 >= len(self.docs)
 
     def sources_of(self, doc: str) -> set[str]:
         """Docs that link to ``doc``."""

@@ -127,3 +127,29 @@ def test_test_docs_are_left_out_unless_asked(tmp_path: Path) -> None:
 
     assert DocGraph.from_index(index).docs == ["a.md", "b.md"]
     assert "tests/t.md" in DocGraph.from_index(index, tests=True).docs
+
+
+def test_a_section_index_still_ties_its_pages_together(tmp_path: Path) -> None:
+    topic = {f"lang/l{n}.md": f"# L{n}\n" for n in range(12)}
+    index_page = "# Languages\n\n" + "".join(
+        f"- [L{n}](lang/l{n}.md)\n" for n in range(12)
+    )
+    other = {f"other/o{n}.md": f"# O{n}\n" for n in range(14)}
+    graph = DocGraph.from_index(
+        _write(tmp_path, {**topic, **other, "languages.md": index_page})
+    )
+
+    assert "languages.md" in graph.nav
+    assert ("languages.md", "lang/l0.md") in graph.cluster_edges
+
+
+def test_a_list_page_linking_to_most_docs_stays_out_of_clusters(
+    tmp_path: Path,
+) -> None:
+    pages = {f"p{n}.md": f"# P{n}\n" for n in range(12)}
+    listing = "# All\n\n" + "".join(f"- [P{n}](p{n}.md)\n" for n in range(12))
+
+    graph = DocGraph.from_index(_write(tmp_path, {**pages, "all.md": listing}))
+
+    assert "all.md" in graph.nav
+    assert not any(a == "all.md" for a, _ in graph.cluster_edges)
