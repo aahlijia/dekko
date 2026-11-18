@@ -40,6 +40,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   MCP tool carries them with no new tool.
 - **`export --granularity file` groups files by community**: Mermaid
   subgraphs, DOT clusters, and a community filter in the HTML map.
+- **Docs linked to each other, for repos that are mostly docs.** A
+  docs site, a spec folder or a notes vault now gets a map of its own.
+  `dekko map` follows links between docs: relative links, docs-site
+  routes (`/features/rules`, MDX `href`, RST `:doc:`), Obsidian-style
+  `[[wikilinks]]`, and the `#heading` each one names (explicit
+  `{#id}`s and GitHub anchors). A repo with docs and no code maps too.
+  - `dekko outline <doc>` prints a doc's heading tree with the code and
+    doc links in each section; a folder outline lists its docs too.
+  - `summary` adds a docs section (counts by folder, most linked, entry
+    docs, orphans) when docs outnumber code files, or with `--docs`
+    (MCP `summary`: `docs: true`).
+  - `dekko communities --docs` groups docs by their links;
+    `communities <doc>` shows one doc's group.
+  - `dekko trace <doc> <doc>` finds the shortest link path between two
+    docs.
+  - `dekko query docs <doc>` lists the sections of other docs that link
+    to it.
+  - `docs --stale` reports links to missing docs, routes and wikilinks,
+    and anchors with no matching heading.
+  - Tables of contents (`SUMMARY.md` and pages that are mostly link
+    lists) are kept as entry points but left out of most-linked counts,
+    doc communities and trace paths.
 
 ### Changed
 - **`query cohesion` clusters a file's symbols** with the same Louvain

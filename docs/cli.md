@@ -4,9 +4,13 @@
 dekko map                            # (re)generate the map
 dekko map src                        # ...restricted to a subtree
 dekko summary                        # repo digest: dirs, hotspots, entry points
+dekko summary --docs                 # + doc counts, most-linked, entry and orphan docs (automatic when docs outnumber code)
 dekko communities                    # files grouped into subsystems, even across directories
 dekko communities src/server.py      # one file's subsystem and its links to the others
+dekko communities --docs             # docs grouped by the links between them
 dekko outline src/server.py          # a file's signatures + docs, no bodies (a path that exists but isn't mapped says why)
+dekko outline docs/guide.md          # a doc's heading tree, with the code and doc links in each section
+dekko trace README.md docs/api.md    # shortest link path from one doc to another
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
 dekko query callers resolve --sites  # who calls resolve, with call sites, then who passes it as a value ('referenced (not called)')
 dekko query callers resolve --no-tests  # production callers only (the MCP get_callers default; the CLI includes tests)
@@ -28,6 +32,7 @@ dekko query env DATABASE_URL         # every statically-known read site for this
 dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
 dekko query cohesion src/app.py      # cluster one file's symbols by their own calls (weak signal)
 dekko query docs MapIndex            # the doc sections that name a symbol (or a file)
+dekko query docs docs/setup.md       # ...or, given a doc, the sections of other docs that link to it
 dekko query refs README.md#install   # the code a doc, or one of its sections, names
 dekko docs --stale                   # doc references that no longer point at code (exit 0/1)
 dekko context run_map --budget 1500  # minimal context pack for an edit
@@ -2048,6 +2053,10 @@ docs.
 - `moved: now path:LINE`: a line link whose text names a symbol
   (`[Widget.build](src/widget.py#L8)`) that isn't at that line any
   more.
+- `missing` also covers links to other docs: a doc path, a site route
+  or a wikilink that reaches no doc (see "Links between docs" below).
+- `no such heading`: a link reaches a doc, but no heading in it has
+  that `#anchor`.
 
 Paths in prose or code blocks and bare names never count as stale. An
 unknown bare name is as likely to belong to a library as to be a
@@ -2059,6 +2068,55 @@ docs: `dekko docs --stale docs/`.
 `docs --stale` exits 0 when nothing is stale and 1 when something is,
 so it works as a CI check. It exits 2 when the map was built before
 docs were indexed and `--no-regen` kept it from rebuilding.
+
+### Links between docs
+
+dekko also follows the links docs make to each other, so a docs site,
+a spec folder or a notes vault gets the same kind of map code does. A
+repo with docs and no code at all maps fine.
+
+What counts as a link to another doc:
+
+- A Markdown or RST link to a doc, beside the linking doc or from the
+  repo root: `[setup](guide/setup.md)`.
+- A docs-site route, an absolute link with no extension:
+  `[rules](/features/rules)`, or an MDX `href="/features/rules"`.
+  dekko tries it under the repo root and under each top-level folder
+  that holds docs, as `.md`, `.mdx`, `.rst`, `/index.*` or
+  `/README.md`. It counts only when exactly one doc matches. RST
+  `:doc:` roles work the same way.
+- A wikilink, Obsidian style: `[[Note]]`, `[[folder/Note]]`,
+  `[[Note#Heading]]`, `[[Note|shown text]]` and embeds `![[Note]]`.
+  A bare name matches any doc with that file name. When 2 to 5 docs
+  share it, the link is `AMBIGUOUS`; past 5 it's dropped. Wikilinks
+  inside code are ignored, so a shell `[[ -f x ]]` never counts.
+- A `#heading` on any of these lands on that heading. dekko reads an
+  explicit id (`## Install {#install}`, as mdBook and Pandoc write it)
+  and GitHub's anchor for the heading text, numbered for repeats
+  (`#example-1` is the second "Example"). A wikilink's heading can also
+  be the heading text as written.
+
+Tables of contents (`SUMMARY.md`, `_sidebar.md`, `_toc.md`, or any
+page that is mostly a list of links) link to everything. dekko keeps
+them as entry points but leaves them out of "most linked", doc
+communities and `trace` paths.
+
+```sh
+dekko outline docs/guide.md          # heading tree: lines, then (N code, M doc) per section
+dekko outline docs/                  # every doc in a folder, top two heading levels each
+dekko summary --docs                 # doc counts by folder, most linked, entry docs, orphans
+dekko communities --docs             # docs grouped by the links between them
+dekko communities docs/guide.md      # one doc's group and its links to the others
+dekko trace README.md docs/api.md    # shortest link path: README.md:12 -> docs/guide.md#setup:40 -> docs/api.md
+dekko query docs docs/guide.md       # the sections of other docs that link to it
+```
+
+`outline` drops the deepest headings first when it runs past
+`--budget` or `--limit`, so you keep the shape of a long doc. `summary`
+shows its docs section on its own when docs outnumber code files.
+`trace` prints each doc with the heading the link arrived at and the
+line that links onward. A broken link from a doc under a test folder
+is never reported, since test fixtures break links on purpose.
 
 ## Daemon mode
 

@@ -54,6 +54,7 @@ don't fall back to grep because "the map might be stale now."
 | How far to trust fan-in counts here | `check_ambiguous` | `dekko ambiguous` |
 | Symbol notes (rationale) | `list_notes` / `add_note` | `dekko note list\|add` |
 | Which docs describe a symbol or file; what a doc points at | `query_symbol` (`docs:` line) | `dekko query docs <sym\|file>` / `dekko query refs <doc>` |
+| A doc's headings; how docs link; where to start in a doc-heavy repo | `outline` (a doc) / `summary` (`docs: true`) | `dekko outline <doc>` / `dekko summary --docs` / `dekko communities --docs` / `dekko trace <doc> <doc>` |
 | Text dekko doesn't model: strings, comments, config, prose | grep/Read | grep/Read |
 
 `search_code` is relevance-ranked over names, signatures and doc lines,

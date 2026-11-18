@@ -246,9 +246,9 @@ place of the slash commands (see
 | `find_type_usages` | functions/methods taking or returning a type |
 | `get_supertypes` / `get_subtypes` | a type's extends/implements heritage, one hop or transitive. `get_subtypes` leaves out test-file subtypes the same way `get_callers` does |
 | `get_context_pack` | a symbol's neighborhood, budget-capped |
-| `outline` | a file's structure without bodies |
+| `outline` | a file's structure without bodies, or a doc's heading tree with the code and doc links in each section |
 | `workset` | one bundle for a change (`rev` or `symbol`; `type_impact` for a type's full blast radius) |
-| `summary` | repo digest, including the largest module communities |
+| `summary` | repo digest, including the largest module communities. `docs: true` adds doc counts, the most-linked docs, entry docs and orphans; that section is there on its own when docs outnumber code files |
 | `impacted_tests` | test files impacted by changes, plus a note counting tests that reach the change only through an ambiguous call (the CLI's `affected --possible` lists them) |
 | `check_ambiguous` | resolver-trust summary: where call resolution was ambiguous |
 | `add_note` / `list_notes` | symbol-anchored notes |
