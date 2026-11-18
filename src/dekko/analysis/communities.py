@@ -241,6 +241,7 @@ def _ordered(groups: list[list[str]], edges: Edges) -> list[list[str]]:
 _MIN_FILES = 3
 _TOP_FILES = 3
 _KEY_SYMBOLS = 3
+_KEYS_PER_FILE = 2
 _MAX_BRIDGES = 5
 _MAX_SPLITS = 5
 _MAX_SPANS = 5
@@ -592,11 +593,54 @@ def _ranked(weights: Counter[str]) -> list[str]:
 
 
 def _key_symbols(view: MapIndex, group: list[str]) -> list[str]:
-    """The group's most-called symbols, as ``stats`` ranks fan-in."""
-    ids = [s.id for path in group for s in view.symbols_by_path.get(path, [])]
-    called = [i for i in ids if view.calls_in.get(i)]
-    called.sort(key=lambda i: (-len(view.calls_in[i]), i))
-    return called[:_KEY_SYMBOLS]
+    """The symbols the most other files call or reference.
+
+    Calls from a symbol's own file don't count, so a busy private
+    helper ranks below what the rest of the group uses. Ties go to
+    the most use sites, then the id.
+    """
+    users: dict[str, set[str]] = defaultdict(set)
+    sites: Counter[str] = Counter()
+    home: dict[str, str] = {}
+    for path in group:
+        for symbol in view.symbols_by_path.get(path, []):
+            key = _owner(view, symbol)
+            callers = [
+                *view.calls_in.get(symbol.id, ()),
+                *view.referenced_in.get(symbol.id, ()),
+            ]
+            sites[key] += len(callers)
+            users[key] |= {path_of(view, c) for c in callers} - {path, None}
+            home[key] = path
+    ranked = sorted(
+        (k for k in users if users[k]),
+        key=lambda k: (-len(users[k]), -sites[k], k),
+    )
+    return _capped(ranked, home)
+
+
+def _owner(view: MapIndex, symbol: Symbol) -> str:
+    """A constructor (``T.T``) counts as its type; else the symbol."""
+    head, _, last = symbol.qualname.rpartition(".")
+    if symbol.kind == "method" and head.rpartition(".")[2] == last:
+        owner = f"{symbol.path}::{head}"
+        if owner in view.symbols_by_id:
+            return owner
+    return symbol.id
+
+
+def _capped(ranked: list[str], home: dict[str, str]) -> list[str]:
+    """The first ``_KEY_SYMBOLS`` of ``ranked``, two per file at most,
+    so one hub file can't fill the line."""
+    per_file: Counter[str] = Counter()
+    out = []
+    for key in ranked:
+        if per_file[home[key]] < _KEYS_PER_FILE:
+            out.append(key)
+            per_file[home[key]] += 1
+            if len(out) == _KEY_SYMBOLS:
+                break
+    return out
 
 
 # --- dekko communities ---------------------------------------------------

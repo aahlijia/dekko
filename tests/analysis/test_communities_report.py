@@ -168,3 +168,75 @@ def test_describe_lists_communities_with_their_key_symbols(
     assert 0 < lib.cohesion < 1
     assert report.unconnected == 2
     assert [(b.first, b.second) for b in report.bridges] == [(1, 2)]
+
+
+def _helpers_and_api() -> dict[str, str]:
+    """``core.py`` has a helper four of its own functions call, and
+    three functions that ``a.py`` and ``b.py`` both use."""
+    runs = "".join(f"\n\ndef run{i}():\n    _helper()\n" for i in range(4))
+    apis = "".join(f"\n\ndef api{i}():\n    return {i}\n" for i in range(3))
+    calls = "".join(f"    api{i}()\n" for i in range(3))
+    return {
+        "pkg/__init__.py": "",
+        "pkg/core.py": f"def _helper():\n    return 0\n{runs}{apis}",
+        "pkg/b.py": (
+            f"from pkg.core import api0, api1, api2\n\n\ndef g():\n{calls}"
+        ),
+        "pkg/a.py": (
+            "from pkg.b import g\nfrom pkg.core import api0, api1, api2\n\n\n"
+            f"def f():\n    g()\n{calls}"
+        ),
+    }
+
+
+def test_key_symbols_are_the_ones_other_files_use(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    index = mapfile.load_map(make_mapped_repo(_helpers_and_api()))
+    assert index is not None
+
+    (community,) = describe(index, tests=False).communities
+
+    assert "pkg/core.py::_helper" not in community.key_symbols
+    assert community.key_symbols[0] == "pkg/core.py::api0"
+
+
+def test_key_symbols_take_at_most_two_from_one_file(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    index = mapfile.load_map(make_mapped_repo(_helpers_and_api()))
+    assert index is not None
+
+    (community,) = describe(index, tests=False).communities
+
+    assert community.key_symbols == [
+        "pkg/core.py::api0",
+        "pkg/core.py::api1",
+        "pkg/b.py::g",
+    ]
+
+
+def test_a_constructor_counts_toward_its_class(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    sources = {
+        "p/Foo.java": (
+            "package p;\n\npublic class Foo {\n"
+            "    public Foo() {}\n    public int size() { return 1; }\n}\n"
+        ),
+        "p/A.java": (
+            "package p;\n\npublic class A {\n"
+            "    int a() { return new Foo().size(); }\n}\n"
+        ),
+        "p/B.java": (
+            "package p;\n\npublic class B {\n"
+            "    int b() { return new Foo().size() + new A().a(); }\n}\n"
+        ),
+    }
+    index = mapfile.load_map(make_mapped_repo(sources))
+    assert index is not None
+
+    (community,) = describe(index, tests=False).communities
+
+    assert "p/Foo.java::Foo" in community.key_symbols
+    assert "p/Foo.java::Foo.Foo" not in community.key_symbols
