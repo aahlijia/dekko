@@ -388,19 +388,20 @@ def test_a_file_no_grammar_maps_says_so(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     root = make_mapped_repo(
-        {"a.py": "def f():\n    pass\n", "README.md": "#\n"}
+        {"a.py": "def f():\n    pass\n", "notes.txt": "x\n"}
     )
-    err = _outline_err(root, "README.md", capsys)
-    assert "(exists, but no grammar maps .md files)" in err
-    assert cli.main(["query", "file", "README.md", "--root", str(root)]) == 3
-    assert "(exists, but no grammar maps .md files)" in capsys.readouterr().err
+    err = _outline_err(root, "notes.txt", capsys)
+    assert "(exists, but no grammar maps .txt files)" in err
+    assert cli.main(["query", "file", "notes.txt", "--root", str(root)]) == 3
+    err = capsys.readouterr().err
+    assert "(exists, but no grammar maps .txt files)" in err
 
 
 def test_a_directory_with_nothing_mapped_says_so(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     root = make_mapped_repo(
-        {"a.py": "def f():\n    pass\n", "docs/guide.md": "#\n"}
+        {"a.py": "def f():\n    pass\n", "docs/notes.txt": "x\n"}
     )
     assert "(exists, but holds no mapped files)" in _outline_err(
         root, "docs", capsys

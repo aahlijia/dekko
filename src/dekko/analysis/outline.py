@@ -15,6 +15,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dekko.analysis import doc_outline
+from dekko.analysis import docs as docs_mod
 from dekko.classify import is_test_path
 from dekko.core import languages
 from dekko.render.mapfile import MapIndex
@@ -336,13 +338,23 @@ def _render_text_dir(
     root: Path | None,
     budget: int | None,
     limit: int,
+    docs: list[doc_outline.DocOutline] | None = None,
 ) -> int:
-    """Render a directory rollup; whole low-priority files drop first."""
+    """Render a directory rollup; whole low-priority files drop first.
+
+    Docs come after the code files, so a budget drops them first.
+    """
     banner = f"outline: {target} — {len(outlines)} files"
+    if docs:
+        banner = (
+            f"outline: {target} — {_plural(len(outlines), 'file')}, "
+            f"{_plural(len(docs), 'doc')}"
+        )
     rows: list[str] = []
     for fo in outlines:
         rows += _file_header(fo)
         rows += [_symbol_row(s) for s in fo.symbols]
+    rows += doc_outline.dir_rows(docs or [])
     kept, meter = fit_to_budget(rows, budget, limit, prefix=banner)
     print(banner)
     for row in kept:
@@ -371,6 +383,7 @@ def _render_json(
     root: Path | None,
     budget: int | None,
     limit: int,
+    docs: list[doc_outline.DocOutline] | None = None,
 ) -> int:
     """Emit the outline(s) as structured JSON with a cost meter."""
     flat = [(fi, s) for fi, fo in enumerate(outlines) for s in fo.symbols]
@@ -399,7 +412,37 @@ def _render_json(
             entry["sparse_note"] = note
         files.append(entry)
     doc = {"target": target, "files": files, "meta": meter.as_dict()}
+    if docs:
+        doc["docs"] = [doc_outline.json_entry(d) for d in docs]
     print(json.dumps(doc, indent=2))
+    return EXIT_OK
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
+def _run_doc(
+    index: MapIndex,
+    target: str,
+    budget: int | None,
+    limit: int,
+    as_json: bool,
+) -> int | None:
+    """Outline the doc ``target`` names, or ``None`` when it names none."""
+    found = docs_mod.match_doc(index, target)
+    if len(found) > 1:
+        print(f"dekko: '{target}' is ambiguous; candidates:", file=sys.stderr)
+        for p in found:
+            print(f"  {p}", file=sys.stderr)
+        return EXIT_AMBIGUOUS
+    if not found:
+        return None
+    outline = doc_outline.build(index, found[0])
+    if as_json:
+        doc_outline.render_json(target, [outline], budget)
+    else:
+        doc_outline.render_text(outline, budget, limit)
     return EXIT_OK
 
 
@@ -431,11 +474,17 @@ def run(
         for p in matches:
             print(f"  {p}", file=sys.stderr)
         return EXIT_AMBIGUOUS
+    if not matches:
+        code = _run_doc(index, target, budget, limit, as_json)
+        if code is not None:
+            return code
+    docs: list[doc_outline.DocOutline] = []
     if len(matches) == 1:
         outlines = [build(index, matches[0])]
     else:
         outlines = collect_dir(index, target)
-    if not outlines:
+        docs = doc_outline.collect_dir(index, target)
+    if not outlines and not docs:
         reason = languages.unindexed_reason(target) or unmapped_reason(
             root or index.root_dir, target, index.provenance
         )
@@ -447,7 +496,7 @@ def run(
         return EXIT_NOT_FOUND
 
     if as_json:
-        return _render_json(target, outlines, root, budget, limit)
-    if len(outlines) == 1:
+        return _render_json(target, outlines, root, budget, limit, docs)
+    if len(outlines) == 1 and not docs:
         return _render_text_file(outlines[0], root, budget, limit)
-    return _render_text_dir(target, outlines, root, budget, limit)
+    return _render_text_dir(target, outlines, root, budget, limit, docs)
