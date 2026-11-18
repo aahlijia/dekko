@@ -17,6 +17,7 @@ from pathlib import Path
 
 from dekko.classify import is_test_path
 from dekko.core import languages, tier2
+from dekko.core import doc_edges
 from dekko.core import resolver as resolver_mod
 from dekko.core.model import TYPE_KINDS, FileMap, Symbol
 from dekko.core.walker import DOC_EXTENSIONS
@@ -709,6 +710,7 @@ class DocIndex:
     sections: list[DocSection] = field(default_factory=list)
     links: list[DocLink] = field(default_factory=list)
     dangling: list[DocDangling] = field(default_factory=list)
+    edges: list[doc_edges.DocEdge] = field(default_factory=list)
 
 
 @dataclass
@@ -779,11 +781,36 @@ def resolve_docs(
         The sections with their links and dangling references.
     """
     tables = _tables(root, files, doc_paths)
+    docs = doc_edges.build_targets(root, sections, doc_paths)
     index = DocIndex(sections=list(sections))
     for at, (section, group) in enumerate(zip(sections, candidates)):
         for cand in group:
-            _resolve_one(tables, at, section.path, cand, index)
+            if not _resolve_doc_link(docs, at, section.path, cand, index):
+                _resolve_one(tables, at, section.path, cand, index)
     return index
+
+
+_DOC_ONLY_KINDS = frozenset({"wiki", "route"})
+
+
+def _resolve_doc_link(
+    docs: doc_edges.DocTargets,
+    at: int,
+    doc: str,
+    cand: Candidate,
+    index: DocIndex,
+) -> bool:
+    """Record a link to another doc; ``False`` leaves it to code rules."""
+    verdict = doc_edges.resolve(docs, at, doc, cand)
+    if isinstance(verdict, doc_edges.DocEdge):
+        index.edges.append(verdict)
+    elif isinstance(verdict, doc_edges.Broken):
+        index.dangling.append(
+            DocDangling(at, cand.line, verdict.text, cand.kind, verdict.why)
+        )
+    elif cand.kind not in _DOC_ONLY_KINDS and cand.text:
+        return False
+    return True
 
 
 def _tables(root: Path, files: list[FileMap], doc_paths: list[str]) -> _Tables:

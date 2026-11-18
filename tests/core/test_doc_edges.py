@@ -1,6 +1,15 @@
 """Links between docs: anchors, heading ids, wikilinks and site routes."""
 
-from dekko.core.docs import Candidate, DocSection, parse_doc
+from pathlib import Path
+
+from dekko.analysis.docs import why_text
+from dekko.core.docs import (
+    Candidate,
+    DocIndex,
+    DocSection,
+    build_doc_index,
+    parse_doc,
+)
 
 
 def _sections(path: str, text: str) -> list[DocSection]:
@@ -165,3 +174,210 @@ def test_an_rst_doc_role_is_a_route() -> None:
         ("install", "route", "", ""),
         ("/guide/start", "route", "", ""),
     }
+
+
+# --- resolution -----------------------------------------------------------
+
+_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
+
+
+def _index(name: str) -> DocIndex:
+    root = _FIXTURES / name
+    docs = sorted(
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if p.suffix in (".md", ".mdx", ".rst")
+    )
+    return build_doc_index(root, docs, [])
+
+
+def _edges(index: DocIndex) -> set[tuple[str, str, str, str]]:
+    """``(source doc, target doc, target heading, tier)`` per edge."""
+    out = set()
+    for e in index.edges:
+        heading = (
+            index.sections[e.target_section].heading
+            if e.target_section is not None
+            else ""
+        )
+        target = e.target or "|".join(e.candidates)
+        out.add((index.sections[e.section].path, target, heading, e.tier))
+    return out
+
+
+def _dangling(index: DocIndex) -> set[tuple[str, str, str]]:
+    return {
+        (index.sections[d.section].path, d.text, d.why) for d in index.dangling
+    }
+
+
+def test_wikilinks_resolve_by_path_stem_and_heading() -> None:
+    edges = _edges(_index("docvault"))
+
+    assert edges == {
+        ("Home.md", "Projects/Alpha.md", "", "EXTRACTED"),
+        ("Home.md", "Beta.md", "", "EXTRACTED"),
+        ("Home.md", "Projects/Alpha.md", "Goals", "EXTRACTED"),
+        ("Home.md", "diagram.md", "", "EXTRACTED"),
+        ("Home.md", "a/index.md|b/index.md", "", "AMBIGUOUS"),
+        ("Projects/Alpha.md", "Home.md", "", "EXTRACTED"),
+        ("Beta.md", "Projects/Alpha.md", "Goals", "EXTRACTED"),
+        ("Orphan.md", "Home.md", "", "EXTRACTED"),
+    }
+
+
+def test_broken_wikilinks_and_headings_dangle() -> None:
+    assert _dangling(_index("docvault")) == {
+        ("Home.md", "Missing Note", "missing"),
+        ("Beta.md", "Projects/Alpha#Nope", "no-heading"),
+    }
+
+
+def test_doc_links_and_routes_resolve_with_their_headings() -> None:
+    edges = _edges(_index("docsite"))
+
+    assert edges == {
+        ("README.md", "docs/guide/setup.md", "", "EXTRACTED"),
+        ("docs/SUMMARY.md", "docs/index.mdx", "", "EXTRACTED"),
+        ("docs/SUMMARY.md", "docs/guide/setup.md", "", "EXTRACTED"),
+        ("docs/SUMMARY.md", "docs/features/rules.mdx", "", "EXTRACTED"),
+        ("docs/SUMMARY.md", "docs/api/index.md", "", "EXTRACTED"),
+        ("docs/index.mdx", "docs/features/rules.mdx", "", "EXTRACTED"),
+        ("docs/index.mdx", "docs/features/rules.mdx", "Custom", "EXTRACTED"),
+        ("docs/index.mdx", "docs/api/index.md", "", "EXTRACTED"),
+        ("docs/guide/setup.md", "docs/index.mdx", "", "EXTRACTED"),
+        (
+            "docs/guide/setup.md",
+            "docs/features/rules.mdx",
+            "Example",
+            "EXTRACTED",
+        ),
+    }
+
+
+def test_a_repeated_heading_is_reached_by_its_numbered_slug() -> None:
+    index = _index("docsite")
+
+    edge = next(
+        e
+        for e in index.edges
+        if index.sections[e.section].path == "docs/guide/setup.md"
+        and e.target_section is not None
+    )
+
+    assert index.sections[edge.target_section].line == 9
+
+
+def test_broken_doc_links_routes_and_anchors_dangle() -> None:
+    assert _dangling(_index("docsite")) == {
+        ("docs/index.mdx", "/features/gone", "missing"),
+        ("docs/guide/setup.md", "../features/rules.mdx#nope", "no-heading"),
+    }
+
+
+def test_a_route_two_roots_hold_resolves_to_nothing(tmp_path: Path) -> None:
+    for top in ("docs", "site"):
+        (tmp_path / top / "guide").mkdir(parents=True)
+        (tmp_path / top / "guide" / "start.md").write_text("# Start\n")
+    (tmp_path / "README.md").write_text("# R\n[s](/guide/start)\n")
+    docs = ["README.md", "docs/guide/start.md", "site/guide/start.md"]
+
+    index = build_doc_index(tmp_path, docs, [])
+
+    assert not index.edges
+    assert not index.dangling
+
+
+def test_a_one_segment_route_never_dangles(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# R\n[blog](/blog)\n")
+
+    index = build_doc_index(tmp_path, ["README.md"], [])
+
+    assert not index.edges
+    assert not index.dangling
+
+
+def test_a_relative_doc_role_resolves_beside_the_doc(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.rst").write_text(
+        "Index\n=====\n\nsee :doc:`install`\n"
+    )
+    (tmp_path / "docs" / "install.rst").write_text("Install\n=======\n")
+
+    index = build_doc_index(
+        tmp_path, ["docs/index.rst", "docs/install.rst"], []
+    )
+
+    assert [e.target for e in index.edges] == ["docs/install.rst"]
+
+
+def test_a_stem_shared_by_more_than_five_docs_is_dropped(
+    tmp_path: Path,
+) -> None:
+    docs = []
+    for n in range(6):
+        (tmp_path / f"d{n}").mkdir()
+        (tmp_path / f"d{n}" / "index.md").write_text("# I\n")
+        docs.append(f"d{n}/index.md")
+    (tmp_path / "Home.md").write_text("# H\n[[index]]\n")
+
+    index = build_doc_index(tmp_path, ["Home.md", *docs], [])
+
+    assert not index.edges
+    assert not index.dangling
+
+
+def test_an_embedded_image_is_not_a_doc_link(tmp_path: Path) -> None:
+    (tmp_path / "Home.md").write_text("# H\n![[chart.png]]\n")
+
+    index = build_doc_index(tmp_path, ["Home.md"], [])
+
+    assert not index.edges
+    assert not index.dangling
+
+
+def test_a_wikilink_in_a_test_doc_never_dangles(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "notes.md").write_text("# N\n[[Nowhere]]\n")
+
+    index = build_doc_index(tmp_path, ["tests/notes.md"], [])
+
+    assert not index.dangling
+
+
+def test_a_link_to_a_doc_is_not_a_code_link(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("# A\n[b](b.md)\n")
+    (tmp_path / "b.md").write_text("# B\n")
+
+    index = build_doc_index(tmp_path, ["a.md", "b.md"], [])
+
+    assert not index.links
+    assert [e.target for e in index.edges] == ["b.md"]
+
+
+def test_a_missing_heading_reads_as_such() -> None:
+    assert why_text("no-heading", None) == "no such heading"
+
+
+def test_a_test_doc_never_reports_a_broken_doc_link(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "a.md").write_text(
+        "# A\n[b](b.md#nope) [c](#gone)\n"
+    )
+    (tmp_path / "tests" / "b.md").write_text("# B\n")
+
+    index = build_doc_index(tmp_path, ["tests/a.md", "tests/b.md"], [])
+
+    assert not index.dangling
+    assert [e.target for e in index.edges] == []
+
+
+def test_a_route_to_a_repo_folder_is_not_missing(tmp_path: Path) -> None:
+    (tmp_path / "crates" / "editor").mkdir(parents=True)
+    (tmp_path / "CONTRIBUTING.md").write_text(
+        "# C\n[editor](/crates/editor)\n"
+    )
+
+    index = build_doc_index(tmp_path, ["CONTRIBUTING.md"], [])
+
+    assert not index.dangling
