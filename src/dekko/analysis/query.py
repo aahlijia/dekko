@@ -4724,7 +4724,14 @@ def _run_docs(
     limit: int,
     budget: int | None,
 ) -> tuple[int, Meter | None]:
-    """Execute the docs action: the doc sections that name a target."""
+    """Execute the docs action: the doc sections that name a target.
+
+    A doc as the target lists the sections of other docs that link to
+    it instead.
+    """
+    doc = _linked_doc(index, target)
+    if doc is not None:
+        return _run_doc_backlinks(index, doc, as_json, limit, budget)
     targets, label, code = _docs_targets(index, target)
     if targets is None:
         return code, None
@@ -4739,6 +4746,64 @@ def _run_docs(
         print(f"dekko: no doc section names '{label}'", file=sys.stderr)
         return EXIT_OK, None
     return EXIT_OK, _emit_lines([_hit_row(h) for h in hits], budget, limit)
+
+
+def _linked_doc(index: MapIndex, target: str) -> str | None:
+    """The one indexed doc ``target`` names, unless it is code."""
+    target = target.removeprefix("./")
+    if target in index.languages_by_path:
+        return None
+    found = docs_mod.match_doc(index, target)
+    return found[0] if len(found) == 1 else None
+
+
+def _run_doc_backlinks(
+    index: MapIndex,
+    doc: str,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """The sections of other docs that link to ``doc``."""
+    anchors: dict[int, list[str]] = {}
+    for i in index.doc_edges_in.get(doc, []):
+        edge = index.doc_edges[i]
+        found = anchors.setdefault(edge.section, [])
+        anchor = edge.text.rpartition("#")[2] if "#" in edge.text else ""
+        if anchor and anchor not in found:
+            found.append(anchor)
+    order = sorted(
+        anchors,
+        key=lambda at: (
+            index.doc_sections[at].path,
+            index.doc_sections[at].line,
+        ),
+    )
+    rows = [(index.doc_sections[at], anchors[at]) for at in order]
+    if as_json:
+        entries = [
+            {
+                "path": s.path,
+                "line": s.line,
+                "heading": s.heading,
+                "anchors": a,
+            }
+            for s, a in rows
+        ]
+        kept, meter = _fit_entries(entries, budget, limit)
+        out = {"action": "docs", "target": doc, "linked_from": kept}
+        out["meta"] = meter.as_dict()
+        print(json.dumps(out, indent=2))
+        return EXIT_OK, None
+    if not rows:
+        print(f"dekko: no doc links to '{doc}'", file=sys.stderr)
+        return EXIT_OK, None
+    lines = [
+        f"{s.path}:{s.line}  {s.heading}"
+        + (f"  → {', '.join('#' + x for x in a)}" if a else "")
+        for s, a in rows
+    ]
+    return EXIT_OK, _emit_lines(lines, budget, limit)
 
 
 def _hit_row(hit: docs_mod.SectionHit) -> str:

@@ -330,3 +330,125 @@ def test_doc_communities_as_json(
         "beta/b1.md",
         "beta/b2.md",
     ]
+
+
+# --- trace and query docs between docs ------------------------------------
+
+
+def test_trace_between_docs_follows_links(
+    site: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = _run(
+        capsys,
+        "trace",
+        "README.md",
+        "docs/features/rules.mdx",
+        "--root",
+        str(site),
+    )
+
+    assert code == 0
+    assert out.splitlines() == [
+        "README.md:3 -> docs/guide/setup.md:3 "
+        "-> docs/features/rules.mdx#example-1"
+    ]
+
+
+def _toc_repo(root: Path) -> Path:
+    files = {
+        "SUMMARY.md": "# Summary\n\n- [a](a.md)\n- [b](b.md)\n- [c](c.md)\n",
+        "a.md": "# A\n\nSee the [contents](SUMMARY.md) or [b](b.md).\n",
+        "b.md": "# B\n\nNext: [c](c.md).\n",
+        "c.md": "# C\n",
+    }
+    for rel, text in files.items():
+        (root / rel).write_text(text)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    return root
+
+
+def test_trace_never_passes_through_a_table_of_contents(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _toc_repo(tmp_path)
+
+    _, out, _ = _run(capsys, "trace", "a.md", "c.md", "--root", str(root))
+
+    assert out.splitlines() == ["a.md:3 -> b.md:3 -> c.md"]
+
+
+def test_trace_can_start_at_a_table_of_contents(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _toc_repo(tmp_path)
+
+    _, out, _ = _run(
+        capsys, "trace", "SUMMARY.md", "c.md", "--root", str(root)
+    )
+
+    assert out.splitlines() == ["SUMMARY.md:5 -> c.md"]
+
+
+def test_trace_with_no_link_path(
+    site: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run(
+        capsys,
+        "trace",
+        "docs/api/index.md",
+        "README.md",
+        "--root",
+        str(site),
+    )
+
+    assert code == 1
+    assert "no link path from docs/api/index.md to README.md" in err
+
+
+def test_trace_from_a_doc_to_a_symbol_is_a_usage_error(
+    site: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _, err = _run(
+        capsys, "trace", "README.md", "main", "--root", str(site)
+    )
+
+    assert code == 2
+    assert "both ends must be docs or both symbols" in err
+
+
+def test_trace_between_docs_as_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _toc_repo(tmp_path)
+
+    _, out, _ = _run(
+        capsys, "trace", "a.md", "c.md", "--json", "--root", str(root)
+    )
+
+    assert json.loads(out)["paths"] == [
+        [
+            {"doc": "a.md", "anchor": None, "line": 3},
+            {"doc": "b.md", "anchor": None, "line": 3},
+            {"doc": "c.md", "anchor": None, "line": None},
+        ]
+    ]
+
+
+def test_query_docs_on_a_doc_lists_what_links_to_it(
+    site: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = _run(
+        capsys,
+        "query",
+        "docs",
+        "docs/features/rules.mdx",
+        "--root",
+        str(site),
+    )
+
+    assert code == 0
+    assert out.splitlines()[:3] == [
+        "docs/SUMMARY.md:1  Summary",
+        "docs/guide/setup.md:1  Setup  → #example-1",
+        "docs/index.mdx:1  Welcome  → #custom-id",
+    ]

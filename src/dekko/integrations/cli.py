@@ -571,7 +571,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "DATABASE_URL); 'throws' takes a function/method symbol like "
         "callers/callees; 'cohesion' takes a file path like 'file'; "
         "'docs' takes a symbol or a file path and lists the doc sections "
-        "that name it; 'refs' takes a doc path, optionally with "
+        "that name it (given a doc, the sections of other docs that link "
+        "to it); 'refs' takes a doc path, optionally with "
         "'#heading' (README.md#install), and lists the code it names. "
         "Append ':LINE' (file.py:Class.method:LINE) "
         "to pick one candidate out of an overload set the "
@@ -741,17 +742,19 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_ctx.set_defaults(func=run_context)
 
     p_trace = sub.add_parser(
-        "trace", help="shortest call path(s) between two symbols"
+        "trace",
+        help="shortest call path(s) between two symbols, or link path(s) "
+        "between two docs",
     )
     p_trace.add_argument(
         "frm",
         metavar="FROM",
-        help="source symbol (name, Class.method, file.py:func)",
+        help="source symbol (name, Class.method, file.py:func) or doc",
     )
     p_trace.add_argument(
         "to",
         metavar="TO",
-        help="destination symbol (name, Class.method, file.py:func)",
+        help="destination symbol (name, Class.method, file.py:func) or doc",
     )
     p_trace.add_argument(
         "--max-paths",
