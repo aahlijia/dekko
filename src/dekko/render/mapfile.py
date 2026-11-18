@@ -23,7 +23,7 @@ from dekko import selfcheck
 from dekko.core import languages, walker
 from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.classify import is_test_path
-from dekko.core.doc_edges import DocEdge
+from dekko.core.doc_edges import DocEdge, is_test_doc
 from dekko.core.docs import DocDangling, DocLink, DocSection
 from dekko.core.model import (
     CallGraph,
@@ -1369,8 +1369,8 @@ def _filter_docs(
     out.doc_edges = [
         e
         for e in src.doc_edges
-        if not is_test_path(src.doc_sections[e.section].path)
-        and not any(is_test_path(t) for t in e.candidates or (e.target,))
+        if not is_test_doc(src.doc_sections[e.section].path)
+        and not any(is_test_doc(t) for t in e.candidates or (e.target,))
     ]
     _index_doc_links(out)
     _index_doc_edges(out)

@@ -82,8 +82,8 @@ def test_entry_docs(tmp_path: Path) -> None:
     assert graph.entries == [
         "README.md",
         "docs/SUMMARY.md",
-        "docs/api/index.md",
         "docs/index.mdx",
+        "docs/api/index.md",
     ]
 
 
@@ -153,3 +153,51 @@ def test_a_list_page_linking_to_most_docs_stays_out_of_clusters(
 
     assert "all.md" in graph.nav
     assert not any(a == "all.md" for a, _ in graph.cluster_edges)
+
+
+def test_a_spec_folder_is_docs_not_tests(tmp_path: Path) -> None:
+    index = _write(
+        tmp_path,
+        {
+            "README.md": "# R\n\nSee [the specs](specs/README.md).\n",
+            "specs/README.md": "# Specs\n\n[login](auth/login.md)\n",
+            "specs/auth/login.md": "# Login\n\n[tokens](tokens.md)\n",
+            "specs/auth/tokens.md": (
+                "# Tokens\n\n[refresh](login.md#refresh)\n"
+            ),
+            "docs/testing/plan.md": "# Plan\n",
+        },
+    )
+
+    graph = DocGraph.from_index(index)
+
+    assert "specs/auth/login.md" in graph.docs
+    assert "docs/testing/plan.md" in graph.docs
+    assert [d.why for d in index.doc_dangling] == ["no-heading"]
+
+
+def test_entry_docs_rank_the_root_readme_and_contents_first(
+    tmp_path: Path,
+) -> None:
+    pages = {f"p{n}.md": f"# P{n}\n" for n in range(5)}
+    links = "".join(f"- [P{n}](../p{n}.md)\n" for n in range(5))
+    start = "# Start\n\n" + " ".join(f"[P{n}](p{n}.md)" for n in range(5))
+    index = _write(
+        tmp_path,
+        {
+            **pages,
+            "README.md": "# R\n\n[start](start.md)\n",
+            "docs/SUMMARY.md": f"# Summary\n\n{links}",
+            ".cloudflare/README.md": "# CF\n",
+            "a/index.md": "# A\n",
+            "start.md": start + "\n",
+        },
+    )
+
+    assert DocGraph.from_index(index).entries == [
+        "README.md",
+        "docs/SUMMARY.md",
+        "start.md",
+        ".cloudflare/README.md",
+        "a/index.md",
+    ]

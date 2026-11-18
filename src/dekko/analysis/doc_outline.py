@@ -46,9 +46,22 @@ class DocOutline:
         return "rst" if self.path.lower().endswith(".rst") else "markdown"
 
 
-def build(index: MapIndex, path: str) -> DocOutline:
-    """The outline of one indexed doc."""
-    ats = [i for i, s in enumerate(index.doc_sections) if s.path == path]
+def build(
+    index: MapIndex, path: str, ats: list[int] | None = None
+) -> DocOutline:
+    """The outline of one indexed doc.
+
+    Args:
+        index: Loaded map index.
+        path: The doc.
+        ats: The doc's section indexes, when the caller has grouped
+            them already (outlining a folder groups them once).
+
+    Returns:
+        The doc's outline.
+    """
+    if ats is None:
+        ats = [i for i, s in enumerate(index.doc_sections) if s.path == path]
     code = Counter(
         index.doc_links[i].section
         for i in index.doc_links_by_doc.get(path, [])
@@ -74,7 +87,10 @@ def collect_dir(index: MapIndex, prefix: str) -> list[DocOutline]:
     ]
     graph = DocGraph.from_index(index, tests=True)
     paths.sort(key=lambda p: (-len(graph.sources_of(p)), p))
-    return [build(index, p) for p in paths]
+    by_doc: dict[str, list[int]] = {}
+    for at, section in enumerate(index.doc_sections):
+        by_doc.setdefault(section.path, []).append(at)
+    return [build(index, p, by_doc.get(p, [])) for p in paths]
 
 
 def header(outline: DocOutline) -> str:

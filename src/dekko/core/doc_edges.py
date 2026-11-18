@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
-from dekko.classify import is_test_path
 
 if TYPE_CHECKING:
     from dekko.core.docs import Candidate, DocSection
@@ -39,6 +38,16 @@ _PAGE_FORMS = (
 )
 
 _DOC_SUFFIX_RE = re.compile(r"\.(?:md|mdx|rst)$", re.IGNORECASE)
+_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+_HTML_ID_RE = re.compile(
+    r"""<[a-zA-Z][^>]*?\b(?:id|name)\s*=\s*["']([^"']+)["']"""
+)
+_MD_LINK_TEXT_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+# Every browser scrolls to the page's top for ``#top``, with or without
+# an element of that id.
+_TOP = "top"
 
 
 @dataclass(frozen=True)
@@ -76,10 +85,51 @@ class Broken:
     why: str
 
 
+# Folders whose docs are test material (fixtures, test notes). Wider
+# test-path rules (``spec/``, ``testing/``) would also take spec and
+# test-plan folders, which are exactly the docs a reader wants.
+_TEST_DOC_DIRS = frozenset({"test", "tests", "__tests__"})
+
+
+def is_test_doc(path: str) -> bool:
+    """Whether a doc lives in a test folder."""
+    return any(part in _TEST_DOC_DIRS for part in path.split("/")[:-1])
+
+
+def names_a_file(name: str) -> bool:
+    """Whether a wikilink names a non-doc file: code, an image, a PDF.
+
+    ``[[src/app.py]]`` or ``![[chart.png]]`` is a file reference, not a
+    note; ``[[v1.2 notes]]`` has a dot but no extension.
+    """
+    ext = _EXT_RE.search(name.rsplit("/", 1)[-1])
+    return ext is not None and not _DOC_SUFFIX_RE.search(name)
+
+
 def slug(heading: str) -> str:
-    """GitHub's anchor for a heading: lowercase, dashes for spaces."""
-    text = re.sub(r"[^\w\- ]", "", heading.strip().lower())
+    """GitHub's anchor for a heading: lowercase, dashes for spaces.
+
+    GitHub slugs the rendered heading, so a link in it counts by its
+    text and HTML tags drop out.
+    """
+    text = _MD_LINK_TEXT_RE.sub(r"\1", heading)
+    text = _HTML_TAG_RE.sub("", text)
+    text = re.sub(r"[^\w\- ]", "", text.strip().lower())
     return text.replace(" ", "-")
+
+
+def html_anchors(text: str) -> list[tuple[int, str]]:
+    """``(line, id)`` for each HTML ``id``/``name`` attribute in a doc.
+
+    ``<a id="readme-top"></a>`` and ``<h2 id="x">`` are link targets
+    as real as a heading.
+    """
+    return [
+        (num, m.group(1))
+        for num, line in enumerate(text.splitlines(), 1)
+        if "<" in line
+        for m in _HTML_ID_RE.finditer(line)
+    ]
 
 
 @dataclass
@@ -109,9 +159,23 @@ class DocTargets:
 
 
 def build_targets(
-    root: Path, sections: list[DocSection], doc_paths: list[str]
+    root: Path,
+    sections: list[DocSection],
+    doc_paths: list[str],
+    html_ids: dict[str, list[tuple[int, str]]] | None = None,
 ) -> DocTargets:
-    """Index the docs and their headings once per resolution pass."""
+    """Index the docs and their headings once per resolution pass.
+
+    Args:
+        root: Repository root.
+        sections: Every doc section, in index order.
+        doc_paths: Every indexed doc.
+        html_ids: Doc → ``(line, id)`` of its HTML anchors, each
+            reaching the section that holds its line.
+
+    Returns:
+        The lookups resolution uses.
+    """
     targets = DocTargets(root=root, docs=set(doc_paths))
     tops = sorted({p.split("/", 1)[0] for p in doc_paths if "/" in p})
     targets.route_roots = ["", *tops]
@@ -124,7 +188,25 @@ def build_targets(
         if section.level == 0:
             continue
         _add_heading(targets, at, section)
+    _add_html_ids(targets, sections, html_ids or {})
     return targets
+
+
+def _add_html_ids(
+    targets: DocTargets,
+    sections: list[DocSection],
+    html_ids: dict[str, list[tuple[int, str]]],
+) -> None:
+    starts: dict[str, list[tuple[int, int]]] = {}
+    for at, section in enumerate(sections):
+        starts.setdefault(section.path, []).append((section.line, at))
+    for doc, ids in html_ids.items():
+        spans = starts.get(doc, [])
+        for line, anchor in ids:
+            held = [at for start, at in spans if start <= line]
+            at = held[-1] if held else (spans[0][1] if spans else None)
+            if at is not None:
+                targets.anchors.setdefault(doc, {}).setdefault(anchor, at)
 
 
 def _add_heading(targets: DocTargets, at: int, section: DocSection) -> None:
@@ -158,7 +240,7 @@ def resolve(
         resolves to nothing worth reporting.
     """
     verdict = _verdict(targets, at, doc, cand)
-    if isinstance(verdict, Broken) and is_test_path(doc):
+    if isinstance(verdict, Broken) and is_test_doc(doc):
         # Test fixtures plant broken links on purpose.
         return None
     return verdict
@@ -195,6 +277,8 @@ def _link(
 def _own_anchor(
     targets: DocTargets, doc: str, cand: Candidate
 ) -> Broken | None:
+    if cand.anchor.lower() == _TOP:
+        return None
     if _section_for(targets, doc, cand.anchor, wiki=False) is not None:
         return None
     return Broken(f"#{cand.anchor}", "no-heading")
@@ -248,10 +332,6 @@ def _wiki(
     targets: DocTargets, at: int, doc: str, cand: Candidate
 ) -> DocEdge | Broken | None:
     name = cand.text
-    ext = posixpath.splitext(name)[1]
-    if ext and not _DOC_SUFFIX_RE.search(name):
-        # An embedded image or attachment, not a note.
-        return None
     stem = _DOC_SUFFIX_RE.sub("", name)
     found = _wiki_targets(targets, doc, stem)
     if found:
@@ -290,7 +370,7 @@ def _edge(
             at, cand.line, text, cand.kind, AMBIGUOUS, "", None, tuple(found)
         )
     section = None
-    if anchor:
+    if anchor and anchor.lower() != _TOP:
         section = _section_for(targets, found[0], anchor, wiki=wiki)
         if section is None:
             return Broken(text, "no-heading")

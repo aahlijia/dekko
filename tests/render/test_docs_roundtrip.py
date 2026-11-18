@@ -219,3 +219,19 @@ def test_without_tests_drops_doc_links_from_test_docs(
         for i in view.doc_edges_in["docs/setup.md"]
     }
     assert sources == {"README.md"}
+
+
+def test_a_wikilink_to_a_code_file_still_links_the_code(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "src/app.py": "def main():\n    return 0\n",
+            "notes.md": "# Notes\n\nThe entry point is [[src/app.py]].\n",
+        }
+    )
+
+    index = load_map(root)
+
+    assert "src/app.py" in {link.target for link in index.doc_links}
+    assert index.doc_edges == []

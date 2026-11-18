@@ -2093,8 +2093,10 @@ What counts as a link to another doc:
 - A `#heading` on any of these lands on that heading. dekko reads an
   explicit id (`## Install {#install}`, as mdBook and Pandoc write it)
   and GitHub's anchor for the heading text, numbered for repeats
-  (`#example-1` is the second "Example"). A wikilink's heading can also
-  be the heading text as written.
+  (`#example-1` is the second "Example"). HTML anchors count too
+  (`<a id="readme-top">`, `<h2 id="x">`), and so does `#top`, which
+  every browser understands. A wikilink's heading can also be the
+  heading text as written.
 
 Tables of contents (`SUMMARY.md`, `_sidebar.md`, `_toc.md`, or any
 page that is mostly a list of links) point at many docs at once.
@@ -2119,8 +2121,10 @@ top-level heading first, then as many of the next level as fit, so you
 keep the shape of a long doc. `summary`
 shows its docs section on its own when docs outnumber code files.
 `trace` prints each doc with the heading the link arrived at and the
-line that links onward. A broken link from a doc under a test folder
-is never reported, since test fixtures break links on purpose.
+line that links onward. A broken link from a doc in a `test/`,
+`tests/` or `__tests__/` folder is never reported, since test fixtures
+break links on purpose. Spec and test-plan folders (`specs/`,
+`docs/testing/`) are ordinary docs.
 
 ## Daemon mode
 

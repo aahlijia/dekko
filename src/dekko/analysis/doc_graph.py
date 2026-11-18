@@ -13,8 +13,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
-from dekko.classify import is_test_path
-from dekko.core.doc_edges import EXTRACTED
+from dekko.core.doc_edges import EXTRACTED, is_test_doc
 from dekko.render.mapfile import MapIndex
 
 # Table-of-contents files by name: mdBook, docsify, Jupyter Book.
@@ -29,6 +28,7 @@ _NAV_LIST_SHARE = 0.8
 # one reads as a starting point.
 _ENTRY_MIN_OUT = 5
 _ENTRY_NAMES = frozenset({"readme", "index"})
+_ROOT_READMES = frozenset({"readme.md", "readme.mdx", "readme.rst"})
 
 _LIST_LINK_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+.*(?:\]\(|\[\[)")
 
@@ -70,7 +70,7 @@ class DocGraph:
             {
                 s.path
                 for s in index.doc_sections
-                if tests or not is_test_path(s.path)
+                if tests or not is_test_doc(s.path)
             }
         )
         graph = cls(docs=docs)
@@ -78,9 +78,14 @@ class DocGraph:
         for a, b in graph.edges:
             graph._sources.setdefault(b, set()).add(a)
             graph._targets.setdefault(a, set()).add(b)
-        graph.nav = {d for d in docs if _is_nav(index, d, graph.edges)}
+        links_out: Counter[str] = Counter()
+        for (a, _), n in graph.edges.items():
+            links_out[a] += n
+        graph.nav = {d for d in docs if _is_nav(index, d, links_out[d])}
         graph.orphans = [d for d in docs if not graph.sources_of(d)]
-        graph.entries = [d for d in docs if graph._is_entry(d)]
+        graph.entries = sorted(
+            (d for d in docs if graph._is_entry(d)), key=graph._entry_rank
+        )
         return graph
 
     @property
@@ -123,6 +128,20 @@ class DocGraph:
         ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
         return ranked[:n]
 
+    def _entry_rank(self, doc: str) -> tuple[int, int, int, str]:
+        """Where a reader starts first: the root README, then contents
+        pages (site-wide first), then docs that link out the most, the
+        shallowest first."""
+        if doc.lower() in _ROOT_READMES:
+            kind = 0
+        elif self.is_site_wide(doc):
+            kind = 1
+        elif doc in self.nav:
+            kind = 2
+        else:
+            kind = 3
+        return kind, -len(self.targets_of(doc)), doc.count("/"), doc
+
     def _is_entry(self, doc: str) -> bool:
         stem = posixpath.splitext(posixpath.basename(doc))[0].lower()
         if stem in _ENTRY_NAMES or doc in self.nav:
@@ -144,12 +163,9 @@ def _edges(index: MapIndex, docs: set[str]) -> dict[tuple[str, str], int]:
     return dict(out)
 
 
-def _is_nav(
-    index: MapIndex, doc: str, edges: dict[tuple[str, str], int]
-) -> bool:
+def _is_nav(index: MapIndex, doc: str, links_out: int) -> bool:
     if posixpath.basename(doc).lower() in NAV_NAMES:
         return True
-    links_out = sum(n for (a, _), n in edges.items() if a == doc)
     if links_out < _NAV_MIN_LINKS:
         return False
     return _list_share(index, doc) >= _NAV_LIST_SHARE

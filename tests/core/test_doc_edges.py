@@ -381,3 +381,42 @@ def test_a_route_to_a_repo_folder_is_not_missing(tmp_path: Path) -> None:
     index = build_doc_index(tmp_path, ["CONTRIBUTING.md"], [])
 
     assert not index.dangling
+
+
+def test_anchors_a_browser_resolves_never_dangle(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        '<a id="readme-top"></a>\n'
+        "# Project\n\n"
+        "[Back to top](#top) [again](#readme-top)\n"
+        '<a name="custom-anchor"></a>\n'
+        "[custom](#custom-anchor) [other](other.md#html-id)\n"
+        "[guide](other.md#see-the-guide-here)\n"
+    )
+    (tmp_path / "other.md").write_text(
+        '# Other\n\n<h2 id="html-id">Raw HTML</h2>\n\n'
+        "## See [the guide](docs/guide.md) here\n"
+    )
+
+    index = build_doc_index(tmp_path, ["README.md", "other.md"], [])
+
+    assert index.dangling == []
+    targets = {
+        (e.text, index.sections[e.target_section].heading) for e in index.edges
+    }
+    assert ("other.md#html-id", "Other") in targets
+    assert (
+        "other.md#see-the-guide-here",
+        "See [the guide](docs/guide.md) here",
+    ) in targets
+
+
+def test_a_link_to_another_doc_s_top_has_no_heading(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("# A\n[b](b.md#top)\n")
+    (tmp_path / "b.md").write_text("# B\n")
+
+    index = build_doc_index(tmp_path, ["a.md", "b.md"], [])
+
+    assert [(e.target, e.target_section) for e in index.edges] == [
+        ("b.md", None)
+    ]
+    assert index.dangling == []

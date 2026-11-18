@@ -331,7 +331,13 @@ def _md_line_candidates(line: str, num: int) -> list[Candidate]:
     def outside(m: re.Match[str]) -> bool:
         return not any(start <= m.start() < end for start, end in code)
 
-    wikis = [m for m in _WIKI_RE.finditer(line) if outside(m)]
+    # A wikilink to a code file or an attachment stays prose, so its
+    # path reaches the code rules as it would without the brackets.
+    wikis = [
+        m
+        for m in _WIKI_RE.finditer(line)
+        if outside(m) and not doc_edges.names_a_file(_wiki_name(m.group(1)))
+    ]
     links = [m for m in _MD_LINK_RE.finditer(line) if outside(m)]
     hrefs = [m for m in _HREF_RE.finditer(line) if outside(m)]
     cands += [_wiki_candidate(m.group(1), num) for m in wikis]
@@ -556,6 +562,10 @@ def _route(target: str) -> str:
     return target.rstrip("/")
 
 
+def _wiki_name(inner: str) -> str:
+    return inner.partition("|")[0].partition("#")[0].strip()
+
+
 def _wiki_candidate(inner: str, num: int) -> Candidate:
     """``[[target#heading|alias]]`` as a ``wiki`` candidate."""
     target, _, alias = inner.partition("|")
@@ -749,6 +759,7 @@ def build_doc_index(
     sections: list[DocSection] = []
     candidates: list[list[Candidate]] = []
     read: list[str] = []
+    html_ids: dict[str, list[tuple[int, str]]] = {}
     for path in doc_paths:
         try:
             text = (root / path).read_text(encoding="utf-8", errors="replace")
@@ -758,7 +769,8 @@ def build_doc_index(
         sections += found
         candidates += groups
         read.append(path)
-    return resolve_docs(root, sections, candidates, files, read)
+        html_ids[path] = doc_edges.html_anchors(text)
+    return resolve_docs(root, sections, candidates, files, read, html_ids)
 
 
 def resolve_docs(
@@ -767,6 +779,7 @@ def resolve_docs(
     candidates: list[list[Candidate]],
     files: list[FileMap],
     doc_paths: list[str],
+    html_ids: dict[str, list[tuple[int, str]]] | None = None,
 ) -> DocIndex:
     """Resolve every section's candidates against the mapped code.
 
@@ -776,12 +789,14 @@ def resolve_docs(
         candidates: Each section's candidates (same order).
         files: Every mapped code file.
         doc_paths: Every indexed doc, so doc-to-doc links are known.
+        html_ids: Doc → its HTML anchors (``id``/``name`` attributes),
+            which links between docs may target like headings.
 
     Returns:
         The sections with their links and dangling references.
     """
     tables = _tables(root, files, doc_paths)
-    docs = doc_edges.build_targets(root, sections, doc_paths)
+    docs = doc_edges.build_targets(root, sections, doc_paths, html_ids)
     index = DocIndex(sections=list(sections))
     for at, (section, group) in enumerate(zip(sections, candidates)):
         for cand in group:
