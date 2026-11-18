@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko.integrations import cli
+from dekko.integrations import cli, server
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -170,3 +170,72 @@ def test_outline_of_a_folder_lists_code_then_docs(
     assert code == 0
     assert out.splitlines()[0] == "outline: . — 1 file, 6 docs"
     assert out.index("outline: app.py") < out.index("outline: README.md")
+
+
+# --- summary --------------------------------------------------------------
+
+
+def test_summary_of_a_doc_heavy_repo_has_a_docs_section(
+    vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, _ = _run(capsys, "summary", "--root", str(vault))
+
+    assert code == 0
+    lines = out.splitlines()
+    start = lines.index("docs: 7 files in 4 dirs (most docs first):")
+    assert lines[start + 1 : start + 5] == [
+        "     4  ./",
+        "     1  Projects/",
+        "     1  a/",
+        "     1  b/",
+    ]
+    assert (
+        "most linked docs: Home.md (2), Projects/Alpha.md (2), Beta.md (1), "
+        "diagram.md (1)"
+    ) in lines
+    assert "entry docs: a/index.md, b/index.md" in lines
+    assert "orphan docs: 3 — Orphan.md, a/index.md, b/index.md" in lines
+
+
+def test_summary_of_a_code_repo_leaves_docs_out_unless_asked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for n in range(3):
+        (tmp_path / f"m{n}.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "README.md").write_text("# R\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    _, plain, _ = _run(capsys, "summary", "--root", str(tmp_path))
+    _, asked, _ = _run(capsys, "summary", "--docs", "--root", str(tmp_path))
+
+    assert "docs:" not in plain
+    assert "docs: 1 file in 1 dir (most docs first):" in asked
+
+
+def test_summary_docs_come_before_the_code_rankings(
+    site: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = _run(capsys, "summary", "--root", str(site))
+
+    assert out.index("docs: 6 files") < out.index("entrypoints:")
+
+
+def test_summary_tool_takes_a_docs_switch(tmp_path: Path) -> None:
+    for n in range(3):
+        (tmp_path / f"m{n}.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "README.md").write_text("# R\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    ctx = server.Context(default_root=tmp_path, no_regen=False)
+
+    reply = server.handle(
+        ctx,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "summary", "arguments": {"docs": True}},
+        },
+    )
+
+    assert reply["result"]["isError"] is False
+    assert "docs: 1 file" in reply["result"]["content"][0]["text"]

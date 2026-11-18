@@ -1609,6 +1609,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="approximate token cap; trailing sections are shed to fit "
         f"(default: {summary.DEFAULT_BUDGET}; 0 = no cap)",
     )
+    p_summary.add_argument(
+        "--docs",
+        action="store_true",
+        help="add the docs section (doc counts by directory, most linked, "
+        "entry and orphan docs); shown without it when docs outnumber "
+        "code files",
+    )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
 
@@ -3026,7 +3033,9 @@ def run_summary(args: argparse.Namespace) -> int:
     index, code = _read_index(args)
     if index is None:
         return code
-    return summary.run(index, as_json=args.as_json, budget=args.budget)
+    return summary.run(
+        index, as_json=args.as_json, budget=args.budget, docs=args.docs
+    )
 
 
 def run_communities(args: argparse.Namespace) -> int:

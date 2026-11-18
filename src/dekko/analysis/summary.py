@@ -15,6 +15,8 @@ from pathlib import Path
 
 from dekko.core import grammars
 from dekko.analysis import ambiguous, communities, stats
+from dekko.analysis.doc_graph import DocGraph
+from dekko.classify import is_test_path
 from dekko.render.mapfile import (
     MapIndex,
     format_build_scripts,
@@ -29,6 +31,9 @@ _INDEX_STEMS = ("__init__", "mod", "lib", "index")
 _TOP = 5
 _MAX_DIRS = 12
 _MAX_COMMUNITIES = 8
+# Rows per list in the docs section: directories, most linked, entry
+# docs, orphans.
+_MAX_DOC_ROWS = 5
 _MAX_ENTRYPOINTS = 8
 _MAX_HOTSPOTS = 10
 # 2.3: cap on the parse-errors list so an uncapped grammar-gap doesn't
@@ -131,8 +136,16 @@ def _entrypoints(index: MapIndex) -> list:
     return found
 
 
-def compute(index: MapIndex) -> dict:
-    """Build the summary document."""
+def compute(index: MapIndex, docs: bool = False) -> dict:
+    """Build the summary document.
+
+    Args:
+        index: Loaded map index.
+        docs: Add the docs section even when code outweighs docs.
+
+    Returns:
+        The summary as a JSON-ready dict.
+    """
     base = stats.compute(index, _TOP)
     real_errors, no_grammar_errors = _split_errors(index)
     ambiguous_sites, ambiguous_rate = ambiguous.cheap_rate(index)
@@ -169,7 +182,63 @@ def compute(index: MapIndex) -> dict:
         "build_scripts": (index.provenance or {}).get("build_scripts"),
         "too_large": (index.provenance or {}).get("too_large"),
         **_communities(index),
+        **_docs(index, docs),
     }
+
+
+def _docs(index: MapIndex, asked: bool) -> dict:
+    """The docs section, when docs outnumber code files or it is asked."""
+    graph = DocGraph.from_index(index)
+    code = sum(1 for p in index.languages_by_path if not is_test_path(p))
+    if not graph.docs or not (asked or len(graph.docs) > code):
+        return {}
+    by_dir = Counter(Path(p).parent.as_posix() for p in graph.docs)
+    dirs = sorted(by_dir.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {
+        "docs": {
+            "files": len(graph.docs),
+            "dirs": len(by_dir),
+            "by_dir": [
+                {"path": d, "docs": n} for d, n in dirs[:_MAX_DOC_ROWS]
+            ],
+            "most_linked": [
+                {"path": p, "linked_from": n}
+                for p, n in graph.most_linked(_MAX_DOC_ROWS)
+            ],
+            "entries": graph.entries[:_MAX_DOC_ROWS],
+            "orphans_total": len(graph.orphans),
+            "orphans": graph.orphans[:_MAX_DOC_ROWS],
+        }
+    }
+
+
+def _doc_lines(section: dict | None) -> list[str]:
+    """The docs section as text, at most a dozen lines."""
+    if not section:
+        return []
+    files, dirs = section["files"], section["dirs"]
+    lines = [
+        f"docs: {_plural(files, 'file')} in {_plural(dirs, 'dir')} "
+        "(most docs first):"
+    ]
+    lines += [f"  {d['docs']:>4}  {d['path']}/" for d in section["by_dir"]]
+    if section["most_linked"]:
+        ranked = ", ".join(
+            f"{d['path']} ({d['linked_from']})" for d in section["most_linked"]
+        )
+        lines.append(f"most linked docs: {ranked}")
+    if section["entries"]:
+        lines.append(f"entry docs: {', '.join(section['entries'])}")
+    if section["orphans"]:
+        lines.append(
+            f"orphan docs: {section['orphans_total']} — "
+            f"{', '.join(section['orphans'])}"
+        )
+    return lines
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
 def _communities(index: MapIndex) -> dict:
@@ -322,9 +391,17 @@ def _skip_lines(index: MapIndex) -> list[str]:
     return lines
 
 
-def render_text(index: MapIndex) -> str:
-    """Render the digest as compact text."""
-    doc = compute(index)
+def render_text(index: MapIndex, docs: bool = False) -> str:
+    """Render the digest as compact text.
+
+    Args:
+        index: Loaded map index.
+        docs: Add the docs section even when code outweighs docs.
+
+    Returns:
+        The digest.
+    """
+    doc = compute(index, docs)
     lines = [
         f"dekko: {doc['root']} — {doc['files']} files, "
         f"{doc['symbols']} symbols, {doc['edges']} edges"
@@ -346,6 +423,7 @@ def render_text(index: MapIndex) -> str:
             f"{d['internal_edges']}+{d['cross_edges']}  "
             f"{d['path']}/{suffix}"
         )
+    lines += _doc_lines(doc.get("docs"))
     if doc.get("communities"):
         lines.append("communities (largest first):")
         lines += [
@@ -604,6 +682,7 @@ def run(
     index: MapIndex,
     as_json: bool,
     budget: int | None = None,
+    docs: bool = False,
 ) -> int:
     """Print the summary as text or JSON.
 
@@ -616,14 +695,16 @@ def run(
             The digest scales with repo size (a large monorepo renders
             ~30k chars), so budget-less output can dominate an agent's
             context.
+        docs: Add the docs section even when code outweighs docs (it is
+            there on its own when docs outnumber code files).
 
     Returns:
         Always ``0``.
     """
     if as_json:
-        print(json.dumps(compute(index), indent=2))
+        print(json.dumps(compute(index, docs), indent=2))
         return 0
-    text = render_text(index)
+    text = render_text(index, docs)
     if not budget:
         print(text)
         return 0
