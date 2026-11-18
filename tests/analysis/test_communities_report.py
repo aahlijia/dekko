@@ -301,3 +301,13 @@ def test_a_group_scattered_inside_the_dropped_folders_is_its_hub() -> None:
     labels = label_groups(groups, ranked, paths)
 
     assert labels == ["core", "web", "c.py"]
+
+
+def test_labels_naming_the_same_folder_both_add_their_hub() -> None:
+    single = ["a/x.py", "a/y.py", "a/z.py"]
+    pair = ["a/p.py", "a/q.py", "b/r.py", "b/s.py"]
+    ranked = [["a/y.py", "a/x.py", "a/z.py"], ["b/r.py", *pair]]
+
+    labels = label_groups([single, pair], ranked, [*single, *pair, "z/w.py"])
+
+    assert labels == ["a (y.py)", "a + b (r.py)"]

@@ -429,8 +429,9 @@ def label_groups(
     heaviest file in the directory taken) is added (``src (cli.py)``),
     or names the group alone when they scatter from the top. When two
     or more directories are named, the leading folders they all share
-    are dropped too. Groups that still share a name get their hub
-    added, as its path when the name already holds it.
+    are dropped too. Groups that still share a name, or name a folder
+    another label names too, get their hub added, as its path when the
+    name already holds it.
     """
     skip = _shared_depth(paths)
     names = [_name(g, skip) for g in groups]
@@ -443,9 +444,13 @@ def label_groups(
         hubs.append(hub)
         labels.append(_text(dirs, scattered, hub, prefix))
     seen = Counter(labels)
+    named = Counter(d for dirs, _ in names for d in set(dirs))
     return [
-        _distinct(label, hub, skip) if seen[label] > 1 else label
-        for label, hub in zip(labels, hubs)
+        _distinct(label, hub, skip)
+        if seen[label] > 1
+        or (not scattered and any(named[d] > 1 for d in dirs))
+        else label
+        for label, hub, (dirs, scattered) in zip(labels, hubs, names)
     ]
 
 

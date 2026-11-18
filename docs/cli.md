@@ -1918,7 +1918,9 @@ Each community row shows:
   the first. One folder with twice the files of any other gets its
   name alone. When the files scatter, it's the last majority
   folder plus the busiest file inside it (`app (server.py)`). Folders
-  every label starts with, like `src/myapp/`, are left off.
+  every label starts with, like `src/myapp/`, are left off. When two
+  labels name the same folder (`analysis` and `analysis + render`),
+  each gets its busiest file added so you can tell them apart.
 - **files and symbols**, the three files with the most weight inside
   it (`top:`), and the three symbols the most other files call or
   reference (`key:`). A helper only its own file calls doesn't make
