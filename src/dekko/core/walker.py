@@ -64,6 +64,19 @@ GENERATED_PATTERNS = (
 
 DEFAULT_MAX_FILE_SIZE = 1_000_000
 
+# Prose files the map indexes as doc sections, matched case-insensitively.
+# ``.txt`` is left out: in real repos it is mostly CMakeLists.txt,
+# requirements files and licenses, none of which have headings.
+DOC_EXTENSIONS = (".md", ".mdx", ".rst")
+
+# dekko's own output dir: its MAP.md pages are generated from the map, so
+# indexing them as docs would link the map to itself.
+_MAP_DIR = ".dekko"
+
+# First line of every MAP.md index ``render_md`` writes; a map written
+# with ``--output`` elsewhere is found by it, with its ``map/`` pages.
+MAP_HEADING = "# Code Map — "
+
 # Heuristic for vendored/minified files that don't follow a `.min.`
 # naming convention (e.g. a vendored `book.js`/`highlight.js` under a
 # docs theme directory). Sampled over just the first few dozen lines,
@@ -192,6 +205,16 @@ def _walk_files(root: Path) -> list[str]:
     return found
 
 
+def list_files(root: Path) -> list[str]:
+    """Every candidate file: ``git ls-files``, else a filesystem walk.
+
+    Pass the result as ``candidates`` when one caller runs both
+    ``discover`` and ``discover_docs``, so the repo is listed once.
+    """
+    found = _git_files(root)
+    return found if found is not None else _walk_files(root)
+
+
 def _join(rel_dir: str, name: str) -> str:
     """Join a relative POSIX dir (possibly ``.``) and a name."""
     if rel_dir in ("", "."):
@@ -272,9 +295,7 @@ def find_config_files(root: Path, basenames: frozenset[str]) -> list[str]:
         Sorted repo-relative POSIX paths of every matching file outside
         a noise/vendored directory.
     """
-    candidates = _git_files(root)
-    if candidates is None:
-        candidates = _walk_files(root)
+    candidates = list_files(root)
 
     found: list[str] = []
     for rel in candidates:
@@ -410,9 +431,7 @@ def discover(
         files) are still omitted with no entry here.
     """
     if candidates is None:
-        candidates = _git_files(root)
-        if candidates is None:
-            candidates = _walk_files(root)
+        candidates = list_files(root)
 
     prefix = None
     if subpath:
@@ -441,6 +460,89 @@ def discover(
         else:
             skipped.append((rel, verdict))
     return files, skipped
+
+
+def discover_docs(
+    root: Path,
+    subpath: str | None = None,
+    excludes: tuple[str, ...] = (),
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE,
+    candidates: list[str] | None = None,
+    *,
+    follow_symlinks: bool = False,
+) -> list[str]:
+    """Find the Markdown and reStructuredText files a map indexes.
+
+    Same candidates and path gates as ``discover`` (subpath, noise and
+    vendored dirs, symlinks, generated patterns, ``--exclude``,
+    ``.dekkoignore``) plus the size cap, so a doc and the code beside
+    it are in or out together. Docs get no content gate: the minified
+    and tree-sitter-query checks are about code. A doc that fails a
+    gate is dropped without a skip reason, as docs always were.
+
+    Args:
+        root: Repository root.
+        subpath: Optional repo-relative prefix to restrict to.
+        excludes: Extra glob patterns to skip.
+        max_file_size: Docs larger than this many bytes are skipped.
+        candidates: Explicit repo-relative paths, as for ``discover``.
+        follow_symlinks: As for ``discover``.
+
+    Returns:
+        Sorted repo-relative doc paths.
+    """
+    if candidates is None:
+        candidates = list_files(root)
+    prefix = Path(subpath).as_posix().strip("/") if subpath else None
+    ignore_spec = _load_dekkoignore(root)
+
+    docs: list[str] = []
+    for rel in sorted(set(candidates)):
+        if not rel.lower().endswith(DOC_EXTENSIONS):
+            continue
+        if _MAP_DIR in rel.split("/"):
+            continue
+        verdict = _path_verdict(
+            root, rel, prefix, excludes, ignore_spec, follow_symlinks
+        )
+        if verdict == "ok" and _within_size(root / rel, max_file_size):
+            docs.append(rel)
+    return _without_generated_maps(root, docs)
+
+
+def _without_generated_maps(root: Path, docs: list[str]) -> list[str]:
+    """Drop dekko's own MAP.md indexes and their ``map/`` shard pages."""
+    generated = [
+        rel
+        for rel in docs
+        if rel.rsplit("/", 1)[-1] == "MAP.md" and _is_map_index(root / rel)
+    ]
+    shard_dirs = tuple(
+        (rel.rsplit("/", 1)[0] + "/map/" if "/" in rel else "map/")
+        for rel in generated
+    )
+    return [
+        rel
+        for rel in docs
+        if rel not in generated and not rel.startswith(shard_dirs)
+    ]
+
+
+def _is_map_index(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(len(MAP_HEADING.encode()))
+    except OSError:
+        return False
+    return head == MAP_HEADING.encode()
+
+
+def _within_size(path: Path, max_file_size: int) -> bool:
+    """Whether a file exists and is no larger than the cap."""
+    try:
+        return path.stat().st_size <= max_file_size
+    except OSError:
+        return False
 
 
 def _is_symlink(root: Path, rel: str) -> bool:
@@ -478,6 +580,36 @@ def _classify(
         ``"ok"`` to map the file, ``None`` to ignore it silently, or
         a skip reason to report.
     """
+    verdict = _path_verdict(
+        root, rel, prefix, excludes, ignore_spec, follow_symlinks
+    )
+    if verdict != "ok":
+        return verdict
+    if not languages.is_supported(rel):
+        return _unindexed_verdict(rel)
+    return _size_and_content_gate(
+        root, rel, max_file_size, known_stat=known_stat, stat_out=stat_out
+    )
+
+
+def _path_verdict(
+    root: Path,
+    rel: str,
+    prefix: str | None,
+    excludes: tuple[str, ...],
+    ignore_spec: pathspec.PathSpec | None,
+    follow_symlinks: bool,
+) -> str | None:
+    """The gates that judge a candidate by its path alone.
+
+    Shared by code and doc discovery so both honor the same subpath,
+    noise and vendored dirs, symlink rule, generated patterns,
+    ``--exclude`` globs and ``.dekkoignore``.
+
+    Returns:
+        ``"ok"`` when every path gate passes, ``None`` to ignore the
+        file silently, or a skip reason to report.
+    """
     if prefix and not (rel == prefix or rel.startswith(prefix + "/")):
         return None
     if _in_noise_dir(rel):
@@ -504,11 +636,7 @@ def _classify(
         # committed .dekko/.dekkoignore vs. this run's CLI flags), so
         # a user debugging a vanished file knows where to look.
         return "ignored"
-    if not languages.is_supported(rel):
-        return _unindexed_verdict(rel)
-    return _size_and_content_gate(
-        root, rel, max_file_size, known_stat=known_stat, stat_out=stat_out
-    )
+    return "ok"
 
 
 def _unindexed_verdict(rel: str) -> str | None:

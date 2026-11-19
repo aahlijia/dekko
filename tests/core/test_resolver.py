@@ -1816,7 +1816,7 @@ def test_receiver_qualified_rust_std_method_not_guessed() -> None:
     # ``PathContextCondition.then``); a call through an untyped local
     # variable is really Rust std's ``bool::then``. Must not be
     # guessed into the repo symbol's fan-in — same false-positive
-    # shape ``_BUILTIN_METHOD_NAMES`` already guards for JS/TS, just
+    # shape ``BUILTIN_METHOD_NAMES`` already guards for JS/TS, just
     # never extended to Rust std/prelude method names before.
     then_fn = _fn("ci_tool.rs", "then", "PathContextCondition.then")
     caller = _fn("editor.rs", "new_internal")
@@ -2160,7 +2160,7 @@ def test_bare_call_to_same_file_builder_named_function_still_resolves() -> (
 # Structural layer 2: arity-gated single-candidate resolution. Every
 # test below deliberately picks a call name absent from every layer-1
 # denylist (``_is_noise_call``'s
-# ``_BUILTIN_METHOD_NAMES``/``_JAVA_ASSERTION_METHOD_NAMES``/etc.) so
+# ``BUILTIN_METHOD_NAMES``/``_JAVA_ASSERTION_METHOD_NAMES``/etc.) so
 # the call genuinely reaches the single-candidate fast path under test,
 # rather than being intercepted earlier by layer 1.
 
@@ -2713,7 +2713,7 @@ def test_noise_guard_wins_over_ambiguous_with_two_candidates() -> None:
 
 
 def test_receiver_qualified_get_resolve_create_not_guessed() -> None:
-    # ``_BUILTIN_METHOD_NAMES`` was
+    # ``BUILTIN_METHOD_NAMES`` was
     # missing several very common JS/TS names that hit this same fast
     # path once every stronger heuristic fails -- ``get`` averaged
     # 32.0 candidates in cline's own report, almost certainly
