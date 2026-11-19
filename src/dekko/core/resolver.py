@@ -6017,7 +6017,7 @@ def _bare_call_non_method_match(
 # ``String(...)`` casts; its ``expect``/``describe`` hotspots were an
 # unrelated local shim/helper credited with calls actually aimed at
 # vitest's globals.
-_AMBIENT_GLOBAL_NAMES = frozenset(
+AMBIENT_GLOBAL_NAMES = frozenset(
     {
         "String", "Number", "Boolean", "Array", "Object", "Symbol",
         "Promise", "Map", "Set", "Date", "RegExp", "Error", "JSON",
@@ -6058,7 +6058,7 @@ _AMBIENT_GLOBAL_NAMES = frozenset(
 # added alongside for the browser/DOM ``EventTarget`` interface, the same
 # idiom family, common in VS Code extension code (both cline and
 # claude-code are).
-_BUILTIN_METHOD_NAMES = frozenset(
+BUILTIN_METHOD_NAMES = frozenset(
     {
         "trim", "trimStart", "trimEnd", "toString", "valueOf",
         "toLowerCase", "toUpperCase", "includes", "indexOf", "slice",
@@ -6075,13 +6075,13 @@ _BUILTIN_METHOD_NAMES = frozenset(
 # Chain-call method names from popular fluent/builder-pattern libraries
 # (Zod's schema builder, Commander.js's CLI builder, and the like) —
 # ``z.string().describe("...")``, ``program.description("...")``. Same
-# shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
+# shape of false-positive as ``BUILTIN_METHOD_NAMES``: a
 # receiver-qualified call whose receiver isn't provably typed as an
 # in-repo class, so the only "evidence" for the single-candidate fast
 # path is name uniqueness — which fails whenever a repo also happens to
 # define its own like-named method/function. Confirmed live against
 # cline twice: ``describe`` (a Zod ``.describe()`` schema call) still
-# read fan-in 60 after ``_BUILTIN_METHOD_NAMES`` alone, because
+# read fan-in 60 after ``BUILTIN_METHOD_NAMES`` alone, because
 # ``describe`` isn't a String/Array/Object prototype method; and
 # ``description`` (a Commander.js ``.description()`` builder call on a
 # local ``Command``/``program`` instance) read fan-in 14, all credited
@@ -6105,7 +6105,7 @@ _CHAIN_BUILDER_METHOD_NAMES = frozenset(
 
 # Well-known Rust std/prelude trait method names (``Iterator``,
 # ``Option``, ``Result``, ``Clone``, ``ToString``, ...). Same
-# false-positive shape as ``_BUILTIN_METHOD_NAMES``, just for Rust
+# false-positive shape as ``BUILTIN_METHOD_NAMES``, just for Rust
 # instead of JS/TS: a receiver-qualified call whose receiver isn't
 # provably typed as an in-repo class reaches this guard, and these
 # names are called constantly on ordinary local values/std types
@@ -6114,7 +6114,7 @@ _CHAIN_BUILDER_METHOD_NAMES = frozenset(
 # unrelated ``PathContextCondition.then`` (a CI-tool crate) and
 # ``.iter_mut()`` to ``AtlasTextureList.iter_mut`` (``gpui``). Not
 # gated by language, matching how
-# ``_BUILTIN_METHOD_NAMES`` (JS/TS-flavored) already isn't — these
+# ``BUILTIN_METHOD_NAMES`` (JS/TS-flavored) already isn't — these
 # names are unlikely method names to collide with in other languages.
 # The iterator/Option/Result adaptor
 # vocabulary was missing from this set entirely -- ``.flatten()``
@@ -6323,7 +6323,7 @@ _BUILDER_METHOD_NAMES = frozenset({"build"})
 # Deliberately short: only names common enough to plausibly collide
 # with a real repo module name are worth hard-coding here; extend as
 # new collisions turn up, same maintenance model as
-# ``_BUILTIN_METHOD_NAMES``.
+# ``BUILTIN_METHOD_NAMES``.
 _NODE_BUILTIN_MODULE_NAMES = frozenset(
     {
         "path", "fs", "os", "util", "events", "stream", "crypto",
@@ -6337,7 +6337,7 @@ _NODE_BUILTIN_MODULE_NAMES = frozenset(
 _JS_TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
 # Well-known ambient/global receiver objects -- the receiver-side
-# counterpart to ``_AMBIENT_GLOBAL_NAMES`` above, which only covers
+# counterpart to ``AMBIENT_GLOBAL_NAMES`` above, which only covers
 # *receiverless* bare calls. None of the five method-name denylists
 # above check the call's *receiver*, only its method name, so a
 # receiver-qualified call to a well-known global object (``console``,
@@ -6407,7 +6407,7 @@ def is_guarded_method_name(name: str, path: str = "") -> bool:
         external.
     """
     return (
-        name in _BUILTIN_METHOD_NAMES
+        name in BUILTIN_METHOD_NAMES
         or name in _CHAIN_BUILDER_METHOD_NAMES
         or name in _RUST_STD_METHOD_NAMES
         or name in _JAVA_ASSERTION_METHOD_NAMES
@@ -6447,7 +6447,7 @@ def _is_noise_call(
     if _shadowed_by_external_import(call, file_imports, repo_stems):
         return True
     if not call.receiver:
-        return call.name in _AMBIENT_GLOBAL_NAMES
+        return call.name in AMBIENT_GLOBAL_NAMES
     # An *exact* self/this receiver (no further chain) is the shape
     # ``_self_container`` already resolves when the class defines a
     # like-named method; a multi-segment chain rooted at self/this

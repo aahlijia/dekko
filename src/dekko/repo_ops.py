@@ -31,6 +31,7 @@ from dekko.storage import cache as cache_mod
 from dekko.storage import resolvecache
 from dekko import classify
 from dekko import selfcheck
+from dekko.core import docs as docs_mod
 from dekko.core import grammars
 from dekko.core import resolver as resolver_mod
 from dekko.render import mapfile
@@ -532,6 +533,8 @@ def _map_run_is_noop(
     )
     if not (options_match and version_match):
         return False
+    if _docs_changed(root, args, prov):
+        return False
     if not args.quiet:
         commit = (prov.get("git_commit") or "no git")[:12]
         print(
@@ -539,6 +542,21 @@ def _map_run_is_noop(
             "— nothing written"
         )
     return True
+
+
+def _docs_changed(root: Path, args: argparse.Namespace, prov: dict) -> bool:
+    """Whether any doc was added, removed or touched since ``prov``.
+
+    By stat signature alone: a touched-but-identical doc only costs a
+    re-render, while a missed edit would leave its links stale.
+    """
+    recorded = prov.get("doc_stat")
+    if recorded is None:
+        return True
+    paths = discover_doc_paths(root, args)
+    if set(paths) != set(recorded):
+        return True
+    return any(mapfile._stat_sig(root / rel) != recorded[rel] for rel in paths)
 
 
 def _maybe_block_scoped_overwrite(
@@ -835,6 +853,8 @@ def _write_json_output(
     Returns:
         ``json_path``, for the caller's ``outputs`` list.
     """
+    doc_paths = discover_doc_paths(root, args)
+    docs = docs_mod.build_doc_index(root, doc_paths, files)
     provenance = mapfile.compute_provenance(
         root,
         [fm.path for fm in files],
@@ -844,15 +864,27 @@ def _write_json_output(
         graph=graph,
         skipped=skipped,
         follow_symlinks=getattr(args, "follow_symlinks", False),
+        doc_paths=doc_paths,
     )
     json_path.parent.mkdir(parents=True, exist_ok=True)
     mapfile.atomic_write_bytes(
         json_path,
-        render_json(files, graph, label, provenance),
+        render_json(files, graph, label, provenance, docs),
     )
     if json_path == root / cache_mod.CACHE_DIR / "map.json":
         mapfile.write_provenance_sidecar(root, provenance)
     return json_path
+
+
+def discover_doc_paths(root: Path, args: argparse.Namespace) -> list[str]:
+    """The docs a map run with ``args``' discovery options indexes."""
+    return walker.discover_docs(
+        root,
+        subpath=args.subpath,
+        excludes=tuple(args.exclude),
+        max_file_size=args.max_file_size,
+        follow_symlinks=getattr(args, "follow_symlinks", False),
+    )
 
 
 def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:

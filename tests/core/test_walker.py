@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from dekko.core.walker import discover, find_config_files
+from dekko.core.walker import discover, discover_docs, find_config_files
 
 
 def _touch(path: Path, content: str = "x = 1\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    # UTF-8 as dekko writes it: a MAP.md heading holds a non-ASCII dash,
+    # which Windows' default encoding would turn into other bytes.
+    path.write_text(content, encoding="utf-8")
 
 
 def test_discover_filters(tmp_path: Path) -> None:
@@ -507,3 +509,76 @@ def test_find_config_files_no_matches_returns_empty(tmp_path: Path) -> None:
         tmp_path, frozenset({"tsconfig.json", "jsconfig.json"})
     )
     assert found == []
+
+
+def test_discover_docs_finds_markdown_and_rst(tmp_path: Path) -> None:
+    for name in ("README.md", "docs/guide.MD", "docs/page.mdx", "a.rst"):
+        _touch(tmp_path / name, "# Title\n")
+    _touch(tmp_path / "notes.txt", "plain\n")
+    _touch(tmp_path / "app.py")
+
+    assert discover_docs(tmp_path) == [
+        "README.md",
+        "a.rst",
+        "docs/guide.MD",
+        "docs/page.mdx",
+    ]
+
+
+def test_discover_docs_uses_the_code_path_rules(tmp_path: Path) -> None:
+    _touch(tmp_path / "README.md", "# Top\n")
+    _touch(tmp_path / "node_modules/pkg/README.md", "# Vendored\n")
+    _touch(tmp_path / ".venv/lib/README.md", "# Noise\n")
+    _touch(tmp_path / "drafts/plan.md", "# Excluded\n")
+    _touch(tmp_path / "private/secret.md", "# Ignored\n")
+    _write_dekkoignore(tmp_path, "private/\n")
+
+    found = discover_docs(tmp_path, excludes=("drafts/*",))
+
+    assert found == ["README.md"]
+
+
+def test_discover_docs_honors_subpath_and_size_cap(tmp_path: Path) -> None:
+    _touch(tmp_path / "docs/small.md", "# Small\n")
+    _touch(tmp_path / "docs/big.md", "# Big\n" + "x" * 2000)
+    _touch(tmp_path / "other/out.md", "# Out\n")
+
+    found = discover_docs(tmp_path, subpath="docs", max_file_size=1000)
+
+    assert found == ["docs/small.md"]
+
+
+def test_discover_docs_skips_symlinks_unless_followed(tmp_path: Path) -> None:
+    _touch(tmp_path / "real.md", "# Real\n")
+    (tmp_path / "link.md").symlink_to(tmp_path / "real.md")
+
+    assert discover_docs(tmp_path) == ["real.md"]
+    assert discover_docs(tmp_path, follow_symlinks=True) == [
+        "link.md",
+        "real.md",
+    ]
+
+
+def test_discover_ignores_docs(tmp_path: Path) -> None:
+    _touch(tmp_path / "README.md", "# Title\n")
+    _touch(tmp_path / "app.py")
+
+    assert discover(tmp_path) == (["app.py"], [])
+
+
+def test_discover_docs_skips_dekkos_own_map_pages(tmp_path: Path) -> None:
+    _touch(tmp_path / "README.md", "# Top\n")
+    _touch(tmp_path / ".dekko/MAP.md", "# Map\n")
+    _touch(tmp_path / ".dekko/map/src.md", "# Page\n")
+
+    assert discover_docs(tmp_path) == ["README.md"]
+
+
+def test_discover_docs_skips_maps_written_elsewhere(tmp_path: Path) -> None:
+    _touch(tmp_path / "docs/guide.md", "# Guide\n")
+    _touch(tmp_path / "docs/MAP.md", "# Code Map — repo\n\nGenerated.\n")
+    _touch(tmp_path / "docs/map/src.md", "# `src/`\n")
+    _touch(tmp_path / "pkg/.dekko/MAP.md", "# Code Map — pkg\n")
+    _touch(tmp_path / "notes/MAP.md", "# Treasure map\n")
+
+    assert discover_docs(tmp_path) == ["docs/guide.md", "notes/MAP.md"]

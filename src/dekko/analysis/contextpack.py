@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dekko.analysis import docs as docs_mod
 from dekko.analysis import relevance
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import Import, Symbol
@@ -96,6 +97,9 @@ class Pack:
             point at its class).
         overload_ties: The ``overload_ties`` JSON object when the
             target is a constructor with tied callers.
+        docs: The best doc sections naming the target (or the file and
+            its symbols), as ``path:line heading``; the first thing a
+            tight budget drops.
     """
 
     label: str
@@ -115,6 +119,7 @@ class Pack:
     ambig_out: int = 0
     ambig_in_notes: list[str] = field(default_factory=list)
     overload_ties: dict | None = None
+    docs: list[str] = field(default_factory=list)
 
 
 def _neighbors(index: MapIndex, sym_id: str) -> list[tuple[str, str]]:
@@ -251,6 +256,7 @@ def build_pack(
         language=target.language,
         imports=index.imports_by_path.get(target.path, []),
         notes=list(index.notes.get(target.id, [])),
+        docs=_doc_labels(index, [target.id]),
     )
     pack.ambig_in, pack.ambig_out = ambiguous_counts(index, target)
     if pack.ambig_in:
@@ -346,7 +352,17 @@ def build_file_pack(index: MapIndex, path: str) -> Pack:
     pack.module_callers = sorted(
         p for p in set(pack.module_callers) if p != path
     )
+    pack.docs = _doc_labels(index, docs_mod.file_targets(index, path))
     return pack
+
+
+# Doc sections a pack carries: a pointer for the reader, not content.
+_PACK_DOCS = 2
+
+
+def _doc_labels(index: MapIndex, targets: list[str]) -> list[str]:
+    hits, _ = docs_mod.top_hits(index, targets, _PACK_DOCS)
+    return [docs_mod.hit_label(h) for h in hits]
 
 
 def attach_source(index: MapIndex, pack: Pack, root: Path) -> None:
@@ -446,6 +462,8 @@ def render_text(pack: Pack) -> str:
     """Render a pack as compact text."""
     lines = [f"context: {pack.label}"]
     lines += _target_lines(pack)
+    if pack.docs:
+        lines.append(f"  docs: {', '.join(pack.docs)}")
     lines += [f"  note: {note}" for note in pack.ambig_in_notes]
     if pack.ambig_out:
         lines.append(
@@ -536,7 +554,8 @@ def trim_to_budget(
 ) -> Pack:
     """Drop pack content until it fits the token budget.
 
-    Imports go first (least load-bearing for an edit task —
+    Doc pointers go first (they say where to read more, not what the
+    code does), then imports (least load-bearing for an edit task —
     ``outline`` or reading the file already answers "what's imported
     here"), then neighbors (farthest hops, then least-connected), then
     the file-mode symbol list from the end, then inlined source from
@@ -565,6 +584,9 @@ def trim_to_budget(
     """
     if not budget:
         return pack
+    while pack.docs and _estimate_tokens(pack) > budget:
+        pack.docs.pop()
+        pack.trimmed += 1
     while pack.imports and _estimate_tokens(pack) > budget:
         pack.imports.pop()
         pack.trimmed += 1
@@ -631,6 +653,8 @@ def _render_json(pack: Pack, meter: Meter) -> str:
     }
     if pack.notes:
         doc["notes"] = pack.notes
+    if pack.docs:
+        doc["docs"] = pack.docs
     if pack.ambig_in:
         doc["ambiguous_in"] = pack.ambig_in
     if pack.overload_ties is not None:
