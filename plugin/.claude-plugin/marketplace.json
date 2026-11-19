@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "dekko: static code map generator for coding agents",
-    "version": "1.10.0"
+    "version": "1.11.0"
   },
   "plugins": [
     {

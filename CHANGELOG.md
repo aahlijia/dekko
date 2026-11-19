@@ -9,6 +9,8 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-19
+
 ### Added
 - **Docs linked to the code they name.** `dekko map` now indexes
   Markdown (`.md`, `.mdx`) and reStructuredText (`.rst`) files by
