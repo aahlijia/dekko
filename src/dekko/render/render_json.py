@@ -13,6 +13,7 @@ def render_json(
     graph: CallGraph,
     root_label: str,
     provenance: dict | None = None,
+    communities: dict[str, list[list[str]]] | None = None,
     docs: DocIndex | None = None,
 ) -> bytes:
     """Serialize the full graph (including external calls) to JSON.
@@ -23,6 +24,8 @@ def render_json(
         root_label: Display name of the mapped root.
         provenance: Freshness stamp (tool version, git commit,
             discovery options, per-file hashes), or ``None``.
+        communities: View name → file communities (paths), or ``None``
+            to leave the key out.
         docs: Doc sections and their code references, or ``None`` to
             leave the doc keys out (a map that never indexed docs).
 
@@ -230,6 +233,14 @@ def render_json(
             for site in graph.reads
         ],
     }
+    if communities is not None:
+        # Each file as its position in ``files``: unconnected files
+        # aren't in ``ids``, every mapped file is in ``files``.
+        position = {fm.path: i for i, fm in enumerate(files)}
+        doc["communities"] = {
+            view: [[position[p] for p in group] for group in groups]
+            for view, groups in communities.items()
+        }
     if docs is not None:
         # Plain strings, not interned: a doc link's target is read only
         # by the doc queries, and the lists are small next to the

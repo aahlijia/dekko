@@ -30,6 +30,7 @@ are in `docs/cli.md` in the dekko repo.
 | Whether an exception type is handled anywhere | `dekko query catches <type>` | grepping `except`/`catch` blocks |
 | Where an env var is read | `dekko query env <NAME>` (`--list` for all) | grepping `getenv`/`process.env`/`os.environ` |
 | Gut-check before splitting a file (weak signal, disclosed as such) | `dekko query cohesion <file>` | reading the file to guess groupings |
+| The repo's subsystems, including ones that cut across directories; which subsystem a file belongs to | `dekko communities` (`<file>` for one file) | reading imports across folders to guess the architecture |
 | File-to-file imports, circular imports | `dekko deps` (`--file`, `--cycles`) | tracing import statements by hand |
 | Which names collide when a fan-in count looks off | `dekko ambiguous` (`--by name`, `--name X`) | recounting with grep |
 | Shortest call path, dead-code leads, hotspots, terse map | `dekko trace \| unused \| stats \| lean` | |
