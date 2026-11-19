@@ -8,8 +8,8 @@ collapses to one node per file with edges between files.
 import sys
 from pathlib import Path
 
-from dekko.render.mapfile import MapIndex
-from dekko.core.resolver import MODULE_CALLER_SUFFIX
+from dekko.analysis import communities
+from dekko.render.mapfile import MapIndex, path_of
 
 EXIT_OK = 0
 EXIT_TOO_BIG = 2
@@ -23,16 +23,6 @@ def _dir_of(path: str) -> str:
     """Directory portion of a repo-relative path (``.`` for the root)."""
     head, _, _ = path.rpartition("/")
     return head or "."
-
-
-def _path_of(index: MapIndex, node_id: str) -> str | None:
-    """File path backing a graph node id (symbol or module origin)."""
-    sym = index.symbols_by_id.get(node_id)
-    if sym is not None:
-        return sym.path
-    if node_id.endswith(MODULE_CALLER_SUFFIX):
-        return node_id[: -len(MODULE_CALLER_SUFFIX)]
-    return None
 
 
 def _symbol_graph(
@@ -64,11 +54,11 @@ def _file_graph(
     """Build ``(labels, edges)`` at file scope (no self-loops)."""
     edges: set[tuple[str, str]] = set()
     for caller, callees in index.calls_out.items():
-        src = _path_of(index, caller)
+        src = path_of(index, caller)
         if src is None:
             continue
         for callee in callees:
-            dst = _path_of(index, callee)
+            dst = path_of(index, callee)
             if dst is not None and dst != src:
                 edges.add((src, dst))
     labels = {node: node for edge in edges for node in edge}
@@ -86,12 +76,12 @@ def dir_graph(
     """
     edges: set[tuple[str, str]] = set()
     for caller, callees in index.calls_out.items():
-        src = _path_of(index, caller)
+        src = path_of(index, caller)
         if src is None:
             continue
         src_dir = _dir_of(src)
         for callee in callees:
-            dst = _path_of(index, callee)
+            dst = path_of(index, callee)
             if dst is None:
                 continue
             dst_dir = _dir_of(dst)
@@ -145,27 +135,76 @@ def _ids(labels: dict[str, str]) -> dict[str, str]:
     return {node: f"n{i}" for i, node in enumerate(sorted(labels))}
 
 
-def render_mermaid(
-    labels: dict[str, str], edges: list[tuple[str, str]]
-) -> str:
-    """Render a flowchart in Mermaid syntax."""
-    ids = _ids(labels)
-    lines = ["flowchart LR"]
+Groups = dict[str, tuple[int, str]]
+
+
+def _clusters(
+    labels: dict[str, str], groups: Groups
+) -> tuple[list[tuple[int, str, list[str]]], list[str]]:
+    """Nodes by community (``(id, title, nodes)``, in id order) and the
+    nodes in none."""
+    by_id: dict[int, tuple[str, list[str]]] = {}
+    loose = []
     for node in sorted(labels):
-        text = labels[node].replace('"', "'")
-        lines.append(f'  {ids[node]}["{text}"]')
+        if node in groups:
+            cid, title = groups[node]
+            by_id.setdefault(cid, (title, []))[1].append(node)
+        else:
+            loose.append(node)
+    clusters = [(cid, *by_id[cid]) for cid in sorted(by_id)]
+    return clusters, loose
+
+
+def _mermaid_text(text: str) -> str:
+    return text.replace('"', "'")
+
+
+def render_mermaid(
+    labels: dict[str, str],
+    edges: list[tuple[str, str]],
+    groups: Groups | None = None,
+) -> str:
+    """Render a flowchart in Mermaid syntax, one subgraph per group."""
+    ids = _ids(labels)
+
+    def node(n: str, indent: str) -> str:
+        return f'{indent}{ids[n]}["{_mermaid_text(labels[n])}"]'
+
+    clusters, loose = _clusters(labels, groups or {})
+    lines = ["flowchart LR"]
+    for cid, title, members in clusters:
+        lines.append(f'  subgraph c{cid}["{_mermaid_text(title)}"]')
+        lines += [node(n, "    ") for n in members]
+        lines.append("  end")
+    lines += [node(n, "  ") for n in loose]
     for src, dst in edges:
         lines.append(f"  {ids[src]} --> {ids[dst]}")
     return "\n".join(lines)
 
 
-def render_dot(labels: dict[str, str], edges: list[tuple[str, str]]) -> str:
-    """Render a digraph in Graphviz DOT syntax."""
+def _dot_text(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def render_dot(
+    labels: dict[str, str],
+    edges: list[tuple[str, str]],
+    groups: Groups | None = None,
+) -> str:
+    """Render a digraph in Graphviz DOT syntax, one cluster per group."""
     ids = _ids(labels)
+
+    def node(n: str, indent: str) -> str:
+        return f'{indent}{ids[n]} [label="{_dot_text(labels[n])}"];'
+
+    clusters, loose = _clusters(labels, groups or {})
     lines = ["digraph dekko {", "  rankdir=LR;"]
-    for node in sorted(labels):
-        text = labels[node].replace("\\", "\\\\").replace('"', '\\"')
-        lines.append(f'  {ids[node]} [label="{text}"];')
+    for cid, title, members in clusters:
+        lines.append(f"  subgraph cluster_{cid} {{")
+        lines.append(f'    label="{_dot_text(title)}";')
+        lines += [node(n, "    ") for n in members]
+        lines.append("  }")
+    lines += [node(n, "  ") for n in loose]
     for src, dst in edges:
         lines.append(f"  {ids[src]} -> {ids[dst]};")
     lines.append("}")
@@ -205,7 +244,8 @@ def run(
         return EXIT_TOO_BIG
 
     text = render_dot if fmt == "dot" else render_mermaid
-    output = text(labels, edges)
+    groups = communities.file_titles(index) if scope == "file" else {}
+    output = text(labels, edges, groups)
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(output + "\n", encoding="utf-8")

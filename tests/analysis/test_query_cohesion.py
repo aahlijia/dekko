@@ -1,5 +1,5 @@
-"""``dekko query cohesion``: intra-file connected-components (weak
-signal — connectivity only, not real clustering).
+"""``dekko query cohesion``: a file's symbols clustered by their own
+calls and references (a weak signal: other files' calls don't count).
 """
 
 import json
@@ -59,20 +59,43 @@ def test_cohesion_splits_two_groups_and_an_isolate(
     out = capsys.readouterr().out
     assert "6 symbols, 3 intra-file edges" in out
     assert "weak signal" in out
-    first = out.index("connected component 1")
-    second = out.index("connected component 2")
+    first = out.index("group 1")
+    second = out.index("group 2")
     assert first < second
     # Larger cluster (3 members) listed before the smaller (2 members).
-    assert "connected component 1 (3 symbols)" in out
+    assert "group 1 (3 symbols)" in out
     assert "parse_config" in out
     assert "validate_config" in out
     assert "load_config" in out
-    assert "connected component 2 (2 symbols)" in out
+    assert "group 2 (2 symbols)" in out
     assert "render_html" in out
     assert "render_css" in out
     assert "isolated (1 symbols, no intra-file edges): standalone_helper" in (
         out
     )
+
+
+TWO_TRIANGLES = {
+    "app.py": (
+        "def a1():\n    a2()\n    a3()\n\n\n"
+        "def a2():\n    a3()\n\n\n"
+        "def a3():\n    b1()\n\n\n"
+        "def b1():\n    b2()\n    b3()\n\n\n"
+        "def b2():\n    b3()\n\n\n"
+        "def b3():\n    pass\n"
+    ),
+}
+
+
+def test_cohesion_splits_tight_groups_joined_by_one_call(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TWO_TRIANGLES)
+    code = cli.main(["query", "cohesion", "app.py", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "group 1 (3 symbols): a1, a2, a3" in out
+    assert "group 2 (3 symbols): b1, b2, b3" in out
 
 
 def test_cohesion_note_is_the_verbatim_weak_signal_disclosure(
@@ -84,8 +107,8 @@ def test_cohesion_note_is_the_verbatim_weak_signal_disclosure(
     code = cli.main(["query", "cohesion", "app.py", "--root", str(root)])
     assert code == 0
     out = capsys.readouterr().out
-    assert "mutually reachable" in out
-    assert "not implemented" in out
+    assert "this file's own calls and references" in out
+    assert "a hint, not a verdict" in out
 
 
 def test_cohesion_budget_below_floor_discloses_note(
@@ -143,7 +166,7 @@ def test_cohesion_all_isolated_when_no_intra_file_edges(
     assert code == 0
     out = capsys.readouterr().out
     assert "3 symbols, 0 intra-file edges" in out
-    assert "connected component 1" not in out
+    assert "group 1" not in out
     assert "isolated (3 symbols" in out
     for name in ("a", "b", "c"):
         assert name in out
@@ -158,8 +181,8 @@ def test_cohesion_single_connected_component_has_no_isolated_line(
     code = cli.main(["query", "cohesion", "app.py", "--root", str(root)])
     assert code == 0
     out = capsys.readouterr().out
-    assert "connected component 1 (3 symbols)" in out
-    assert "connected component 2" not in out
+    assert "group 1 (3 symbols)" in out
+    assert "group 2" not in out
     assert "isolated" not in out
 
 
@@ -202,7 +225,7 @@ def test_cohesion_json_shape(
     assert doc["symbol_count"] == 6
     assert doc["edge_count"] == 3
     assert doc["weak_signal"] is True
-    assert "mutually reachable" in doc["note"]
+    assert "a hint, not a verdict" in doc["note"]
     sizes = [c["size"] for c in doc["components"]]
     assert sizes == sorted(sizes, reverse=True)
     assert doc["components"][0]["symbols"] == [

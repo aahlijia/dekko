@@ -34,6 +34,7 @@ from dekko import selfcheck
 from dekko.core import docs as docs_mod
 from dekko.core import grammars
 from dekko.core import resolver as resolver_mod
+from dekko.analysis import communities
 from dekko.render import mapfile
 from dekko.render import render_md
 from dekko.storage import filelock
@@ -530,6 +531,8 @@ def _map_run_is_noop(
         prov.get("tool_version") == selfcheck.loaded_version()
         and prov.get("spec_hash") == selfcheck.loaded_spec()
         and index.doc_version == mapfile.MAP_DOC_VERSION
+        # A same-version map from before communities were stored.
+        and index.has_communities
     )
     if not (options_match and version_match):
         return False
@@ -866,10 +869,13 @@ def _write_json_output(
         follow_symlinks=getattr(args, "follow_symlinks", False),
         doc_paths=doc_paths,
     )
+    groups = communities.cluster(mapfile.index_from_maps(files, graph, label))
     json_path.parent.mkdir(parents=True, exist_ok=True)
     mapfile.atomic_write_bytes(
         json_path,
-        render_json(files, graph, label, provenance, docs),
+        render_json(
+            files, graph, label, provenance, communities=groups, docs=docs
+        ),
     )
     if json_path == root / cache_mod.CACHE_DIR / "map.json":
         mapfile.write_provenance_sidecar(root, provenance)

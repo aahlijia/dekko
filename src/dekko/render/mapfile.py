@@ -21,6 +21,7 @@ from typing import Any
 
 from dekko import selfcheck
 from dekko.core import languages, walker
+from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.classify import is_test_path
 from dekko.core.docs import DocDangling, DocLink, DocSection
 from dekko.core.model import (
@@ -915,6 +916,12 @@ class MapIndex:
         root_dir: The repository root the map was read from
             (``load_map`` only), so a reply can look at a path on disk
             that isn't in the map.
+        communities: File communities on the test-free graph, largest
+            first, each a sorted list of paths.
+        communities_with_tests: The same with test files included
+            (empty in a ``without_tests`` view).
+        has_communities: Whether the map stored communities; false for
+            a map written before they existed.
     """
 
     root_label: str
@@ -995,6 +1002,9 @@ class MapIndex:
     hidden_test_symbols: dict[str, int] = field(default_factory=dict)
     notes_stat: list[int] | None = None
     root_dir: Path | None = None
+    communities: list[list[str]] = field(default_factory=list)
+    communities_with_tests: list[list[str]] = field(default_factory=list)
+    has_communities: bool = False
     # ``without_tests``'s result, kept for the next call. The view
     # shares symbols and lists with this index, which no reader
     # mutates; ``refresh_notes`` drops it when the notes change.
@@ -1061,6 +1071,8 @@ class MapIndex:
             provenance=self.provenance,
             doc_version=self.doc_version,
             root_dir=self.root_dir,
+            communities=self.communities,
+            has_communities=self.has_communities,
         )
         for sid, sym in self.symbols_by_id.items():
             if _symbol_is_test(sym):
@@ -1075,7 +1087,7 @@ class MapIndex:
         out.edge_lines = {
             key: lines
             for key, lines in self.edge_lines.items()
-            if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+            if prod_id(key[0], by_id) and prod_id(key[1], by_id)
         }
         out.imports_by_path = _filter_paths(self.imports_by_path)
         out.type_aliases_by_path = _filter_paths(self.type_aliases_by_path)
@@ -1085,33 +1097,33 @@ class MapIndex:
         out.notes = {
             sid: texts
             for sid, texts in self.notes.items()
-            if _prod_id(sid, by_id)
+            if prod_id(sid, by_id)
         }
         for name, exts in self.externals_by_name.items():
-            kept = [e for e in exts if _prod_id(e.caller, by_id)]
+            kept = [e for e in exts if prod_id(e.caller, by_id)]
             if kept:
                 out.externals_by_name[name] = kept
         for cand, pairs in self.ambiguous_in.items():
-            if not _prod_id(cand, by_id):
+            if not prod_id(cand, by_id):
                 continue
             kept_pairs = [
                 (caller, name)
                 for caller, name in pairs
-                if _prod_id(caller, by_id)
+                if prod_id(caller, by_id)
             ]
             if kept_pairs:
                 out.ambiguous_in[cand] = kept_pairs
         out.ambiguous_out = {
             caller: names
             for caller, names in self.ambiguous_out.items()
-            if _prod_id(caller, by_id)
+            if prod_id(caller, by_id)
         }
         out.referenced_in = _filter_adjacency(self.referenced_in, by_id)
         out.referenced_out = _filter_adjacency(self.referenced_out, by_id)
         out.ref_lines = {
             key: lines
             for key, lines in self.ref_lines.items()
-            if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+            if prod_id(key[0], by_id) and prod_id(key[1], by_id)
         }
         _filter_heritage(self, out, by_id)
         _filter_module_graph(self, out)
@@ -1142,7 +1154,17 @@ def _symbol_is_test(sym: Symbol) -> bool:
     return sym.test or is_test_path(sym.path)
 
 
-def _prod_id(sym_or_module_id: str, symbols_by_id: dict[str, Symbol]) -> bool:
+def path_of(index: "MapIndex", node_id: str) -> str | None:
+    """File path backing a graph node id (symbol or module origin)."""
+    sym = index.symbols_by_id.get(node_id)
+    if sym is not None:
+        return sym.path
+    if node_id.endswith(MODULE_CALLER_SUFFIX):
+        return node_id[: -len(MODULE_CALLER_SUFFIX)]
+    return None
+
+
+def prod_id(sym_or_module_id: str, symbols_by_id: dict[str, Symbol]) -> bool:
     """Whether a symbol/module id belongs to production (non-test) code.
 
     Resolves the id against ``symbols_by_id`` and defers to
@@ -1163,9 +1185,9 @@ def _filter_adjacency(
     """Drop test-path nodes from an adjacency table, keys and values."""
     out: dict[str, list[str]] = {}
     for sid, others in table.items():
-        if not _prod_id(sid, symbols_by_id):
+        if not prod_id(sid, symbols_by_id):
             continue
-        kept = [o for o in others if _prod_id(o, symbols_by_id)]
+        kept = [o for o in others if prod_id(o, symbols_by_id)]
         if kept:
             out[sid] = kept
     return out
@@ -1197,30 +1219,30 @@ def _filter_heritage(
     out.heritage_lines = {
         key: lines
         for key, lines in src.heritage_lines.items()
-        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+        if prod_id(key[0], by_id) and prod_id(key[1], by_id)
     }
     out.heritage_relation = {
         key: rel
         for key, rel in src.heritage_relation.items()
-        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+        if prod_id(key[0], by_id) and prod_id(key[1], by_id)
     }
     for cand, pairs in src.heritage_ambiguous_in.items():
-        if not _prod_id(cand, by_id):
+        if not prod_id(cand, by_id):
             continue
         kept_pairs = [
             (subtype, name)
             for subtype, name in pairs
-            if _prod_id(subtype, by_id)
+            if prod_id(subtype, by_id)
         ]
         if kept_pairs:
             out.heritage_ambiguous_in[cand] = kept_pairs
     out.heritage_ambiguous_out = {
         subtype: names
         for subtype, names in src.heritage_ambiguous_out.items()
-        if _prod_id(subtype, by_id)
+        if prod_id(subtype, by_id)
     }
     for subtype, exts in src.heritage_external_out.items():
-        if _prod_id(subtype, by_id):
+        if prod_id(subtype, by_id):
             out.heritage_external_out[subtype] = exts
     # Repo-wide scalar, not per-symbol -- carried over unfiltered,
     # same as every other whole-repo count this view doesn't narrow.
@@ -1237,7 +1259,7 @@ def _filter_module_graph(src: "MapIndex", out: "MapIndex") -> None:
     Unlike ``_filter_heritage``/``_filter_adjacency``, the module
     graph is keyed and valued by file *path* directly (not a symbol
     id needing a ``symbols_by_id`` lookup to classify), so this
-    filters on ``is_test_path`` alone rather than via ``_prod_id``.
+    filters on ``is_test_path`` alone rather than via ``prod_id``.
     """
     for path, others in src.module_deps_out.items():
         if is_test_path(path):
@@ -1272,27 +1294,27 @@ def _filter_throws_catches(
     Split out of ``MapIndex.without_tests`` for the same reason
     ``_filter_heritage``/``_filter_module_graph`` are. ``catches`` is a
     flat per-clause list (not an adjacency table), so it's filtered by
-    a direct ``_prod_id`` check on each site's ``caller`` rather than
+    a direct ``prod_id`` check on each site's ``caller`` rather than
     via ``_filter_adjacency``.
     """
     out.throws_out = _filter_adjacency(src.throws_out, by_id)
     out.throws_lines = {
         key: lines
         for key, lines in src.throws_lines.items()
-        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+        if prod_id(key[0], by_id) and prod_id(key[1], by_id)
     }
     out.throws_ambiguous_out = {
         caller: names
         for caller, names in src.throws_ambiguous_out.items()
-        if _prod_id(caller, by_id)
+        if prod_id(caller, by_id)
     }
     for caller, exts in src.throws_external_out.items():
-        if _prod_id(caller, by_id):
+        if prod_id(caller, by_id):
             out.throws_external_out[caller] = exts
     for caller, sites in src.throws_bare_out.items():
-        if _prod_id(caller, by_id):
+        if prod_id(caller, by_id):
             out.throws_bare_out[caller] = sites
-    out.catches = [c for c in src.catches if _prod_id(c.caller, by_id)]
+    out.catches = [c for c in src.catches if prod_id(c.caller, by_id)]
 
 
 def _filter_env_reads(src: "MapIndex", out: "MapIndex") -> None:
@@ -1301,7 +1323,7 @@ def _filter_env_reads(src: "MapIndex", out: "MapIndex") -> None:
 
     Filtered on ``EnvRead.path`` directly (mirrors
     ``_filter_module_graph``'s path-keyed filtering), not via
-    ``_prod_id`` — an ``EnvRead``'s ``caller_id`` is disclosure-only
+    ``prod_id`` — an ``EnvRead``'s ``caller_id`` is disclosure-only
     (see ``model.EnvRead``'s docstring), not something ``dekko query
     env`` looks up by id, so there's no adjacency table here requiring
     symbol-level classification the way ``_filter_throws_catches``
@@ -1360,12 +1382,12 @@ def _filter_reads(
 ) -> None:
     """Fill ``out.reads_by_name`` from ``src``, test-code readers dropped.
 
-    Filtered on the reader id through ``_prod_id`` like
+    Filtered on the reader id through ``prod_id`` like
     ``externals_by_name`` is on its caller: a module-level reader is
     a ``path::<module>`` pseudo-id that falls back to the path check.
     """
     for name, sites in src.reads_by_name.items():
-        kept = [s for s in sites if _prod_id(s.reader, by_id)]
+        kept = [s for s in sites if prod_id(s.reader, by_id)]
         if kept:
             out.reads_by_name[name] = kept
 
@@ -1755,7 +1777,23 @@ def load_map(root: Path) -> MapIndex | None:
     _load_docs(index, doc)
     _load_reads(index, doc, ids)
     _load_type_uses(index, doc)
+    _load_communities(index, doc)
     return index
+
+
+def _load_communities(index: MapIndex, doc: dict) -> None:
+    """Fill ``index``'s communities from file indexes into ``files``."""
+    stored = doc.get("communities")
+    if stored is None:
+        return
+    paths = [entry["path"] for entry in doc.get("files", [])]
+    index.communities = [
+        [paths[i] for i in group] for group in stored.get("default", [])
+    ]
+    index.communities_with_tests = [
+        [paths[i] for i in group] for group in stored.get("with_tests", [])
+    ]
+    index.has_communities = True
 
 
 def _load_reads(index: MapIndex, doc: dict, ids: list[str] | None) -> None:

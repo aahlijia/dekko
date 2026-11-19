@@ -49,6 +49,7 @@ from dekko.render import render_md
 from dekko.analysis import search
 from dekko.integrations import server
 from dekko.analysis import stats
+from dekko.analysis import communities
 from dekko.analysis import summary
 from dekko.core.model import Symbol
 from dekko.analysis import trace
@@ -83,6 +84,7 @@ SUBCOMMANDS = (
     "stats",
     "ambiguous",
     "summary",
+    "communities",
     "orient",
     "note",
     "export",
@@ -330,7 +332,10 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_read_options(
-    parser: argparse.ArgumentParser, no_tests_note: str = ""
+    parser: argparse.ArgumentParser,
+    no_tests_note: str = "",
+    *,
+    no_tests: bool = True,
 ) -> None:
     """Attach the options shared by map-reading subcommands.
 
@@ -338,6 +343,8 @@ def _add_read_options(
         parser: The subcommand parser.
         no_tests_note: Appended to ``--no-tests``' help, for a
             subcommand whose default differs from its MCP counterpart.
+        no_tests: Offer ``--no-tests``; off for a subcommand that
+            leaves tests out by default.
     """
     parser.add_argument(
         "--root",
@@ -356,6 +363,8 @@ def _add_read_options(
         action="store_true",
         help="fail (exit 5) instead of regenerating a stale map",
     )
+    if not no_tests:
+        return
     parser.add_argument(
         "--no-tests",
         action="store_true",
@@ -1602,6 +1611,43 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
+
+    p_comm = sub.add_parser(
+        "communities",
+        help="files grouped by how much they use each other: the "
+        "subsystems, including ones that cut across directories",
+    )
+    p_comm.add_argument(
+        "target",
+        nargs="?",
+        metavar="FILE_OR_SYMBOL",
+        help="show this file's (or symbol's file's) community and its "
+        "links to the other communities",
+    )
+    p_comm.add_argument(
+        "--tests",
+        action="store_true",
+        help="include test files (default: left out, since shared test "
+        "helpers tie every subsystem together)",
+    )
+    p_comm.add_argument(
+        "--limit",
+        type=_row_count,
+        default=None,
+        metavar="N",
+        help="list at most N communities",
+    )
+    p_comm.add_argument(
+        "--budget",
+        type=_token_budget,
+        default=summary.DEFAULT_BUDGET,
+        metavar="TOKENS",
+        help="approximate token cap; directory mismatches, then bridges, "
+        f"then communities are shed to fit (default: "
+        f"{summary.DEFAULT_BUDGET}; 0 = no cap)",
+    )
+    _add_read_options(p_comm, no_tests=False)
+    p_comm.set_defaults(func=run_communities)
 
     p_lean = sub.add_parser(
         "lean",
@@ -2981,6 +3027,21 @@ def run_summary(args: argparse.Namespace) -> int:
     if index is None:
         return code
     return summary.run(index, as_json=args.as_json, budget=args.budget)
+
+
+def run_communities(args: argparse.Namespace) -> int:
+    """Handle ``dekko communities``."""
+    index, code = _read_index(args)
+    if index is None:
+        return code
+    return communities.run(
+        index,
+        args.target,
+        tests=args.tests,
+        limit=args.limit,
+        budget=args.budget,
+        as_json=args.as_json,
+    )
 
 
 def run_lean(args: argparse.Namespace) -> int:
