@@ -1051,7 +1051,12 @@ def _summary_text(ctx: Context, args: dict, budget: int | None = None) -> str:
     """Render the repo digest, reused by the tool and the resource."""
     index = _index_for(ctx, args)
     code, out, err = _capture(
-        lambda: summary.run(index, as_json=False, budget=budget)
+        lambda: summary.run(
+            index,
+            as_json=False,
+            budget=budget,
+            docs=bool(args.get("docs")),
+        )
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
@@ -1737,6 +1742,12 @@ TOOLS: list[dict[str, Any]] = [
                     "2000; 0 = no cap); trailing sections are shed to fit "
                     "and a "
                     "footer reports the omission",
+                },
+                "docs": {
+                    "type": "boolean",
+                    "description": "Add the docs section (doc counts by "
+                    "directory, most-linked, entry and orphan docs); it "
+                    "appears on its own when docs outnumber code files",
                 },
                 "root": _ROOT_PROP,
             },

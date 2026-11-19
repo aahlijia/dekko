@@ -714,7 +714,9 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
         follow_symlinks=getattr(args, "follow_symlinks", False),
     )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
-    if not files:
+    if not files and (args.no_json or not discover_doc_paths(root, args)):
+        # A docs-only repo (a notes vault, a docs site) still has a map
+        # worth writing: its doc index.
         print(
             f"dekko: no supported source files found under {root}",
             file=sys.stderr,

@@ -13,6 +13,7 @@ from collections import deque
 
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import Symbol
+from dekko.analysis import doc_trace
 from dekko.analysis.query import (
     EXIT_OK,
     report_unresolved,
@@ -226,8 +227,11 @@ def run(
 
     Returns:
         Process exit code: 0 path found, 1 no path, 3 endpoint not
-        found, 4 endpoint ambiguous.
+        found, 4 endpoint ambiguous; 2 when one end is a doc and the
+        other a symbol. Two docs trace the links between them instead.
     """
+    if doc_trace.names_a_doc(index, frm) or doc_trace.names_a_doc(index, to):
+        return doc_trace.run(index, frm, to, max_paths, as_json)
     src, code = _resolve_endpoint(index, frm)
     if src is None:
         return code

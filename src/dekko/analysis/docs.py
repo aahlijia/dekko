@@ -10,6 +10,7 @@ import re
 import sys
 from dataclasses import dataclass
 
+from dekko.core import doc_edges
 from dekko.core.docs import (
     AMBIGUOUS,
     EXTRACTED,
@@ -149,8 +150,7 @@ def match_doc(index: MapIndex, doc: str) -> list[str]:
 
 def slug(heading: str) -> str:
     """GitHub's anchor for a heading: lowercase, dashes for spaces."""
-    text = re.sub(r"[^\w\- ]", "", heading.strip().lower())
-    return text.replace(" ", "-")
+    return doc_edges.slug(heading)
 
 
 def sections_of(index: MapIndex, doc: str, heading: str | None) -> list[int]:
@@ -182,6 +182,7 @@ _WHY_TEXT = {
     "missing": "missing",
     "past-end": "past end of file",
     "no-member": "no such member",
+    "no-heading": "no such heading",
 }
 
 

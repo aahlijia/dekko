@@ -571,7 +571,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "DATABASE_URL); 'throws' takes a function/method symbol like "
         "callers/callees; 'cohesion' takes a file path like 'file'; "
         "'docs' takes a symbol or a file path and lists the doc sections "
-        "that name it; 'refs' takes a doc path, optionally with "
+        "that name it (given a doc, the sections of other docs that link "
+        "to it); 'refs' takes a doc path, optionally with "
         "'#heading' (README.md#install), and lists the code it names. "
         "Append ':LINE' (file.py:Class.method:LINE) "
         "to pick one candidate out of an overload set the "
@@ -741,17 +742,19 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_ctx.set_defaults(func=run_context)
 
     p_trace = sub.add_parser(
-        "trace", help="shortest call path(s) between two symbols"
+        "trace",
+        help="shortest call path(s) between two symbols, or link path(s) "
+        "between two docs",
     )
     p_trace.add_argument(
         "frm",
         metavar="FROM",
-        help="source symbol (name, Class.method, file.py:func)",
+        help="source symbol (name, Class.method, file.py:func) or doc",
     )
     p_trace.add_argument(
         "to",
         metavar="TO",
-        help="destination symbol (name, Class.method, file.py:func)",
+        help="destination symbol (name, Class.method, file.py:func) or doc",
     )
     p_trace.add_argument(
         "--max-paths",
@@ -1609,6 +1612,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="approximate token cap; trailing sections are shed to fit "
         f"(default: {summary.DEFAULT_BUDGET}; 0 = no cap)",
     )
+    p_summary.add_argument(
+        "--docs",
+        action="store_true",
+        help="add the docs section (doc counts by directory, most linked, "
+        "entry and orphan docs); shown without it when docs outnumber "
+        "code files",
+    )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
 
@@ -1645,6 +1655,12 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="approximate token cap; directory mismatches, then bridges, "
         f"then communities are shed to fit (default: "
         f"{summary.DEFAULT_BUDGET}; 0 = no cap)",
+    )
+    p_comm.add_argument(
+        "--docs",
+        action="store_true",
+        help="group docs by the links between them instead of code files; "
+        "a doc as FILE_OR_SYMBOL does the same",
     )
     _add_read_options(p_comm, no_tests=False)
     p_comm.set_defaults(func=run_communities)
@@ -3026,7 +3042,9 @@ def run_summary(args: argparse.Namespace) -> int:
     index, code = _read_index(args)
     if index is None:
         return code
-    return summary.run(index, as_json=args.as_json, budget=args.budget)
+    return summary.run(
+        index, as_json=args.as_json, budget=args.budget, docs=args.docs
+    )
 
 
 def run_communities(args: argparse.Namespace) -> int:
@@ -3041,6 +3059,7 @@ def run_communities(args: argparse.Namespace) -> int:
         limit=args.limit,
         budget=args.budget,
         as_json=args.as_json,
+        docs=args.docs,
     )
 
 

@@ -248,6 +248,7 @@ def render_json(
         doc["doc_sections"] = [asdict(s) for s in docs.sections]
         doc["doc_links"] = [asdict(link) for link in docs.links]
         doc["doc_dangling"] = [asdict(d) for d in docs.dangling]
+        doc["doc_edges"] = [asdict(e) for e in docs.edges]
 
     return _json_dumps(doc) + b"\n"
 

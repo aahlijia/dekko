@@ -12,6 +12,7 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 
+from dekko.analysis import docs as docs_mod
 from dekko.classify import is_test_path
 from dekko.core.model import Symbol
 from dekko.render.mapfile import MapIndex, path_of, prod_id
@@ -713,23 +714,38 @@ def run(
     limit: int | None,
     budget: int | None,
     as_json: bool,
+    docs: bool = False,
 ) -> int:
     """Print the communities listing, or one file's place in it.
 
     Args:
         index: Loaded map index.
-        target: A file path or symbol, or ``None`` for the listing.
+        target: A file path, symbol or doc, or ``None`` for the listing.
         tests: Read the partition that includes test files.
         limit: List at most this many communities.
         budget: Approximate token cap for the text listing; trailing
             sections (mismatches, bridges, then communities) go first.
         as_json: Emit JSON (never budgeted).
+        docs: Group the docs by their links instead; a doc ``target``
+            does the same without it.
 
     Returns:
         ``0``; ``2`` when the map predates communities; ``3`` when
         ``target`` names nothing in the map, ``4`` when it names
         symbols in several files (as ``query`` reports them).
     """
+    if docs or (target is not None and _names_a_doc(index, target)):
+        # Imported here: doc_communities builds on this module.
+        from dekko.analysis import doc_communities
+
+        return doc_communities.run(
+            index,
+            target,
+            tests=tests,
+            limit=limit,
+            budget=budget,
+            as_json=as_json,
+        )
     if not index.has_communities:
         print(
             "dekko: map predates communities; run dekko map",
@@ -754,6 +770,14 @@ def run(
     if budget:
         print(meter.footer())
     return EXIT_OK
+
+
+def _names_a_doc(index: MapIndex, target: str) -> bool:
+    """Whether ``target`` is an indexed doc rather than code."""
+    stripped = target.removeprefix("./")
+    return stripped not in index.languages_by_path and bool(
+        docs_mod.match_doc(index, stripped)
+    )
 
 
 def _listing(report: Report, limit: int | None) -> tuple[str, list[str]]:

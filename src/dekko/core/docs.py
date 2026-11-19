@@ -14,9 +14,11 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 from dekko.classify import is_test_path
 from dekko.core import languages, tier2
+from dekko.core import doc_edges
 from dekko.core import resolver as resolver_mod
 from dekko.core.model import TYPE_KINDS, FileMap, Symbol
 from dekko.core.walker import DOC_EXTENSIONS
@@ -34,6 +36,8 @@ class DocSection:
             heading.
         line: First line of the heading (1-based).
         end_line: Last line before the next heading, or the file's end.
+        anchor: The heading's explicit id (``{#id}``), or empty when
+            it has none and links reach it by its slug.
     """
 
     path: str
@@ -41,6 +45,7 @@ class DocSection:
     level: int
     line: int
     end_line: int
+    anchor: str = ""
 
 
 @dataclass(frozen=True)
@@ -52,13 +57,16 @@ class Candidate:
         text: The reference: a name (``MapIndex.load``, ``Pack``) or a
             path with an optional ``:LINE`` or ``:START-END``.
         kind: Where it was found: ``span`` (inline code), ``fence``
-            (a code block), ``link`` (a link target) or ``prose``.
+            (a code block), ``link`` (a link target), ``wiki`` (a
+            ``[[wikilink]]``), ``route`` (a docs-site route such as
+            ``/features/x``) or ``prose``.
         shape: ``path``, ``qualified`` (dotted or ``::`` name) or
             ``bare`` (one identifier).
         label: A link's text, empty for everything else.
         lang: The language a code block was tagged with, as dekko
             names it, so its names only match that language's code;
             empty when untagged or not in a block.
+        anchor: The heading a link names after ``#``, if any.
     """
 
     line: int
@@ -67,6 +75,7 @@ class Candidate:
     shape: str
     label: str = field(default="", compare=False)
     lang: str = field(default="", compare=False)
+    anchor: str = field(default="", compare=False)
 
 
 # Shell sessions name commands and files, not the repo's symbols, so a
@@ -152,6 +161,20 @@ _RST_INTERPRETED_RE = re.compile(r"(?<![`\w])`([^`]+)`(?!_)")
 _MD_SPAN_RE = re.compile(r"(`+)(.+?)(?<!`)\1(?!`)")
 _SCHEME_RE = re.compile(r"^[A-Za-z][\w+.-]*:")
 _ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L?(\d+))?$")
+_WIKI_RE = re.compile(r"!?\[\[(?!\s)([^\[\]\n]+?)(?<!\s)\]\]")
+_HREF_RE = re.compile(r"""\bhref=["'](/[^"'#?\s]*)(?:#([^"'\s]*))?["']""")
+# ``:doc:`` alone: ``:external+numpy:doc:`` names another project's page.
+_RST_DOC_ROLE_RE = re.compile(r"(?<![\w:+-]):doc:`([^`]+)`")
+_RST_TOCTREE_RE = re.compile(r"^(\s*)\.\.\s+toctree::")
+_TOC_SUFFIX_RE = re.compile(r"\.(?:rst|md|mdx|txt)$", re.IGNORECASE)
+# Pages Sphinx makes itself, which a toctree may list.
+_SPHINX_PAGES = frozenset({"self", "genindex", "modindex", "search"})
+# A MyST toctree option: a ``---`` fence line or ``key: value``.
+_MYST_OPTION_RE = re.compile(r"^(?:---|[\w-]+:(?:\s|$))")
+# The block tag a toctree's body is read under; braces keep it apart
+# from any language tag ``_tag`` gives.
+_TOCTREE = "{toctree}"
+_HEADING_ID_RE = re.compile(r"\s*\{#([\w.:-]+)(?:\s+[^}]*)?\}\s*$")
 
 _ATX_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*#*[ \t]*$")
 _SETEXT_RE = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
@@ -210,8 +233,17 @@ def _sections(
         out.append(DocSection(path, name, 0, body + 1, first - 1))
     for i, (line, level, heading) in enumerate(headings):
         end = starts[i + 1] - 1 if i + 1 < len(starts) else total
-        out.append(DocSection(path, heading, level, line, end))
+        text, anchor = _heading_id(heading)
+        out.append(DocSection(path, text, level, line, end, anchor))
     return out
+
+
+def _heading_id(heading: str) -> tuple[str, str]:
+    """``("Title", "id")`` for ``Title {#id}``; no id gives ``""``."""
+    m = _HEADING_ID_RE.search(heading)
+    if m is None:
+        return heading, ""
+    return heading[: m.start()], m.group(1)
 
 
 def _group(
@@ -254,11 +286,13 @@ def _scan_markdown(
             if _closes_fence(line, fence[0]):
                 fence = None
             else:
-                cands += _fence_candidates(line, num, fence[1])
+                cands += _block_candidates(line, num, fence[1])
             continue
         opened = _FENCE_OPEN_RE.match(line)
         if opened:
-            fence = (opened.group(1), _tag(opened.group(2)))
+            raw = opened.group(2)
+            tag = _TOCTREE if raw.lower() == _TOCTREE else _tag(raw)
+            fence = (opened.group(1), tag)
             continue
         if i == underline:
             continue
@@ -306,15 +340,29 @@ def _md_line_candidates(line: str, num: int) -> list[Candidate]:
         cands += _link_candidate(refdef.group(2), refdef.group(1), num)
         return cands
     code = [m.span() for m in _MD_SPAN_RE.finditer(line)]
-    links = [
+
+    def outside(m: re.Match[str]) -> bool:
+        return not any(start <= m.start() < end for start, end in code)
+
+    # A wikilink to a code file or an attachment stays prose, so its
+    # path reaches the code rules as it would without the brackets.
+    wikis = [
         m
-        for m in _MD_LINK_RE.finditer(line)
-        if not any(start <= m.start() < end for start, end in code)
+        for m in _WIKI_RE.finditer(line)
+        if outside(m) and not doc_edges.names_a_file(_wiki_name(m.group(1)))
     ]
+    links = [m for m in _MD_LINK_RE.finditer(line) if outside(m)]
+    hrefs = [m for m in _HREF_RE.finditer(line) if outside(m)]
+    cands += [_wiki_candidate(m.group(1), num) for m in wikis]
     for m in links:
         cands += _link_candidate(m.group(2), m.group(1), num)
+    cands += [
+        Candidate(num, _route(m.group(1)), "route", "path", anchor=m[2] or "")
+        for m in hrefs
+        if _is_route(m.group(1))
+    ]
     rest = line
-    for m in reversed(links):
+    for m in sorted([*wikis, *links], key=lambda m: m.start(), reverse=True):
         rest = rest[: m.start()] + " " + rest[m.end() :]
     for m in _MD_SPAN_RE.finditer(rest):
         cands += _span_candidates(m.group(2).strip(), num)
@@ -373,7 +421,7 @@ def _scan_rst(
             if line.strip() and _indent(line) <= block[0]:
                 block = None
             else:
-                cands += _fence_candidates(line, num, block[1])
+                cands += _block_candidates(line, num, block[1])
                 i += 1
                 continue
         heading = _rst_heading(lines, i)
@@ -395,7 +443,11 @@ def _indent(line: str) -> int:
 
 
 def _rst_block_start(line: str) -> tuple[int, str] | None:
-    """``(indent, tag)`` when ``line`` opens a code or literal block."""
+    """``(indent, tag)`` when ``line`` opens a code or literal block,
+    or a toctree."""
+    toctree = _RST_TOCTREE_RE.match(line)
+    if toctree:
+        return len(toctree.group(1)), _TOCTREE
     directive = _RST_DIRECTIVE_RE.match(line)
     if directive:
         return len(directive.group(1)), _tag(directive.group(2))
@@ -412,6 +464,11 @@ def _rst_line_candidates(line: str, num: int) -> list[Candidate]:
     for m in _RST_LINK_RE.finditer(line):
         cands += _link_candidate(m.group(2), m.group(1).strip(), num)
     rest = _RST_LINK_RE.sub(" ", line)
+    for m in _RST_DOC_ROLE_RE.finditer(rest):
+        target = _role_target(m.group(1))
+        if not _SCHEME_RE.match(target):
+            cands.append(Candidate(num, target, "route", "path"))
+    rest = _RST_DOC_ROLE_RE.sub(" ", rest)
     for pattern in (_RST_LITERAL_RE, _RST_ROLE_RE, _RST_INTERPRETED_RE):
         for m in pattern.finditer(rest):
             cands += _span_candidates(_role_target(m.group(1)), num)
@@ -432,6 +489,30 @@ def _role_target(text: str) -> str:
 def _tag(raw: str) -> str:
     """A code block's language tag, normalized (``{.python}`` → python)."""
     return raw.strip("{}").lstrip(".").split(",")[0].lower()
+
+
+def _block_candidates(line: str, num: int, tag: str) -> list[Candidate]:
+    """Candidates on one line inside a code block or a toctree."""
+    if tag == _TOCTREE:
+        return _toctree_entry(line, num)
+    return _fence_candidates(line, num, tag)
+
+
+def _toctree_entry(line: str, num: int) -> list[Candidate]:
+    """A toctree entry (``install``, ``Title <guide/start>``) as a route.
+
+    Options (RST ``:opt:``, MyST ``key: value`` and its ``---``
+    fences), Sphinx's own pages, globs and URLs name no one doc.
+    """
+    entry = line.strip()
+    if not entry or entry.startswith(":") or _MYST_OPTION_RE.match(entry):
+        return []
+    target = _role_target(entry)
+    if target in _SPHINX_PAGES or _SCHEME_RE.match(target):
+        return []
+    if any(c in target for c in "*?["):
+        return []
+    return [Candidate(num, _TOC_SUFFIX_RE.sub("", target), "route", "path")]
 
 
 def _fence_candidates(line: str, num: int, tag: str) -> list[Candidate]:
@@ -490,17 +571,52 @@ def _span_candidates(content: str, num: int) -> list[Candidate]:
 
 
 def _link_candidate(target: str, label: str, num: int) -> list[Candidate]:
-    """A link target as a path candidate, or nothing for URLs/anchors."""
+    """A link target as a path or route candidate; nothing for a URL.
+
+    A ``#heading`` anchor rides along on the candidate; a ``#L10`` line
+    anchor becomes part of the path, as ``path:10``.
+    """
     target = target.strip()
-    if not target or target.startswith("#") or _SCHEME_RE.match(target):
+    if not target or _SCHEME_RE.match(target) or target.startswith("//"):
         return []
     target, _, anchor = target.split("?", 1)[0].partition("#")
+    target, anchor = unquote(target), unquote(anchor)
     lines = _ANCHOR_LINE_RE.match(anchor)
     if lines:
         target += f":{lines.group(1)}"
         if lines.group(2):
             target += f"-{lines.group(2)}"
-    return [Candidate(num, target, "link", "path", label)]
+        anchor = ""
+    if not target and not anchor:
+        return []
+    if _is_route(target):
+        return [
+            Candidate(num, _route(target), "route", "path", label, "", anchor)
+        ]
+    return [Candidate(num, target, "link", "path", label, "", anchor)]
+
+
+def _is_route(target: str) -> bool:
+    """A site-absolute link with no file extension: ``/features/x``."""
+    name = target.rstrip("/").rsplit("/", 1)[-1]
+    return target.startswith("/") and bool(name) and "." not in name
+
+
+def _route(target: str) -> str:
+    return target.rstrip("/")
+
+
+def _wiki_name(inner: str) -> str:
+    return inner.partition("|")[0].partition("#")[0].strip()
+
+
+def _wiki_candidate(inner: str, num: int) -> Candidate:
+    """``[[target#heading|alias]]`` as a ``wiki`` candidate."""
+    target, _, alias = inner.partition("|")
+    name, _, heading = target.partition("#")
+    return Candidate(
+        num, name.strip(), "wiki", "path", alias.strip(), "", heading.strip()
+    )
 
 
 def _path_candidates(text: str, num: int, kind: str) -> list[Candidate]:
@@ -648,6 +764,7 @@ class DocIndex:
     sections: list[DocSection] = field(default_factory=list)
     links: list[DocLink] = field(default_factory=list)
     dangling: list[DocDangling] = field(default_factory=list)
+    edges: list[doc_edges.DocEdge] = field(default_factory=list)
 
 
 @dataclass
@@ -686,6 +803,8 @@ def build_doc_index(
     sections: list[DocSection] = []
     candidates: list[list[Candidate]] = []
     read: list[str] = []
+    html_ids: dict[str, list[tuple[int, str]]] = {}
+    routes: dict[str, list[str]] = {}
     for path in doc_paths:
         try:
             text = (root / path).read_text(encoding="utf-8", errors="replace")
@@ -695,7 +814,11 @@ def build_doc_index(
         sections += found
         candidates += groups
         read.append(path)
-    return resolve_docs(root, sections, candidates, files, read)
+        html_ids[path] = doc_edges.html_anchors(text)
+        routes[path] = doc_edges.front_matter_routes(path, text)
+    return resolve_docs(
+        root, sections, candidates, files, read, html_ids, routes
+    )
 
 
 def resolve_docs(
@@ -704,6 +827,8 @@ def resolve_docs(
     candidates: list[list[Candidate]],
     files: list[FileMap],
     doc_paths: list[str],
+    html_ids: dict[str, list[tuple[int, str]]] | None = None,
+    routes: dict[str, list[str]] | None = None,
 ) -> DocIndex:
     """Resolve every section's candidates against the mapped code.
 
@@ -713,16 +838,44 @@ def resolve_docs(
         candidates: Each section's candidates (same order).
         files: Every mapped code file.
         doc_paths: Every indexed doc, so doc-to-doc links are known.
+        html_ids: Doc → its HTML anchors (``id``/``name`` attributes),
+            which links between docs may target like headings.
+        routes: Doc → the routes its front matter gives it.
 
     Returns:
         The sections with their links and dangling references.
     """
     tables = _tables(root, files, doc_paths)
+    docs = doc_edges.build_targets(root, sections, doc_paths, html_ids, routes)
     index = DocIndex(sections=list(sections))
     for at, (section, group) in enumerate(zip(sections, candidates)):
         for cand in group:
-            _resolve_one(tables, at, section.path, cand, index)
+            if not _resolve_doc_link(docs, at, section.path, cand, index):
+                _resolve_one(tables, at, section.path, cand, index)
     return index
+
+
+_DOC_ONLY_KINDS = frozenset({"wiki", "route"})
+
+
+def _resolve_doc_link(
+    docs: doc_edges.DocTargets,
+    at: int,
+    doc: str,
+    cand: Candidate,
+    index: DocIndex,
+) -> bool:
+    """Record a link to another doc; ``False`` leaves it to code rules."""
+    verdict = doc_edges.resolve(docs, at, doc, cand)
+    if isinstance(verdict, doc_edges.DocEdge):
+        index.edges.append(verdict)
+    elif isinstance(verdict, doc_edges.Broken):
+        index.dangling.append(
+            DocDangling(at, cand.line, verdict.text, cand.kind, verdict.why)
+        )
+    elif cand.kind not in _DOC_ONLY_KINDS and cand.text:
+        return False
+    return True
 
 
 def _tables(root: Path, files: list[FileMap], doc_paths: list[str]) -> _Tables:
