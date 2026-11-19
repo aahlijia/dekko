@@ -9,6 +9,8 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-19
+
 ### Added
 - **`dekko communities`: the repo's subsystems, even when they cross
   directories.** `dekko map` now groups files by how much they call,
