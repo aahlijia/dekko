@@ -493,7 +493,9 @@ def test_a_percent_encoded_link_resolves(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text(
         "# R\n[notes](my%20notes.md#caf%C3%A9)\n"
     )
-    (tmp_path / "my notes.md").write_text("# Notes\n## Café\n")
+    (tmp_path / "my notes.md").write_text(
+        "# Notes\n## Café\n", encoding="utf-8"
+    )
 
     index = build_doc_index(tmp_path, ["README.md", "my notes.md"], [])
 
