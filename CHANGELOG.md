@@ -9,18 +9,12 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
-### Changed
-- **Plugin bundle source moved to `plugin/`** (was
-  `integrations/claude/`). One bundle serves Claude Code, Codex and
-  Cursor, so the folder is no longer named after one client. The
-  wheel's `dekko/_plugin/` layout and installed plugins are unchanged.
+## [1.10.0] - 2026-11-19
 
-## [1.10.0b1] - 2026-11-16
-
-A test build of the new `dekko install` command and the Codex and Cursor
-support below, so they can be tried before 1.10.0 ships. pip and uv skip
-pre-releases unless asked, so install it with `pip install --pre dekko`
-or pin `dekko==1.10.0b1`. It isn't listed on the MCP Registry.
+Closes round 1.9: the fixes 1.9.1-1.9.35 listed below, plus the new
+`dekko install` command and dekko as a Codex and a Cursor plugin.
+Those three were tried first as 1.10.0b1; testers ran them on both
+clients and needed no fixes.
 
 ### Added
 - **`dekko install <target>` / `dekko uninstall <target>`.** One
@@ -142,6 +136,10 @@ or pin `dekko==1.10.0b1`. It isn't listed on the MCP Registry.
   (refs #39).
 
 ### Changed
+- **Plugin bundle source moved to `plugin/`** (was
+  `integrations/claude/`). One bundle serves Claude Code, Codex and
+  Cursor, so the folder is no longer named after one client. The
+  wheel's `dekko/_plugin/` layout and installed plugins are unchanged.
 - **The skills, usage policy and session preamble read the same to any
   agent.** They named Claude Code's tool spellings
   (`mcp__plugin_dekko_dekko__*`, the Read tool, Bash) and promised that
