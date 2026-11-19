@@ -739,7 +739,12 @@ def run(
         from dekko.analysis import doc_communities
 
         return doc_communities.run(
-            index, target, limit=limit, budget=budget, as_json=as_json
+            index,
+            target,
+            tests=tests,
+            limit=limit,
+            budget=budget,
+            as_json=as_json,
         )
     if not index.has_communities:
         print(

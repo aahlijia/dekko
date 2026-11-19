@@ -16,6 +16,7 @@ from dataclasses import asdict
 from dekko.analysis import communities as comm
 from dekko.analysis import docs as docs_mod
 from dekko.analysis.doc_graph import DocGraph
+from dekko.core.doc_edges import is_test_doc
 from dekko.render.mapfile import MapIndex
 from dekko.textutil import fit_to_budget
 
@@ -24,9 +25,12 @@ EXIT_NOT_FOUND = 3
 EXIT_AMBIGUOUS = 4
 
 
-def describe(index: MapIndex) -> comm.Report:
-    """Cluster the docs and build the listing, as for code files."""
-    graph = DocGraph.from_index(index)
+def describe(index: MapIndex, *, tests: bool = False) -> comm.Report:
+    """Cluster the docs and build the listing, as for code files.
+
+    Docs under test paths take part only with ``tests``.
+    """
+    graph = DocGraph.from_index(index, tests=tests)
     nodes = [d for d in graph.docs if not graph.is_site_wide(d)]
     edges = graph.cluster_edges
     stored = comm._ordered(
@@ -70,6 +74,7 @@ def run(
     index: MapIndex,
     target: str | None,
     *,
+    tests: bool = False,
     limit: int | None,
     budget: int | None,
     as_json: bool,
@@ -79,6 +84,7 @@ def run(
     Args:
         index: Loaded map index.
         target: A doc path (or a unique suffix of one), or ``None``.
+        tests: Let docs under test paths take part.
         limit: List at most this many communities.
         budget: Approximate token cap for the text listing.
         as_json: Emit JSON (never budgeted).
@@ -87,7 +93,7 @@ def run(
         ``0``; ``3`` when ``target`` names no doc, ``4`` when it names
         several.
     """
-    report = describe(index)
+    report = describe(index, tests=tests)
     if target is not None:
         return _run_target(index, report, target, as_json)
     if as_json:
@@ -177,6 +183,11 @@ def _target_text(
 ) -> str:
     by_id = {c.id: c for c in report.communities}
     if path not in report.nodes:
+        if is_test_doc(path):
+            return (
+                f"{path} is a test doc, left out of the default view; "
+                "pass --tests"
+            )
         return f"{path} is a table of contents, left out of doc communities"
     if cid is None:
         why = "small group" if links else "unconnected"

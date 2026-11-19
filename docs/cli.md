@@ -2132,7 +2132,8 @@ shows its docs section on its own when docs outnumber code files.
 line that links onward. A broken link from a doc in a `test/`,
 `tests/` or `__tests__/` folder is never reported, since test fixtures
 break links on purpose. Spec and test-plan folders (`specs/`,
-`docs/testing/`) are ordinary docs.
+`docs/testing/`) are ordinary docs. Docs in test folders also stay
+out of doc communities unless you pass `--tests`.
 
 ## Daemon mode
 

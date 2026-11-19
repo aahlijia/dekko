@@ -470,3 +470,48 @@ def test_outline_keeps_what_fits_of_a_level_too_big_to_show_whole(
     ]
     assert headings == ["Top", *(f"Sec {n}" for n in range(9))]
     assert "sub" not in out
+
+
+def test_communities_of_a_test_doc_says_to_pass_tests(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "notes.md").write_text(
+        "# N\n\n[a](../alpha/a1.md)\n"
+    )
+    root = _two_topics(tmp_path)
+
+    _, plain, _ = _run(
+        capsys, "communities", "tests/notes.md", "--root", str(root)
+    )
+    _, asked, _ = _run(
+        capsys, "communities", "--docs", "--tests", "--root", str(root)
+    )
+
+    assert plain.strip() == (
+        "tests/notes.md is a test doc, left out of the default view; "
+        "pass --tests"
+    )
+    assert "over 7 docs" in asked.splitlines()[0]
+
+
+def test_query_docs_on_an_ambiguous_doc_name_lists_the_choices(
+    vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _run(
+        capsys, "query", "docs", "index.md", "--root", str(vault)
+    )
+
+    assert code == 4
+    assert out == ""
+    assert "'index.md' is ambiguous" in err
+    assert "a/index.md" in err and "b/index.md" in err
+
+
+def test_summary_of_a_docs_only_repo_has_no_empty_code_lines(
+    vault: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, out, _ = _run(capsys, "summary", "--root", str(vault))
+
+    assert "languages:" not in out
+    assert "directories (files/symbols" not in out

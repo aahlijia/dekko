@@ -4729,9 +4729,14 @@ def _run_docs(
     A doc as the target lists the sections of other docs that link to
     it instead.
     """
-    doc = _linked_doc(index, target)
-    if doc is not None:
-        return _run_doc_backlinks(index, doc, as_json, limit, budget)
+    found = _linked_docs(index, target)
+    if len(found) > 1:
+        print(f"dekko: '{target}' is ambiguous; candidates:", file=sys.stderr)
+        for p in found:
+            print(f"  {p}", file=sys.stderr)
+        return EXIT_AMBIGUOUS, None
+    if found:
+        return _run_doc_backlinks(index, found[0], as_json, limit, budget)
     targets, label, code = _docs_targets(index, target)
     if targets is None:
         return code, None
@@ -4748,13 +4753,12 @@ def _run_docs(
     return EXIT_OK, _emit_lines([_hit_row(h) for h in hits], budget, limit)
 
 
-def _linked_doc(index: MapIndex, target: str) -> str | None:
-    """The one indexed doc ``target`` names, unless it is code."""
+def _linked_docs(index: MapIndex, target: str) -> list[str]:
+    """The indexed docs ``target`` names, unless it is code."""
     target = target.removeprefix("./")
     if target in index.languages_by_path:
-        return None
-    found = docs_mod.match_doc(index, target)
-    return found[0] if len(found) == 1 else None
+        return []
+    return docs_mod.match_doc(index, target)
 
 
 def _run_doc_backlinks(

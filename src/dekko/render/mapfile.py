@@ -1367,10 +1367,10 @@ def _filter_docs(
         if not is_test_path(src.doc_sections[d.section].path)
     ]
     out.doc_edges = [
-        e
+        kept
         for e in src.doc_edges
         if not is_test_doc(src.doc_sections[e.section].path)
-        and not any(is_test_doc(t) for t in e.candidates or (e.target,))
+        and (kept := _prod_doc_edge(e)) is not None
     ]
     _index_doc_links(out)
     _index_doc_edges(out)
@@ -1391,6 +1391,15 @@ def _prod_doc_link(link: DocLink, by_id: dict[str, Symbol]) -> DocLink | None:
     if not kept:
         return None
     return replace(link, candidates=kept)
+
+
+def _prod_doc_edge(edge: DocEdge) -> DocEdge | None:
+    """``edge`` with its test-doc choices removed, or ``None`` if none
+    is left."""
+    if not edge.candidates:
+        return None if is_test_doc(edge.target) else edge
+    kept = tuple(c for c in edge.candidates if not is_test_doc(c))
+    return replace(edge, candidates=kept) if kept else None
 
 
 def _filter_reads(

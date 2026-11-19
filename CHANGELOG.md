@@ -55,7 +55,8 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     docs, orphans) when docs outnumber code files, or with `--docs`
     (MCP `summary`: `docs: true`).
   - `dekko communities --docs` groups docs by their links;
-    `communities <doc>` shows one doc's group.
+    `communities <doc>` shows one doc's group. Docs in test folders
+    join only with `--tests`.
   - `dekko trace <doc> <doc>` finds the shortest link path between two
     docs.
   - `dekko query docs <doc>` lists the sections of other docs that link

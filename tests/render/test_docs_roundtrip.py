@@ -235,3 +235,22 @@ def test_a_wikilink_to_a_code_file_still_links_the_code(
 
     assert "src/app.py" in {link.target for link in index.doc_links}
     assert index.doc_edges == []
+
+
+def test_without_tests_keeps_the_prod_choices_of_an_ambiguous_wikilink(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "Home.md": "# Home\n\nSee [[index]].\n",
+            "a/index.md": "# A\n",
+            "b/index.md": "# B\n",
+            "tests/index.md": "# T\n",
+        }
+    )
+
+    view = load_map(root).without_tests()
+
+    assert [(e.tier, e.candidates) for e in view.doc_edges] == [
+        ("AMBIGUOUS", ("a/index.md", "b/index.md"))
+    ]

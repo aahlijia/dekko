@@ -406,23 +406,12 @@ def render_text(index: MapIndex, docs: bool = False) -> str:
         f"dekko: {doc['root']} — {doc['files']} files, "
         f"{doc['symbols']} symbols, {doc['edges']} edges"
     ]
-    mix = ", ".join(
-        f"{lng['language']} {lng['files']}f/{lng['symbols']}s"
-        for lng in doc["languages"]
-    )
-    lines.append(f"languages: {mix}")
+    lines += _language_lines(doc)
     lines += _skip_lines(index)
     ambiguous_note = ambiguous.high_rate_note(index)
     if ambiguous_note:
         lines.append(ambiguous_note)
-    lines.append("directories (files/symbols, int+cross edges):")
-    for d in doc["directories"]:
-        suffix = f"  — {d['purpose']}" if d["purpose"] else ""
-        lines.append(
-            f"  {d['files']:>3}f {d['symbols']:>4}s  "
-            f"{d['internal_edges']}+{d['cross_edges']}  "
-            f"{d['path']}/{suffix}"
-        )
+    lines += _directory_lines(doc)
     lines += _doc_lines(doc.get("docs"))
     if doc.get("communities"):
         lines.append("communities (largest first):")
@@ -463,6 +452,32 @@ def render_text(index: MapIndex, docs: bool = False) -> str:
                 f"({doc['no_grammar_installed_breakdown']})"
             )
     return "\n".join(lines)
+
+
+def _language_lines(doc: dict) -> list[str]:
+    """The language mix; nothing for a repo of only docs."""
+    if not doc["languages"]:
+        return []
+    mix = ", ".join(
+        f"{lng['language']} {lng['files']}f/{lng['symbols']}s"
+        for lng in doc["languages"]
+    )
+    return [f"languages: {mix}"]
+
+
+def _directory_lines(doc: dict) -> list[str]:
+    """Code directories by size; nothing for a repo of only docs."""
+    if not doc["directories"]:
+        return []
+    lines = ["directories (files/symbols, int+cross edges):"]
+    for d in doc["directories"]:
+        suffix = f"  — {d['purpose']}" if d["purpose"] else ""
+        lines.append(
+            f"  {d['files']:>3}f {d['symbols']:>4}s  "
+            f"{d['internal_edges']}+{d['cross_edges']}  "
+            f"{d['path']}/{suffix}"
+        )
+    return lines
 
 
 def _split_errors(
