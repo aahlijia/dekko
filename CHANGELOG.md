@@ -43,9 +43,12 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 - **Docs linked to each other, for repos that are mostly docs.** A
   docs site, a spec folder or a notes vault now gets a map of its own.
   `dekko map` follows links between docs: relative links, docs-site
-  routes (`/features/rules`, MDX `href`, RST `:doc:`), Obsidian-style
-  `[[wikilinks]]`, and the `#heading` each one names (explicit
-  `{#id}`s and GitHub anchors). A repo with docs and no code maps too.
+  routes (`/features/rules`, MDX `href`, front-matter `slug` and
+  `permalink`), Sphinx `:doc:` roles and `toctree` entries,
+  Obsidian-style `[[wikilinks]]`, and the `#heading` each one names
+  (explicit `{#id}`s and GitHub anchors). Percent-encoded link targets
+  are decoded, for links to code too. A repo with docs and no code
+  maps too.
   - `dekko outline <doc>` prints a doc's heading tree with the code and
     doc links in each section; a folder outline lists its docs too.
   - `summary` adds a docs section (counts by folder, most linked, entry

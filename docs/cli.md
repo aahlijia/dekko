@@ -2078,13 +2078,21 @@ repo with docs and no code at all maps fine.
 What counts as a link to another doc:
 
 - A Markdown or RST link to a doc, beside the linking doc or from the
-  repo root: `[setup](guide/setup.md)`.
+  repo root: `[setup](guide/setup.md)`. Percent-encoded targets are
+  decoded first, so `my%20notes.md` finds `my notes.md`. Links to code
+  get the same treatment.
 - A docs-site route, an absolute link with no extension:
   `[rules](/features/rules)`, or an MDX `href="/features/rules"`.
   dekko tries it under the repo root and under each top-level folder
   that holds docs, as `.md`, `.mdx`, `.rst`, `/index.*` or
-  `/README.md`. It counts only when exactly one doc matches. RST
-  `:doc:` roles work the same way.
+  `/README.md`. A page whose front matter gives it a route of its own
+  (Docusaurus `slug: /start`, Jekyll `permalink: /about/team/`) answers
+  to that route too. It counts only when exactly one doc matches.
+- A Sphinx doc name: an RST `:doc:` role, or an entry in a `toctree`
+  (the RST directive, or a MyST `{toctree}` block in Markdown). These
+  resolve like routes. One that is relative to its doc and finds no
+  doc, and no other file by that name either (a notebook, say), is
+  reported `missing`. Toctree globs, `self` and URLs are skipped.
 - A wikilink, Obsidian style: `[[Note]]`, `[[folder/Note]]`,
   `[[Note#Heading]]`, `[[Note|shown text]]` and embeds `![[Note]]`.
   A bare name matches any doc with that file name. When 2 to 5 docs

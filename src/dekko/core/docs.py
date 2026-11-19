@@ -14,6 +14,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 from dekko.classify import is_test_path
 from dekko.core import languages, tier2
@@ -163,6 +164,11 @@ _ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L?(\d+))?$")
 _WIKI_RE = re.compile(r"!?\[\[(?!\s)([^\[\]\n]+?)(?<!\s)\]\]")
 _HREF_RE = re.compile(r"""\bhref=["'](/[^"'#?\s]*)(?:#([^"'\s]*))?["']""")
 _RST_DOC_ROLE_RE = re.compile(r":doc:`([^`]+)`")
+_RST_TOCTREE_RE = re.compile(r"^(\s*)\.\.\s+toctree::")
+_TOC_SUFFIX_RE = re.compile(r"\.(?:rst|md|mdx|txt)$", re.IGNORECASE)
+# The block tag a toctree's body is read under; braces keep it apart
+# from any language tag ``_tag`` gives.
+_TOCTREE = "{toctree}"
 _HEADING_ID_RE = re.compile(r"\s*\{#([\w.:-]+)(?:\s+[^}]*)?\}\s*$")
 
 _ATX_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*#*[ \t]*$")
@@ -275,11 +281,13 @@ def _scan_markdown(
             if _closes_fence(line, fence[0]):
                 fence = None
             else:
-                cands += _fence_candidates(line, num, fence[1])
+                cands += _block_candidates(line, num, fence[1])
             continue
         opened = _FENCE_OPEN_RE.match(line)
         if opened:
-            fence = (opened.group(1), _tag(opened.group(2)))
+            raw = opened.group(2)
+            tag = _TOCTREE if raw.lower() == _TOCTREE else _tag(raw)
+            fence = (opened.group(1), tag)
             continue
         if i == underline:
             continue
@@ -408,7 +416,7 @@ def _scan_rst(
             if line.strip() and _indent(line) <= block[0]:
                 block = None
             else:
-                cands += _fence_candidates(line, num, block[1])
+                cands += _block_candidates(line, num, block[1])
                 i += 1
                 continue
         heading = _rst_heading(lines, i)
@@ -430,7 +438,11 @@ def _indent(line: str) -> int:
 
 
 def _rst_block_start(line: str) -> tuple[int, str] | None:
-    """``(indent, tag)`` when ``line`` opens a code or literal block."""
+    """``(indent, tag)`` when ``line`` opens a code or literal block,
+    or a toctree."""
+    toctree = _RST_TOCTREE_RE.match(line)
+    if toctree:
+        return len(toctree.group(1)), _TOCTREE
     directive = _RST_DIRECTIVE_RE.match(line)
     if directive:
         return len(directive.group(1)), _tag(directive.group(2))
@@ -470,6 +482,29 @@ def _role_target(text: str) -> str:
 def _tag(raw: str) -> str:
     """A code block's language tag, normalized (``{.python}`` → python)."""
     return raw.strip("{}").lstrip(".").split(",")[0].lower()
+
+
+def _block_candidates(line: str, num: int, tag: str) -> list[Candidate]:
+    """Candidates on one line inside a code block or a toctree."""
+    if tag == _TOCTREE:
+        return _toctree_entry(line, num)
+    return _fence_candidates(line, num, tag)
+
+
+def _toctree_entry(line: str, num: int) -> list[Candidate]:
+    """A toctree entry (``install``, ``Title <guide/start>``) as a route.
+
+    Options, ``self``, globs and URLs name no one doc.
+    """
+    entry = line.strip()
+    if not entry or entry.startswith(":"):
+        return []
+    target = _role_target(entry)
+    if target == "self" or _SCHEME_RE.match(target):
+        return []
+    if any(c in target for c in "*?["):
+        return []
+    return [Candidate(num, _TOC_SUFFIX_RE.sub("", target), "route", "path")]
 
 
 def _fence_candidates(line: str, num: int, tag: str) -> list[Candidate]:
@@ -537,6 +572,7 @@ def _link_candidate(target: str, label: str, num: int) -> list[Candidate]:
     if not target or _SCHEME_RE.match(target) or target.startswith("//"):
         return []
     target, _, anchor = target.split("?", 1)[0].partition("#")
+    target, anchor = unquote(target), unquote(anchor)
     lines = _ANCHOR_LINE_RE.match(anchor)
     if lines:
         target += f":{lines.group(1)}"
@@ -760,6 +796,7 @@ def build_doc_index(
     candidates: list[list[Candidate]] = []
     read: list[str] = []
     html_ids: dict[str, list[tuple[int, str]]] = {}
+    routes: dict[str, list[str]] = {}
     for path in doc_paths:
         try:
             text = (root / path).read_text(encoding="utf-8", errors="replace")
@@ -770,7 +807,10 @@ def build_doc_index(
         candidates += groups
         read.append(path)
         html_ids[path] = doc_edges.html_anchors(text)
-    return resolve_docs(root, sections, candidates, files, read, html_ids)
+        routes[path] = doc_edges.front_matter_routes(path, text)
+    return resolve_docs(
+        root, sections, candidates, files, read, html_ids, routes
+    )
 
 
 def resolve_docs(
@@ -780,6 +820,7 @@ def resolve_docs(
     files: list[FileMap],
     doc_paths: list[str],
     html_ids: dict[str, list[tuple[int, str]]] | None = None,
+    routes: dict[str, list[str]] | None = None,
 ) -> DocIndex:
     """Resolve every section's candidates against the mapped code.
 
@@ -791,12 +832,13 @@ def resolve_docs(
         doc_paths: Every indexed doc, so doc-to-doc links are known.
         html_ids: Doc → its HTML anchors (``id``/``name`` attributes),
             which links between docs may target like headings.
+        routes: Doc → the routes its front matter gives it.
 
     Returns:
         The sections with their links and dangling references.
     """
     tables = _tables(root, files, doc_paths)
-    docs = doc_edges.build_targets(root, sections, doc_paths, html_ids)
+    docs = doc_edges.build_targets(root, sections, doc_paths, html_ids, routes)
     index = DocIndex(sections=list(sections))
     for at, (section, group) in enumerate(zip(sections, candidates)):
         for cand in group:

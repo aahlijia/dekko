@@ -420,3 +420,120 @@ def test_a_link_to_another_doc_s_top_has_no_heading(tmp_path: Path) -> None:
         ("b.md", None)
     ]
     assert index.dangling == []
+
+
+# --- Sphinx toctrees, encoded targets, front-matter routes ----------------
+
+
+def test_toctree_entries_are_routes() -> None:
+    text = (
+        "Index\n=====\n\n"
+        ".. toctree::\n"
+        "   :maxdepth: 2\n"
+        "   :caption: Contents\n"
+        "\n"
+        "   install\n"
+        "   The guide </guide/start>\n"
+        "   usage.rst\n"
+        "   self\n"
+        "   api/*\n"
+        "   https://example.com/elsewhere\n"
+        "\n"
+        "After the tree, plain text.\n"
+    )
+
+    assert _links("docs/index.rst", text) == {
+        ("install", "route", "", ""),
+        ("/guide/start", "route", "", ""),
+        ("usage", "route", "", ""),
+    }
+
+
+def test_a_myst_toctree_fence_lists_routes() -> None:
+    text = (
+        "# Index\n\n```{toctree}\n:maxdepth: 1\n\n"
+        "install\nguide/start.md\n```\n"
+    )
+
+    assert _links("docs/index.md", text) == {
+        ("install", "route", "", ""),
+        ("guide/start", "route", "", ""),
+    }
+
+
+def test_toctree_entries_resolve_and_a_missing_one_dangles(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.rst").write_text(
+        "Index\n=====\n\n.. toctree::\n\n   install\n   gone\n"
+    )
+    (tmp_path / "docs" / "install.rst").write_text("Install\n=======\n")
+
+    index = build_doc_index(
+        tmp_path, ["docs/index.rst", "docs/install.rst"], []
+    )
+
+    assert [e.target for e in index.edges] == ["docs/install.rst"]
+    assert [(d.text, d.why) for d in index.dangling] == [("gone", "missing")]
+
+
+def test_a_relative_doc_role_with_no_doc_dangles(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.rst").write_text(
+        "Index\n=====\n\nsee :doc:`instal`\n"
+    )
+
+    index = build_doc_index(tmp_path, ["docs/index.rst"], [])
+
+    assert [(d.text, d.why) for d in index.dangling] == [("instal", "missing")]
+
+
+def test_a_percent_encoded_link_resolves(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text(
+        "# R\n[notes](my%20notes.md#caf%C3%A9)\n"
+    )
+    (tmp_path / "my notes.md").write_text("# Notes\n## Café\n")
+
+    index = build_doc_index(tmp_path, ["README.md", "my notes.md"], [])
+
+    assert [
+        (e.target, index.sections[e.target_section].heading)
+        for e in index.edges
+    ] == [("my notes.md", "Café")]
+    assert index.dangling == []
+
+
+def test_a_percent_encoded_code_link_is_decoded() -> None:
+    text = "# A\n[app](src/my%20app.py)\n"
+
+    assert _links("README.md", text) == {("src/my app.py", "link", "", "app")}
+
+
+def test_front_matter_slugs_and_permalinks_route_to_their_doc(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs" / "guides").mkdir(parents=True)
+    (tmp_path / "docs" / "guides" / "x.md").write_text(
+        "---\ntitle: X\nslug: /getting-started\n---\n# X\n"
+    )
+    (tmp_path / "docs" / "guides" / "y.md").write_text(
+        "---\nslug: why-us\n---\n# Y\n"
+    )
+    (tmp_path / "docs" / "z.md").write_text(
+        "---\npermalink: /about/team/\n---\n# Z\n"
+    )
+    (tmp_path / "README.md").write_text(
+        "# R\n[a](/docs/getting-started)\n[b](/docs/guides/why-us)\n"
+        "[c](/about/team)\n"
+    )
+    docs = ["README.md", "docs/guides/x.md", "docs/guides/y.md", "docs/z.md"]
+
+    index = build_doc_index(tmp_path, docs, [])
+
+    assert sorted(e.target for e in index.edges) == [
+        "docs/guides/x.md",
+        "docs/guides/y.md",
+        "docs/z.md",
+    ]
+    assert index.dangling == []

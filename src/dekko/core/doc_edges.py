@@ -49,6 +49,10 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # an element of that id.
 _TOP = "top"
 
+# Front matter that gives a page its own route: Docusaurus ``slug``,
+# Jekyll ``permalink``.
+_FRONT_ROUTE_RE = re.compile(r"""^(slug|permalink)\s*:\s*["']?([^"'\s#]+)""")
+
 
 @dataclass(frozen=True)
 class DocEdge:
@@ -118,6 +122,32 @@ def slug(heading: str) -> str:
     return text.replace(" ", "-")
 
 
+def front_matter_routes(path: str, text: str) -> list[str]:
+    """Routes a doc's front matter gives it, without their slashes.
+
+    ``slug: /start`` and ``permalink: /about/team/`` are site routes; a
+    relative ``slug: why-us`` sits beside the doc. Jekyll placeholders
+    (``/:title/``) name no fixed route.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+    out: list[str] = []
+    for line in lines[1:]:
+        if line.strip() in ("---", "..."):
+            return out
+        m = _FRONT_ROUTE_RE.match(line)
+        if m is None or ":" in m.group(2):
+            continue
+        value = m.group(2)
+        if m.group(1) == "slug" and not value.startswith("/"):
+            value = posixpath.join(posixpath.dirname(path), value)
+        key = posixpath.normpath(value).strip("/")
+        if key and key != ".":
+            out.append(key)
+    return []
+
+
 def html_anchors(text: str) -> list[tuple[int, str]]:
     """``(line, id)`` for each HTML ``id``/``name`` attribute in a doc.
 
@@ -147,6 +177,7 @@ class DocTargets:
         anchors: Doc → anchor → section index (explicit ids and
             GitHub slugs, numbered for repeats).
         titles: Doc → lowercased heading text → section index.
+        slugs: Route (no slashes) → docs whose front matter claims it.
     """
 
     root: Path
@@ -156,6 +187,7 @@ class DocTargets:
     route_roots: list[str] = field(default_factory=list)
     anchors: dict[str, dict[str, int]] = field(default_factory=dict)
     titles: dict[str, dict[str, int]] = field(default_factory=dict)
+    slugs: dict[str, list[str]] = field(default_factory=dict)
 
 
 def build_targets(
@@ -163,6 +195,7 @@ def build_targets(
     sections: list[DocSection],
     doc_paths: list[str],
     html_ids: dict[str, list[tuple[int, str]]] | None = None,
+    routes: dict[str, list[str]] | None = None,
 ) -> DocTargets:
     """Index the docs and their headings once per resolution pass.
 
@@ -172,6 +205,7 @@ def build_targets(
         doc_paths: Every indexed doc.
         html_ids: Doc → ``(line, id)`` of its HTML anchors, each
             reaching the section that holds its line.
+        routes: Doc → the routes its front matter gives it.
 
     Returns:
         The lookups resolution uses.
@@ -189,6 +223,9 @@ def build_targets(
             continue
         _add_heading(targets, at, section)
     _add_html_ids(targets, sections, html_ids or {})
+    for doc, keys in (routes or {}).items():
+        for key in keys:
+            targets.slugs.setdefault(key, []).append(doc)
     return targets
 
 
@@ -297,19 +334,47 @@ def _route(
         bases = [
             posixpath.normpath(posixpath.join(posixpath.dirname(doc), route))
         ]
-    hits = list(
-        dict.fromkeys(
-            base + form
-            for base in bases
-            for form in _PAGE_FORMS
-            if base + form in targets.docs
-        )
-    )
+    pages = [
+        base + form
+        for base in bases
+        for form in _PAGE_FORMS
+        if base + form in targets.docs
+    ]
+    hits = list(dict.fromkeys([*pages, *_slug_hits(targets, route)]))
     if len(hits) == 1:
         return _edge(targets, at, cand, hits, cand.anchor)
-    if not hits and _route_should_exist(targets, route):
-        return Broken(_with_anchor(route, cand.anchor), "missing")
-    return None
+    if hits:
+        return None
+    if route.startswith("/"):
+        missing = _route_should_exist(targets, route)
+    else:
+        missing = not _on_disk(targets.root, bases[0])
+    if not missing:
+        return None
+    return Broken(_with_anchor(route, cand.anchor), "missing")
+
+
+def _slug_hits(targets: DocTargets, route: str) -> list[str]:
+    """Docs whose front matter claims ``route``, under any route root."""
+    if not route.startswith("/") or not targets.slugs:
+        return []
+    path = route.strip("/")
+    hits: list[str] = []
+    for root in targets.route_roots:
+        if not root:
+            hits += targets.slugs.get(path, [])
+        elif path.startswith(root + "/"):
+            hits += targets.slugs.get(path[len(root) + 1 :], [])
+    return hits
+
+
+def _on_disk(root: Path, base: str) -> bool:
+    """Whether a relative Sphinx doc name is some file the doc index
+    doesn't read (a notebook, a ``.txt`` page) or a folder."""
+    where = root / base
+    if where.exists():
+        return True
+    return where.parent.is_dir() and any(where.parent.glob(where.name + ".*"))
 
 
 def _route_should_exist(targets: DocTargets, route: str) -> bool:
