@@ -10,36 +10,6 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 ## [Unreleased]
 
 ### Added
-- **Docs linked to the code they name.** `dekko map` now indexes
-  Markdown (`.md`, `.mdx`) and reStructuredText (`.rst`) files by
-  heading section and matches the code references in each one (inline
-  code, code blocks, links, file paths) against the map, with no LLM
-  and no new dependency. Each match is tagged `EXTRACTED`, `INFERRED`
-  or `AMBIGUOUS`, and prose words never match a name.
-  - `dekko query docs <symbol|file>` lists the sections that name it.
-  - `dekko query refs <doc>[#heading]` lists the code a doc or one
-    section names, plus its stale references.
-  - `dekko docs --stale` reports references to missing files, lines
-    past a file's end, missing members of known types, and line links
-    whose symbol moved. It exits 1 when it finds any. Changelogs are
-    skipped unless `--all`.
-  - `query symbol` and MCP `query_symbol` get a `docs:` line, and
-    `context`/`workset` packs list up to two sections.
-  - Editing a doc now makes the map stale, like editing code.
-- **`dekko communities`: the repo's subsystems, even when they cross
-  directories.** `dekko map` now groups files by how much they call,
-  reference, import and extend each other (Louvain clustering, the
-  same result every run) and stores the grouping in `map.json`. The
-  listing labels each community by the folders it lives in and shows
-  its top files, most-called symbols and cohesion, then the heaviest
-  bridges between communities and the folders split across three or
-  more of them. `dekko communities <file>` shows one file's community
-  and its links to the others. Tests are left out unless you pass
-  `--tests`.
-- **`summary` lists the eight largest communities**, so the `summary`
-  MCP tool carries them with no new tool.
-- **`export --granularity file` groups files by community**: Mermaid
-  subgraphs, DOT clusters, and a community filter in the HTML map.
 - **Docs linked to each other, for repos that are mostly docs.** A
   docs site, a spec folder or a notes vault now gets a map of its own.
   `dekko map` follows links between docs: relative links, docs-site
@@ -67,22 +37,56 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     lists) are kept as entry points but left out of most-linked counts,
     doc communities and trace paths.
 
+## [1.12.0] - 2026-11-19
+
+### Added
+- **`dekko communities`: the repo's subsystems, even when they cross
+  directories.** `dekko map` now groups files by how much they call,
+  reference, import and extend each other (Louvain clustering, the
+  same result every run) and stores the grouping in `map.json`. The
+  listing labels each community by the folders it lives in and shows
+  its top files, most-called symbols and cohesion, then the heaviest
+  bridges between communities and the folders split across three or
+  more of them. `dekko communities <file>` shows one file's community
+  and its links to the others. Tests are left out unless you pass
+  `--tests`.
+- **`summary` lists the eight largest communities**, so the `summary`
+  MCP tool carries them with no new tool.
+- **`export --granularity file` groups files by community**: Mermaid
+  subgraphs, DOT clusters, and a community filter in the HTML map.
+
 ### Changed
 - **`query cohesion` clusters a file's symbols** with the same Louvain
   algorithm instead of listing connected components, so two tight
   groups joined by one call now split. The note it prints says what
   the signal leaves out. The JSON shape is unchanged.
-- **Plugin bundle source moved to `plugin/`** (was
-  `integrations/claude/`). One bundle serves Claude Code, Codex and
-  Cursor, so the folder is no longer named after one client. The
-  wheel's `dekko/_plugin/` layout and installed plugins are unchanged.
 
-## [1.10.0b1] - 2026-11-16
+## [1.11.0] - 2026-11-19
 
-A test build of the new `dekko install` command and the Codex and Cursor
-support below, so they can be tried before 1.10.0 ships. pip and uv skip
-pre-releases unless asked, so install it with `pip install --pre dekko`
-or pin `dekko==1.10.0b1`. It isn't listed on the MCP Registry.
+### Added
+- **Docs linked to the code they name.** `dekko map` now indexes
+  Markdown (`.md`, `.mdx`) and reStructuredText (`.rst`) files by
+  heading section and matches the code references in each one (inline
+  code, code blocks, links, file paths) against the map, with no LLM
+  and no new dependency. Each match is tagged `EXTRACTED`, `INFERRED`
+  or `AMBIGUOUS`, and prose words never match a name.
+  - `dekko query docs <symbol|file>` lists the sections that name it.
+  - `dekko query refs <doc>[#heading]` lists the code a doc or one
+    section names, plus its stale references.
+  - `dekko docs --stale` reports references to missing files, lines
+    past a file's end, missing members of known types, and line links
+    whose symbol moved. It exits 1 when it finds any. Changelogs are
+    skipped unless `--all`.
+  - `query symbol` and MCP `query_symbol` get a `docs:` line, and
+    `context`/`workset` packs list up to two sections.
+  - Editing a doc now makes the map stale, like editing code.
+
+## [1.10.0] - 2026-11-19
+
+Closes round 1.9: the fixes 1.9.1-1.9.35 listed below, plus the new
+`dekko install` command and dekko as a Codex and a Cursor plugin.
+Those three were tried first as 1.10.0b1; testers ran them on both
+clients and needed no fixes.
 
 ### Added
 - **`dekko install <target>` / `dekko uninstall <target>`.** One
@@ -204,6 +208,10 @@ or pin `dekko==1.10.0b1`. It isn't listed on the MCP Registry.
   (refs #39).
 
 ### Changed
+- **Plugin bundle source moved to `plugin/`** (was
+  `integrations/claude/`). One bundle serves Claude Code, Codex and
+  Cursor, so the folder is no longer named after one client. The
+  wheel's `dekko/_plugin/` layout and installed plugins are unchanged.
 - **The skills, usage policy and session preamble read the same to any
   agent.** They named Claude Code's tool spellings
   (`mcp__plugin_dekko_dekko__*`, the Read tool, Bash) and promised that

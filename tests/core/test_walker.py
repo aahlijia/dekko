@@ -10,7 +10,9 @@ from dekko.core.walker import discover, discover_docs, find_config_files
 
 def _touch(path: Path, content: str = "x = 1\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    # UTF-8 as dekko writes it: a MAP.md heading holds a non-ASCII dash,
+    # which Windows' default encoding would turn into other bytes.
+    path.write_text(content, encoding="utf-8")
 
 
 def test_discover_filters(tmp_path: Path) -> None:
