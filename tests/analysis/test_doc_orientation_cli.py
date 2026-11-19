@@ -515,3 +515,25 @@ def test_summary_of_a_docs_only_repo_has_no_empty_code_lines(
 
     assert "languages:" not in out
     assert "directories (files/symbols" not in out
+
+
+def test_a_test_doc_left_out_with_tests_is_not_told_to_pass_tests(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "SUMMARY.md").write_text(
+        "# S\n\n- [a](../alpha/a1.md)\n"
+    )
+    root = _two_topics(tmp_path)
+
+    _, out, _ = _run(
+        capsys,
+        "communities",
+        "tests/SUMMARY.md",
+        "--tests",
+        "--root",
+        str(root),
+    )
+
+    assert "pass --tests" not in out
+    assert "table of contents" in out

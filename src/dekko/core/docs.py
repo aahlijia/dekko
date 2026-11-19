@@ -163,9 +163,14 @@ _SCHEME_RE = re.compile(r"^[A-Za-z][\w+.-]*:")
 _ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L?(\d+))?$")
 _WIKI_RE = re.compile(r"!?\[\[(?!\s)([^\[\]\n]+?)(?<!\s)\]\]")
 _HREF_RE = re.compile(r"""\bhref=["'](/[^"'#?\s]*)(?:#([^"'\s]*))?["']""")
-_RST_DOC_ROLE_RE = re.compile(r":doc:`([^`]+)`")
+# ``:doc:`` alone: ``:external+numpy:doc:`` names another project's page.
+_RST_DOC_ROLE_RE = re.compile(r"(?<![\w:+-]):doc:`([^`]+)`")
 _RST_TOCTREE_RE = re.compile(r"^(\s*)\.\.\s+toctree::")
 _TOC_SUFFIX_RE = re.compile(r"\.(?:rst|md|mdx|txt)$", re.IGNORECASE)
+# Pages Sphinx makes itself, which a toctree may list.
+_SPHINX_PAGES = frozenset({"self", "genindex", "modindex", "search"})
+# A MyST toctree option: a ``---`` fence line or ``key: value``.
+_MYST_OPTION_RE = re.compile(r"^(?:---|[\w-]+:(?:\s|$))")
 # The block tag a toctree's body is read under; braces keep it apart
 # from any language tag ``_tag`` gives.
 _TOCTREE = "{toctree}"
@@ -460,7 +465,9 @@ def _rst_line_candidates(line: str, num: int) -> list[Candidate]:
         cands += _link_candidate(m.group(2), m.group(1).strip(), num)
     rest = _RST_LINK_RE.sub(" ", line)
     for m in _RST_DOC_ROLE_RE.finditer(rest):
-        cands.append(Candidate(num, _role_target(m.group(1)), "route", "path"))
+        target = _role_target(m.group(1))
+        if not _SCHEME_RE.match(target):
+            cands.append(Candidate(num, target, "route", "path"))
     rest = _RST_DOC_ROLE_RE.sub(" ", rest)
     for pattern in (_RST_LITERAL_RE, _RST_ROLE_RE, _RST_INTERPRETED_RE):
         for m in pattern.finditer(rest):
@@ -494,13 +501,14 @@ def _block_candidates(line: str, num: int, tag: str) -> list[Candidate]:
 def _toctree_entry(line: str, num: int) -> list[Candidate]:
     """A toctree entry (``install``, ``Title <guide/start>``) as a route.
 
-    Options, ``self``, globs and URLs name no one doc.
+    Options (RST ``:opt:``, MyST ``key: value`` and its ``---``
+    fences), Sphinx's own pages, globs and URLs name no one doc.
     """
     entry = line.strip()
-    if not entry or entry.startswith(":"):
+    if not entry or entry.startswith(":") or _MYST_OPTION_RE.match(entry):
         return []
     target = _role_target(entry)
-    if target == "self" or _SCHEME_RE.match(target):
+    if target in _SPHINX_PAGES or _SCHEME_RE.match(target):
         return []
     if any(c in target for c in "*?["):
         return []

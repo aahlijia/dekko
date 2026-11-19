@@ -537,3 +537,61 @@ def test_front_matter_slugs_and_permalinks_route_to_their_doc(
         "docs/z.md",
     ]
     assert index.dangling == []
+
+
+def test_sphinx_built_in_pages_and_other_projects_never_dangle(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.rst").write_text(
+        "Index\n=====\n\n"
+        ".. toctree::\n\n   genindex\n   modindex\n   search\n\n"
+        "See :external+numpy:doc:`reference/index` and "
+        ":doc:`numpy:user/index`.\n"
+    )
+
+    index = build_doc_index(tmp_path, ["docs/index.rst"], [])
+
+    assert index.dangling == []
+
+
+def test_a_myst_toctree_options_block_is_not_entries(tmp_path: Path) -> None:
+    (tmp_path / "docs" / "guide").mkdir(parents=True)
+    (tmp_path / "docs" / "index.md").write_text(
+        "# Index\n\n```{toctree}\n---\nmaxdepth: 2\ncaption: Parts\n---\n"
+        "guide/start\n```\n"
+    )
+    (tmp_path / "docs" / "guide" / "start.md").write_text("# Start\n")
+
+    index = build_doc_index(
+        tmp_path, ["docs/index.md", "docs/guide/start.md"], []
+    )
+
+    assert [e.target for e in index.edges] == ["docs/guide/start.md"]
+    assert index.dangling == []
+
+
+def test_a_page_in_a_folder_only_a_build_makes_never_dangles(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "index.rst").write_text(
+        "Index\n=====\n\n.. toctree::\n\n   auto_examples/index\n"
+    )
+
+    index = build_doc_index(tmp_path, ["docs/index.rst"], [])
+
+    assert index.dangling == []
+
+
+def test_a_slug_answers_only_under_its_own_root(tmp_path: Path) -> None:
+    for top in ("docs", "blog"):
+        (tmp_path / top).mkdir()
+    (tmp_path / "docs" / "intro.md").write_text(
+        "---\nslug: /start\n---\n# I\n"
+    )
+    (tmp_path / "blog" / "post.md").write_text("# P\n[b](/blog/start)\n")
+
+    index = build_doc_index(tmp_path, ["blog/post.md", "docs/intro.md"], [])
+
+    assert index.edges == []

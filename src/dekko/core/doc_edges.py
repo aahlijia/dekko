@@ -348,7 +348,7 @@ def _route(
     if route.startswith("/"):
         missing = _route_should_exist(targets, route)
     else:
-        missing = not _on_disk(targets.root, bases[0])
+        missing = _should_be_on_disk(targets.root, bases[0])
     if not missing:
         return None
     return Broken(_with_anchor(route, cand.anchor), "missing")
@@ -364,17 +364,26 @@ def _slug_hits(targets: DocTargets, route: str) -> list[str]:
         if not root:
             hits += targets.slugs.get(path, [])
         elif path.startswith(root + "/"):
-            hits += targets.slugs.get(path[len(root) + 1 :], [])
+            hits += [
+                doc
+                for doc in targets.slugs.get(path[len(root) + 1 :], [])
+                if doc.startswith(root + "/")
+            ]
     return hits
 
 
-def _on_disk(root: Path, base: str) -> bool:
-    """Whether a relative Sphinx doc name is some file the doc index
-    doesn't read (a notebook, a ``.txt`` page) or a folder."""
+def _should_be_on_disk(root: Path, base: str) -> bool:
+    """Whether a relative Sphinx doc name that reached no doc is broken.
+
+    Its folder must exist (a folder only a build makes, such as
+    sphinx-gallery's ``auto_examples/``, isn't there on a clean
+    checkout), and nothing by that name may be in it: a notebook or a
+    ``.txt`` page is a page the doc index doesn't read.
+    """
     where = root / base
-    if where.exists():
-        return True
-    return where.parent.is_dir() and any(where.parent.glob(where.name + ".*"))
+    if not where.parent.is_dir() or where.exists():
+        return False
+    return not any(where.parent.glob(where.name + ".*"))
 
 
 def _route_should_exist(targets: DocTargets, route: str) -> bool:

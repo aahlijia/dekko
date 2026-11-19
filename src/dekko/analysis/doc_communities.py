@@ -95,7 +95,7 @@ def run(
     """
     report = describe(index, tests=tests)
     if target is not None:
-        return _run_target(index, report, target, as_json)
+        return _run_target(index, report, target, as_json, tests)
     if as_json:
         doc = {
             "view": "docs",
@@ -148,7 +148,11 @@ def _community_json(c: comm.Community) -> dict:
 
 
 def _run_target(
-    index: MapIndex, report: comm.Report, target: str, as_json: bool
+    index: MapIndex,
+    report: comm.Report,
+    target: str,
+    as_json: bool,
+    tests: bool = False,
 ) -> int:
     found = docs_mod.match_doc(index, target)
     if len(found) != 1:
@@ -171,7 +175,7 @@ def _run_target(
         }
         print(json.dumps(doc, indent=2))
         return EXIT_OK
-    print(_target_text(report, path, cid, links))
+    print(_target_text(report, path, cid, links, tests))
     return EXIT_OK
 
 
@@ -180,10 +184,11 @@ def _target_text(
     path: str,
     cid: int | None,
     links: list[tuple[int | None, int]],
+    tests: bool = False,
 ) -> str:
     by_id = {c.id: c for c in report.communities}
     if path not in report.nodes:
-        if is_test_doc(path):
+        if is_test_doc(path) and not tests:
             return (
                 f"{path} is a test doc, left out of the default view; "
                 "pass --tests"
