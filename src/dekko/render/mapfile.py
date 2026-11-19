@@ -23,6 +23,7 @@ from dekko import selfcheck
 from dekko.core import languages, walker
 from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.classify import is_test_path
+from dekko.core.doc_edges import DocEdge, is_test_doc
 from dekko.core.docs import DocDangling, DocLink, DocSection
 from dekko.core.model import (
     CallGraph,
@@ -880,6 +881,11 @@ class MapIndex:
         doc_links_by_target: Symbol id or file path → ``doc_links``
             indexes (an ambiguous link is filed under each candidate).
         doc_links_by_doc: Doc path → its ``doc_links`` indexes.
+        doc_edges: Links from one doc to another; ``section`` indexes
+            the linking section in ``doc_sections``.
+        doc_edges_out: Doc path → indexes of the ``doc_edges`` it holds.
+        doc_edges_in: Doc path → indexes of the ``doc_edges`` that
+            reach it (an ambiguous link is filed under each candidate).
         has_doc_index: Whether the map was built by a dekko that
             indexes docs (false for older maps and in-memory indexes).
         type_uses: Every parameter/return annotation on a
@@ -990,6 +996,9 @@ class MapIndex:
     doc_dangling: list[DocDangling] = field(default_factory=list)
     doc_links_by_target: dict[str, list[int]] = field(default_factory=dict)
     doc_links_by_doc: dict[str, list[int]] = field(default_factory=dict)
+    doc_edges: list[DocEdge] = field(default_factory=list)
+    doc_edges_out: dict[str, list[int]] = field(default_factory=dict)
+    doc_edges_in: dict[str, list[int]] = field(default_factory=dict)
     has_doc_index: bool = False
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
@@ -1357,7 +1366,14 @@ def _filter_docs(
         for d in src.doc_dangling
         if not is_test_path(src.doc_sections[d.section].path)
     ]
+    out.doc_edges = [
+        kept
+        for e in src.doc_edges
+        if not is_test_doc(src.doc_sections[e.section].path)
+        and (kept := _prod_doc_edge(e)) is not None
+    ]
     _index_doc_links(out)
+    _index_doc_edges(out)
 
 
 def _prod_doc_link(link: DocLink, by_id: dict[str, Symbol]) -> DocLink | None:
@@ -1375,6 +1391,15 @@ def _prod_doc_link(link: DocLink, by_id: dict[str, Symbol]) -> DocLink | None:
     if not kept:
         return None
     return replace(link, candidates=kept)
+
+
+def _prod_doc_edge(edge: DocEdge) -> DocEdge | None:
+    """``edge`` with its test-doc choices removed, or ``None`` if none
+    is left."""
+    if not edge.candidates:
+        return None if is_test_doc(edge.target) else edge
+    kept = tuple(c for c in edge.candidates if not is_test_doc(c))
+    return replace(edge, candidates=kept) if kept else None
 
 
 def _filter_reads(
@@ -1989,7 +2014,14 @@ def _load_docs(index: MapIndex, doc: dict) -> None:
     index.doc_dangling = [
         _from_known(DocDangling, d) for d in doc.get("doc_dangling", [])
     ]
+    index.doc_edges = [
+        _from_known(
+            DocEdge, {**d, "candidates": tuple(d.get("candidates", ()))}
+        )
+        for d in doc.get("doc_edges", [])
+    ]
     _index_doc_links(index)
+    _index_doc_edges(index)
 
 
 def _index_doc_links(index: MapIndex) -> None:
@@ -2001,6 +2033,17 @@ def _index_doc_links(index: MapIndex) -> None:
             index.doc_links_by_target.setdefault(target, []).append(i)
         doc = index.doc_sections[link.section].path
         index.doc_links_by_doc.setdefault(doc, []).append(i)
+
+
+def _index_doc_edges(index: MapIndex) -> None:
+    """Rebuild the outgoing and incoming lookups from ``doc_edges``."""
+    index.doc_edges_out = {}
+    index.doc_edges_in = {}
+    for i, edge in enumerate(index.doc_edges):
+        source = index.doc_sections[edge.section].path
+        index.doc_edges_out.setdefault(source, []).append(i)
+        for target in edge.candidates or (edge.target,):
+            index.doc_edges_in.setdefault(target, []).append(i)
 
 
 def _load_type_uses(index: MapIndex, doc: dict) -> None:
