@@ -9,6 +9,8 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-11-19
+
 ### Added
 - **Docs linked to each other, for repos that are mostly docs.** A
   docs site, a spec folder or a notes vault now gets a map of its own.
